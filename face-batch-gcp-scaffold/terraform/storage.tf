@@ -1,0 +1,59 @@
+resource "google_storage_bucket" "archive" {
+  name                        = var.source_bucket_name
+  project                     = var.project_id
+  location                    = "US"
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = false
+  labels                      = var.labels
+
+  # Staged media is intentionally ephemeral. GCS otherwise defaults new buckets
+  # to a soft-delete retention window, which would keep deleted objects recoverable.
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age            = var.staging_ttl_days
+      matches_prefix = [var.staging_prefix]
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+import {
+  to = google_storage_bucket.archive
+  id = var.source_bucket_name
+}
+
+resource "google_storage_bucket_iam_member" "developer_source_reader" {
+  bucket = google_storage_bucket.archive.name
+  role   = "roles/storage.objectViewer"
+  member = "user:${var.developer_email}"
+
+  condition {
+    title       = "Read immutable face-video sources"
+    description = "Restrict developer source reads to the archive prefix."
+    expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${var.source_prefix}')"
+  }
+}
+
+resource "google_storage_bucket_iam_member" "developer_staging_user" {
+  bucket = google_storage_bucket.archive.name
+  role   = "roles/storage.objectUser"
+  member = "user:${var.developer_email}"
+
+  condition {
+    title       = "Manage ephemeral face-video staging objects"
+    description = "Restrict developer object operations to the staging prefix."
+    expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${var.staging_prefix}')"
+  }
+}

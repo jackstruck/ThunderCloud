@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: thundercloud-bulk-download
+Version: 0.1.0
+Requires-Python: >=3.12
+Requires-Dist: beautifulsoup4==4.15.0
+Requires-Dist: google-cloud-storage==3.13.1
+Requires-Dist: httpx==0.28.1
+Requires-Dist: imageio-ffmpeg==0.6.0
+Requires-Dist: yt-dlp==2026.8.19

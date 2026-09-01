@@ -1,0 +1,3 @@
+google-cloud-sdk/
+.secrets/
+bulk-download/input/justpaste_urls.txt

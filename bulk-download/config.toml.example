@@ -1,0 +1,28 @@
+[gcp]
+project = "teak-banner-dome"
+bucket = "teak-banner-dome-bulk-videos"
+prefix = "videos"
+csek_file = "/absolute/path/outside-this-repository/gcs-csek.base64"
+
+[input]
+heylink_file = "input/heylink_urls.txt"
+justpaste_file = "input/justpaste_urls.txt"
+luluvid_file = "input/luluvid_urls.txt"
+
+[local]
+temp_dir = "data/tmp"
+manifest_file = "data/manifest.jsonl"
+
+[http]
+user_agent = "ThunderCloudBulkDownloader/1.0"
+connect_timeout_seconds = 10
+read_timeout_seconds = 60
+max_redirects = 5
+attempts = 3
+backoff_seconds = 2
+max_html_bytes = 5242880
+max_video_bytes = 10737418240
+
+[download]
+chunk_bytes = 8388608
+allowed_content_types = ["video/mp4", "video/webm", "video/quicktime"]

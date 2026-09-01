@@ -1,0 +1,17 @@
+project_id      = "teak-banner-dome"
+region     = "us-central1"
+developer_email = "YOUR_DEVELOPER_ACCOUNT@example.com"
+
+source_bucket_name = "teak-banner-dome-bulk-videos"
+source_prefix      = "videos/"
+staging_prefix     = "face-staging/"
+
+staging_ttl_days = 1
+subnet_cidr      = "10.42.0.0/24"
+
+# Development only. Increase for production after benchmarking.
+db_tier         = "db-f1-micro"
+db_disk_size_gb = 10
+
+# Turn on once you want Terraform deletion protection for the DB.
+db_deletion_protection = false

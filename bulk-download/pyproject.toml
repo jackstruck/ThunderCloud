@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thundercloud-bulk-download"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "beautifulsoup4==4.15.0",
+  "google-cloud-storage==3.13.1",
+  "httpx==0.28.1",
+  "imageio-ffmpeg==0.6.0",
+]
+
+[project.scripts]
+bulk-download = "bulk_download.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
