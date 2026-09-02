@@ -57,3 +57,15 @@ resource "google_storage_bucket_iam_member" "developer_staging_user" {
     expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${var.staging_prefix}')"
   }
 }
+
+resource "google_storage_bucket_iam_member" "batch_worker_staging_user" {
+  bucket = google_storage_bucket.archive.name
+  role   = "roles/storage.objectUser"
+  member = google_service_account.batch_worker.member
+
+  condition {
+    title       = "Manage remote face-video staging objects"
+    description = "Restrict Batch worker object operations to the ephemeral staging prefix."
+    expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${var.staging_prefix}')"
+  }
+}

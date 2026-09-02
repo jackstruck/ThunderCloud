@@ -28,3 +28,16 @@ resource "google_project_iam_audit_config" "kms" {
     log_type = "DATA_WRITE"
   }
 }
+
+resource "google_project_iam_audit_config" "secret_manager" {
+  project = var.project_id
+  service = "secretmanager.googleapis.com"
+
+  audit_log_config {
+    log_type = "DATA_READ"
+  }
+
+  audit_log_config {
+    log_type = "DATA_WRITE"
+  }
+}

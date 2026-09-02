@@ -9,61 +9,85 @@ The remote worker is not ready for the bulk run until the following work is comp
 
 ## 1. Build and validate the GPU image
 
-The current image installs CPU `onnxruntime`, and the ignored ONNX checkpoints are not
-packaged in the image.
+Local build and publication are complete. The CUDA 13.0/cuDNN 9 image pins
+`onnxruntime-gpu==1.29.0`, packages the approved SCRFD and AdaFace checkpoints, verifies
+their SHA-256 values during the build, and retains BGR preprocessing. Its packaging
+verification passed for both model graphs and confirmed that the ONNX Runtime build
+exposes `CUDAExecutionProvider`. The candidate is published immutably as:
 
-- install a CUDA-compatible `onnxruntime-gpu` environment;
-- package the exact approved SCRFD and AdaFace checkpoints in the image;
-- pin and verify both model SHA-256 hashes during the build;
-- retain the configured BGR preprocessing required by the selected AdaFace export;
-- validate that ONNX Runtime selects `CUDAExecutionProvider` on an L4;
-- run the known test clip and compare track counts, embeddings, and quality outputs with
-  the successful local baseline;
-- push the image to Artifact Registry and submit Batch jobs by immutable image digest,
-  not a mutable tag.
+```text
+us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/worker@sha256:5da8096026d0ed126fdd99a7f2d04e8e3b4d09fd47c87fb372495054b1f0cd69
+```
+
+The CUDA 13 image passed strict remote execution of both models on an L4 on
+2026-09-02. These validation gates remain:
+
+- compare track counts, embeddings, and quality outputs with the successful local
+  baseline;
+- submit Batch jobs by the immutable digest above, not its build tag.
+
+This replacement digest includes both Secret Manager retrieval and configurable private
+Cloud SQL routing. Its packaging, model contracts, remote configuration, and in-memory
+secret retrieval passed local validation.
 
 ## 2. Provision a dedicated Batch runtime identity
 
-Terraform does not yet create the remote runtime identity or its Batch-specific IAM.
+Terraform provisioning is complete. Batch is enabled and the keyless runtime identity
+`face-batch-runtime@teak-banner-dome.iam.gserviceaccount.com` exists with only:
 
-- enable the Batch API;
-- create a dedicated Batch worker service account;
-- grant only the required Batch job-agent/reporter permissions;
-- grant Artifact Registry read access;
-- grant prefix-scoped access required to create, read, and delete only
-  `face-staging/` objects;
-- grant Cloud SQL client and instance-user roles;
-- create the corresponding Cloud SQL IAM database user;
-- apply the same least-privilege table grants used by the local developer account;
-- do not create or download a service-account JSON key;
-- verify the runtime identity cannot enumerate unrelated buckets or resources.
+- Batch agent reporting and Cloud Logging write access at project scope;
+- Cloud SQL client and instance-user access at project scope;
+- Artifact Registry read access on `face-batch-worker`;
+- `roles/storage.objectUser` conditioned to objects under `face-staging/`;
+- a `CLOUD_IAM_SERVICE_ACCOUNT` user on `face-batch-pg`.
+
+The account has zero user-managed service-account keys. Your developer account can
+attach it to a Batch job but was not granted token-creation or key-management access.
+Terraform reports no drift after the apply.
+
+The database grants are complete and verified: the runtime user has CONNECT on
+`face_index`, USAGE on `public`, and SELECT/INSERT/UPDATE/DELETE without grant option on
+the five application tables. No ownership, DDL, role-management, or grant privileges
+were assigned.
+
+The first canary must also confirm from the runtime identity that exact staging-object
+operations succeed while bucket enumeration and access outside `face-staging/` fail.
 
 ## 3. Deliver the CSEK securely to the remote worker
 
-The remote worker cannot use the local file at
-`/workspaces/ThunderCloud/.secrets/gcs-csek.base64`.
+Secret Manager delivery is implemented. Terraform creates the regional
+`face-batch-gcs-csek` secret container, DATA_READ/DATA_WRITE audit logging, and one
+secret-level accessor binding for the Batch runtime account. The payload was added as
+version 1 directly through the API, outside Terraform, with CRC32C and byte-for-byte
+verification. Terraform state contains no secret version or payload.
 
-- create a Secret Manager secret outside Terraform state;
-- add the existing Base64 CSEK without printing it or placing it in shell history;
-- grant access only to the dedicated Batch worker service account;
-- retrieve it at runtime directly into memory or a protected temporary file;
-- never place the value in the container image, Terraform state, Batch arguments,
-  environment values, object metadata, application logs, or database records;
-- verify the worker can access only the specific approved secret.
+The worker accepts `FACE_CSEK_SECRET=face-batch-gcs-csek`, retrieves `latest` directly
+into memory, strictly validates it as a Base64 AES-256 key, and retains file-based loading
+for local execution. The payload is not placed in the image, Batch arguments, environment
+values, object metadata, logs, or database records.
+
+The first canary must exercise retrieval as the actual runtime identity and confirm that
+it cannot access any other secret. The developer/project administrators retain their
+inherent administrative access; no additional developer secret-access binding was added.
 
 ## 4. Switch Batch database access to private IP
 
-`worker/db.py` currently forces the Cloud SQL public-IP connector path.
+The worker now validates `FACE_CLOUD_SQL_IP_TYPE` as `PUBLIC` or `PRIVATE` and passes the
+selected route to the Cloud SQL connector. Local execution defaults to `PUBLIC`; Batch
+must set `PRIVATE`. Unit and packaged-image configuration checks pass, and the replacement
+immutable image contains this change.
 
-- make the connector IP type configurable;
-- retain public connector access for local development;
-- configure Batch to use the existing Cloud SQL private IP through the Batch subnet;
-- verify IAM authentication and pgvector operations from the Batch worker;
-- disable Cloud SQL public IP only after local administration no longer requires it.
+The remote canary still must verify IAM authentication and pgvector operations through
+the Batch subnet. Keep Cloud SQL public IP enabled for connector-only local administration
+until that remote path is proven; there are still no authorized networks.
 
 ## 5. Finish the Batch submission and orchestration path
 
-`scripts/submit_batch.py` is an integration scaffold, not a production bulk submitter.
+`scripts/submit_batch.py` now supports a controlled manifest rollout with immutable-image
+enforcement, CSEK staging, persisted job/application IDs, mandatory matching, private
+Cloud SQL configuration, a strict CUDA preflight, bounded concurrency, monitoring,
+sanitized failures, and stop-on-first-infrastructure-error behavior. Retry/resumption
+for a larger production run remains unfinished.
 
 - supply the complete non-secret worker configuration;
 - integrate remote CSEK retrieval;
@@ -99,6 +123,42 @@ Mandatory subject matching does not enable real-world identity assertions. Assoc
 an anonymous subject with an `identity` remains a separate authorized action.
 
 ## 7. Validate remote capacity, retry behavior, and cost
+
+A 10-video controlled rollout was attempted on 2026-09-01 with concurrency 2. The first
+two inputs were staged and their Spot L4 jobs were accepted, but no VM started. Batch
+reported both `CODE_GCE_QUOTA_EXCEEDED` and
+`CODE_GCE_ZONE_RESOURCE_POOL_EXHAUSTED`. Project quota inspection confirmed
+`GPUS_ALL_REGIONS: limit=0`; the regional `NVIDIA_L4_GPUS` and
+`PREEMPTIBLE_NVIDIA_L4_GPUS` counters each show limit 1, but the global zero is
+authoritative. Both jobs were deleted, the remaining eight were not staged, and no worker
+or database write occurred. The two encrypted staging objects remain available for retry
+and are covered by the one-day staging lifecycle rule.
+
+On 2026-09-02, the Cloud Quotas API was enabled and authenticated quota adjustments
+were submitted for `GPUS (all regions)` from 0 to 2 and `Preemptible NVIDIA L4 GPUs`
+in `us-central1` from 1 to 2. Google processed and denied both requests immediately, so
+the effective limits remained 0 and 1 respectively. After the account was enabled, both
+requests were resubmitted on 2026-09-02 and Google denied them again. The effective
+limits still remained 0 and 1 respectively. A reduced request for one global GPU was
+then approved on 2026-09-02 and verified through the Compute API
+(`GPUS_ALL_REGIONS: limit=1, usage=0`). Controlled processing must use concurrency 1;
+regional Spot capacity must still be confirmed at runtime.
+
+The 10-video controlled rollout was retried with concurrency 1 on 2026-09-02. Spot L4
+capacity became available and the first job reached `RUNNING`, proving that both global
+and regional quota now permit the VM. The strict GPU preflight then failed on all three
+task attempts because the worker image's ONNX Runtime requires CUDA 13 and could not
+load `libcublasLt.so.13`. The worker never processed the video, the remaining nine jobs
+were not submitted, and the failed input remains in CSEK-encrypted staging for retry or
+lifecycle cleanup.
+
+The image was rebuilt on CUDA 13.0/cuDNN 9, published under the replacement digest
+above, and passed strict CUDA execution on an L4. After correcting the Batch runnable to
+invoke `python -m worker` explicitly, the canary and two additional controlled videos
+completed successfully, including matching, Cloud SQL commit, and staging cleanup. The
+next on-demand job was stopped before allocation by `GPU resource pool exhausted`, so
+six later controlled inputs were not submitted. Three of the original ten controlled
+videos are complete; capacity retry policy remains outstanding.
 
 Before submitting the full remainder:
 

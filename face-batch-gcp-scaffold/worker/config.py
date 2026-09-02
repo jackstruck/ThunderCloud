@@ -18,10 +18,12 @@ class Settings:
     bucket: str
     source_prefix: str
     staging_prefix: str
-    csek_file: Path
+    csek_file: Path | None
+    csek_secret: str | None
     cloud_sql_instance: str
     db_user: str
     db_name: str = "face_index"
+    cloud_sql_ip_type: str = "PUBLIC"
     detector_model: Path = Path("models/scrfd.onnx")
     embedding_model: Path = Path("models/adaface.onnx")
     face_output_dir: Path | None = None
@@ -39,15 +41,23 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        csek_secret = os.getenv("FACE_CSEK_SECRET")
+        csek_file = os.getenv("FACE_CSEK_FILE")
         return cls(
             project_id=os.getenv("FACE_PROJECT_ID", "teak-banner-dome"),
             bucket=os.getenv("FACE_BUCKET", "teak-banner-dome-bulk-videos"),
             source_prefix=os.getenv("FACE_SOURCE_PREFIX", "videos/"),
             staging_prefix=os.getenv("FACE_STAGING_PREFIX", "face-staging/"),
-            csek_file=Path(os.getenv("FACE_CSEK_FILE", "/run/secrets/gcs-csek.base64")),
+            csek_file=(
+                Path(csek_file or "/run/secrets/gcs-csek.base64")
+                if not csek_secret
+                else None
+            ),
+            csek_secret=csek_secret,
             cloud_sql_instance=_required("FACE_CLOUD_SQL_INSTANCE"),
             db_user=_required("FACE_DB_USER"),
             db_name=os.getenv("FACE_DB_NAME", "face_index"),
+            cloud_sql_ip_type=os.getenv("FACE_CLOUD_SQL_IP_TYPE", "PUBLIC").upper(),
             detector_model=Path(os.getenv("FACE_DETECTOR_MODEL", "models/scrfd.onnx")),
             embedding_model=Path(
                 os.getenv("FACE_EMBEDDING_MODEL", "models/adaface.onnx")
@@ -72,6 +82,8 @@ class Settings:
         )
 
     def validate(self) -> None:
+        if (self.csek_file is None) == (self.csek_secret is None):
+            raise ValueError("configure exactly one of FACE_CSEK_FILE or FACE_CSEK_SECRET")
         if not self.source_prefix.endswith("/") or not self.staging_prefix.endswith(
             "/"
         ):
@@ -91,3 +103,5 @@ class Settings:
             raise ValueError("match threshold must be between 0 and 1")
         if self.embedding_color_order not in {"RGB", "BGR"}:
             raise ValueError("embedding color order must be RGB or BGR")
+        if self.cloud_sql_ip_type not in {"PUBLIC", "PRIVATE"}:
+            raise ValueError("Cloud SQL IP type must be PUBLIC or PRIVATE")

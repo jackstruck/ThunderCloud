@@ -56,3 +56,14 @@ resource "google_sql_user" "developer_iam" {
   name     = var.developer_email
   type     = "CLOUD_IAM_USER"
 }
+
+resource "google_sql_user" "batch_worker_iam" {
+  project  = var.project_id
+  instance = google_sql_database_instance.postgres.name
+  # Cloud SQL PostgreSQL omits this suffix because database usernames are limited.
+  name = trimsuffix(
+    google_service_account.batch_worker.email,
+    ".gserviceaccount.com",
+  )
+  type = "CLOUD_IAM_SERVICE_ACCOUNT"
+}

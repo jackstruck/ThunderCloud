@@ -31,8 +31,8 @@ class GcsUri:
         return f"gs://{self.bucket}/{self.object_name}"
 
 
-def load_csek(path: Path) -> bytes:
-    encoded = path.read_bytes().strip()
+def decode_csek(encoded: bytes) -> bytes:
+    encoded = encoded.strip()
     try:
         raw = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
@@ -40,6 +40,30 @@ def load_csek(path: Path) -> bytes:
     if len(raw) != 32:
         raise ValueError("CSEK must decode to exactly 32 bytes")
     return raw
+
+
+def load_csek(path: Path) -> bytes:
+    return decode_csek(path.read_bytes())
+
+
+def load_csek_secret(project: str, secret_id: str) -> bytes:
+    from google.cloud import secretmanager
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", secret_id):
+        raise ValueError("Secret Manager secret ID contains unsupported characters")
+    client = secretmanager.SecretManagerServiceClient()
+    response = client.access_secret_version(
+        request={"name": f"projects/{project}/secrets/{secret_id}/versions/latest"}
+    )
+    return decode_csek(response.payload.data)
+
+
+def load_configured_csek(project: str, path: Path | None, secret_id: str | None) -> bytes:
+    if secret_id:
+        return load_csek_secret(project, secret_id)
+    if path is None:
+        raise ValueError("CSEK source is not configured")
+    return load_csek(path)
 
 
 def validate_sha256(value: str | None) -> str | None:

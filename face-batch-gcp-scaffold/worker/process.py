@@ -12,7 +12,7 @@ from .db import Database, Versions
 from .detector import ScrfdDetector
 from .embedder import OnnxFaceEmbedder
 from .pipeline import process_video
-from .storage import StorageRepository, load_csek, validate_sha256
+from .storage import StorageRepository, load_configured_csek, validate_sha256
 from .tracker import ByteTrackTracker
 
 
@@ -76,7 +76,9 @@ def run(
     settings.validate()
     uuid.UUID(job_id)
     expected_sha256 = validate_sha256(expected_sha256)
-    csek = load_csek(settings.csek_file)
+    csek = load_configured_csek(
+        settings.project_id, settings.csek_file, settings.csek_secret
+    )
     storage = StorageRepository(
         settings.project_id,
         settings.bucket,
@@ -107,7 +109,12 @@ def run(
         logging.getLogger(__name__).info(
             "face_crops_exported", extra={"job_id": job_id, "path": str(output_path)}
         )
-    database = Database(settings.cloud_sql_instance, settings.db_user, settings.db_name)
+    database = Database(
+        settings.cloud_sql_instance,
+        settings.db_user,
+        settings.db_name,
+        settings.cloud_sql_ip_type,
+    )
     try:
         wrote = database.commit_results(
             job_id=job_id,

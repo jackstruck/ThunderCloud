@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import Settings
 from .manifest import ManifestItem, read_manifest, select_items
-from .storage import GcsUri, StorageRepository, load_csek, validate_sha256
+from .storage import GcsUri, StorageRepository, load_configured_csek, validate_sha256
 
 
 def parser() -> argparse.ArgumentParser:
@@ -80,7 +80,9 @@ def main(argv=None) -> None:
     args = parser().parse_args(argv)
     settings = Settings.from_env()
     settings.validate()
-    csek = load_csek(settings.csek_file)
+    csek = load_configured_csek(
+        settings.project_id, settings.csek_file, settings.csek_secret
+    )
     storage = StorageRepository(
         settings.project_id,
         settings.bucket,

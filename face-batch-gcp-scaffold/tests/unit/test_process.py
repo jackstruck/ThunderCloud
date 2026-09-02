@@ -10,7 +10,14 @@ def settings(tmp_path):
     key = tmp_path / "key"
     key.write_text("unused", encoding="ascii")
     return Settings(
-        "p", "bucket", "videos/", "face-staging/", key, "instance", "user@example.com"
+        project_id="p",
+        bucket="bucket",
+        source_prefix="videos/",
+        staging_prefix="face-staging/",
+        csek_file=key,
+        csek_secret=None,
+        cloud_sql_instance="instance",
+        db_user="user@example.com",
     )
 
 
@@ -20,7 +27,7 @@ def settings(tmp_path):
 @patch("worker.process.ScrfdDetector")
 @patch("worker.process.Database")
 @patch("worker.process.StorageRepository")
-@patch("worker.process.load_csek", return_value=b"x" * 32)
+@patch("worker.process.load_configured_csek", return_value=b"x" * 32)
 def test_delete_occurs_only_after_commit(
     load_key,
     storage_class,
@@ -55,7 +62,7 @@ def test_delete_occurs_only_after_commit(
 @patch("worker.process.ScrfdDetector")
 @patch("worker.process.Database")
 @patch("worker.process.StorageRepository")
-@patch("worker.process.load_csek", return_value=b"x" * 32)
+@patch("worker.process.load_configured_csek", return_value=b"x" * 32)
 def test_failed_commit_leaves_staging(
     load_key,
     storage_class,
@@ -85,7 +92,7 @@ def test_failed_commit_leaves_staging(
 
 @patch("worker.process.Database")
 @patch("worker.process.StorageRepository")
-@patch("worker.process.load_csek", return_value=b"x" * 32)
+@patch("worker.process.load_configured_csek", return_value=b"x" * 32)
 def test_hash_mismatch_aborts_before_database_or_delete(
     load_key, storage_class, database_class, tmp_path
 ):

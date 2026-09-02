@@ -19,10 +19,15 @@ class Versions:
 
 
 class Database:
-    def __init__(self, instance: str, user: str, database: str):
+    def __init__(
+        self, instance: str, user: str, database: str, ip_type: str = "PUBLIC"
+    ):
+        if ip_type not in {"PUBLIC", "PRIVATE"}:
+            raise ValueError("Cloud SQL IP type must be PUBLIC or PRIVATE")
         self.instance = instance
         self.user = user
         self.database = database
+        self.ip_type = ip_type
         self._connector = None
 
     def connect(self):
@@ -36,7 +41,7 @@ class Database:
             user=self.user,
             db=self.database,
             enable_iam_auth=True,
-            ip_type=IPTypes.PUBLIC,
+            ip_type=(IPTypes.PRIVATE if self.ip_type == "PRIVATE" else IPTypes.PUBLIC),
         )
 
     def close(self) -> None:

@@ -11,6 +11,7 @@ dependencies = [
   "av>=14,<17",
   "cloud-sql-python-connector[pg8000]>=1.16,<2",
   "google-cloud-storage>=3,<4",
+  "google-cloud-secret-manager>=2.25,<3",
   "numpy>=2,<3",
   "onnxruntime>=1.21,<2",
   "opencv-python-headless>=4.11,<5",

@@ -53,3 +53,23 @@ output "cloud_sql_public_ip" {
 output "cloud_sql_database" {
   value = google_sql_database.app.name
 }
+
+output "batch_worker_service_account" {
+  description = "Keyless service account attached to remote Batch worker VMs."
+  value       = google_service_account.batch_worker.email
+}
+
+output "batch_worker_database_user" {
+  description = "Cloud SQL PostgreSQL IAM username for the Batch worker."
+  value       = google_sql_user.batch_worker_iam.name
+}
+
+output "batch_worker_csek_secret" {
+  description = "Secret Manager secret ID containing the Base64 GCS CSEK."
+  value       = google_secret_manager_secret.gcs_csek.secret_id
+}
+
+output "postgres_admin_password_secret" {
+  description = "Secret Manager secret ID retaining the PostgreSQL administrator password."
+  value       = google_secret_manager_secret.postgres_admin_password.secret_id
+}

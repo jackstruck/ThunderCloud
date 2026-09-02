@@ -16,3 +16,11 @@ resource "google_artifact_registry_repository_iam_member" "developer_writer" {
   role       = "roles/artifactregistry.writer"
   member     = "user:${var.developer_email}"
 }
+
+resource "google_artifact_registry_repository_iam_member" "batch_worker_reader" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.worker.location
+  repository = google_artifact_registry_repository.worker.name
+  role       = "roles/artifactregistry.reader"
+  member     = google_service_account.batch_worker.member
+}

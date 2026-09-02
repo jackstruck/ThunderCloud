@@ -14,5 +14,5 @@ __pycache__/
 .coverage
 htmlcov/
 *.onnx
-models/
+models/*.onnx
 data/

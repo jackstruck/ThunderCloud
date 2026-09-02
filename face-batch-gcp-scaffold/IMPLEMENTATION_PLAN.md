@@ -85,12 +85,17 @@ Use the Terraform in `terraform/`.
 - regional VPC and private subnet with Private Google Access;
 - private service networking range for Cloud SQL;
 - the existing `teak-banner-dome-bulk-videos` bucket is adopted as an input rather than created or destroyed by this Terraform;
-- bucket IAM needed for the local developer workflow; Batch worker IAM is added during remote migration;
+- bucket IAM for the local developer workflow plus prefix-conditioned `face-staging/`
+  object access for the keyless Batch runtime identity;
 - a short lifecycle deletion fallback whose condition matches only `face-staging/`;
 - a durable `face-probes/` prefix with separate least-privilege IAM and no staging
   lifecycle rule when the probe workflow is implemented;
 - KMS key ring and CMEK for Cloud SQL only;
 - Artifact Registry Docker repository;
+- a dedicated keyless Batch worker service account with repository-read, Batch reporting,
+  log-writing, Cloud SQL connection, and Cloud SQL IAM login permissions;
+- a separate regional Secret Manager backup of the PostgreSQL administrator password,
+  with no Batch runtime access and with its payload managed outside Terraform state;
 - developer IAM for local GCS access, Artifact Registry image pushes, and Cloud SQL access;
 - Cloud SQL PostgreSQL 17 instance with:
   - public IP for connector-only local access and private IP for the later Batch worker;
@@ -100,7 +105,11 @@ Use the Terraform in `terraform/`.
   - pgvector-compatible PostgreSQL version;
 - IAM database user representing the developer account.
 
-Batch APIs, its runtime service account, Batch-specific IAM, and remote CSEK delivery are deferred until the local milestone succeeds. The VPC and private Cloud SQL path may be provisioned now so the durable database does not need to be replaced during migration.
+The Batch API, runtime service account, Batch-specific IAM, and corresponding Cloud SQL
+IAM database user are provisioned. No service-account key is created. Remote CSEK
+delivery remains a separate Secret Manager step. The runtime database user has received
+the DML-only grants in `scripts/db_grants.sql`: database CONNECT, schema USAGE, and
+SELECT/INSERT/UPDATE/DELETE on the five application tables, without grant option.
 
 ### Inputs to decide before apply
 
@@ -158,6 +167,25 @@ Suggested runtime:
 - NumPy
 - Google Cloud Storage client
 - Google Cloud SQL Python Connector (automatic IAM database authentication; public IP locally, private IP in Batch)
+
+The remote GPU image is built from `nvidia/cuda:13.0.1-cudnn-runtime-ubuntu24.04`
+with Python 3.12 and pinned `onnxruntime-gpu==1.29.0`. It packages only the approved
+SCRFD and AdaFace ONNX exports, verifies their recorded SHA-256 values at build time,
+and preserves the AdaFace export's required BGR input order. The image verification
+script rejects a CPU-only ONNX Runtime build and checks both model contracts. Its
+strict mode must also execute both models with `CUDAExecutionProvider` on an L4 before
+the bulk canary.
+
+Published candidate (use this digest, never the tag, in Batch jobs):
+
+```text
+us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/worker@sha256:5da8096026d0ed126fdd99a7f2d04e8e3b4d09fd47c87fb372495054b1f0cd69
+```
+
+This replacement digest includes Secret Manager CSEK retrieval and configurable Cloud
+SQL public/private routing. Use `FACE_CSEK_SECRET=face-batch-gcs-csek` and
+`FACE_CLOUD_SQL_IP_TYPE=PRIVATE` for Batch; local execution retains file-based CSEK
+loading and the default `PUBLIC` connector route.
 - PostgreSQL driver
 
 ### Model licensing gate
@@ -315,11 +343,20 @@ Job defaults:
 - custom VPC/subnet with no ingress firewall rules;
 - Cloud Logging.
 
-The Batch worker will use Cloud SQL private IP through the existing VPC. Before the first remote run, create the Batch runtime service account, its IAM database user and SQL grants, and a secure remote CSEK delivery mechanism. The recommended key mechanism is Secret Manager with access limited to that runtime service account and direct in-memory retrieval by the worker.
+The Batch worker will use Cloud SQL private IP through the existing VPC. Its runtime
+service account, IAM database user, SQL grants, and Secret Manager CSEK delivery are
+provisioned. Secret version 1 contains the existing Base64 CSEK, was uploaded outside
+Terraform with CRC32C verification, and is read directly into worker memory through
+`FACE_CSEK_SECRET=face-batch-gcs-csek`. The secret payload is absent from Terraform
+state, images, job arguments, environment values, object metadata, logs, and database
+records.
 
 Initial remote integration may use an ephemeral external IP because Batch-managed GPU-driver installation fetches drivers at runtime. The VPC has no ingress firewall rules. After the worker is stable, build a custom Batch VM image with compatible NVIDIA drivers and switch the job to `noExternalIpAddress=true`, relying on Private Google Access for Google APIs/services.
 
-The job payload should pass only references and non-secret configuration. Never pass the CSEK in command-line arguments, the container image, object metadata, logs, or the Batch job definition. The approved remote key-delivery mechanism is a remaining decision in `outstanding.md`.
+The job payload should pass only references and non-secret configuration. Never pass the
+CSEK in command-line arguments, the container image, object metadata, logs, or the Batch
+job definition. The approved remote key-delivery mechanism is direct in-memory access to
+the dedicated Secret Manager secret by the Batch runtime service account.
 
 ## Phase 8 — Local selection and staging CLI
 
