@@ -50,3 +50,31 @@ def test_database_selects_private_connector_path():
 def test_database_rejects_unknown_connector_path():
     with pytest.raises(ValueError, match="PUBLIC or PRIVATE"):
         Database("instance", "user", "db", "INTERNAL")
+
+
+class RankingCursor:
+    def __init__(self):
+        self.results = []
+        self.statements = []
+
+    def execute(self, statement, parameters):
+        self.statements.append((statement, parameters))
+        self.results = (
+            [("b-subject", 0.8, "label-b"), ("a-subject", 0.8, None)]
+            if "FROM subject" in statement
+            else []
+        )
+
+    def fetchall(self):
+        return self.results
+
+
+def test_rank_subjects_filters_version_and_has_deterministic_tie_break():
+    cursor = RankingCursor()
+    ranked = Database.rank_subjects(cursor, [1, 0], "adaface-v1", 2)
+    sql, parameters = cursor.statements[0]
+    assert "model_version = %s" in sql
+    assert "subject_id" in sql.split("ORDER BY", 1)[1]
+    assert parameters[1] == "adaface-v1"
+    assert [candidate.subject_id for candidate in ranked] == ["b-subject", "a-subject"]
+    assert ranked[0].display_name == "label-b"

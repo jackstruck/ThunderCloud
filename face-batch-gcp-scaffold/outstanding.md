@@ -231,11 +231,11 @@ Approve retention/deletion periods for:
 - match decisions and job metadata;
 - Cloud SQL backups and point-in-time recovery logs;
 - locally generated review crops;
-- future persistent probe media, embeddings, and ranked result snapshots.
+- locally generated ephemeral probe review crops and JSON output.
 
-The `face-staging/` lifecycle fallback must remain restricted to that prefix. Future
-durable `face-probes/` media must use the CSEK and must not inherit the one-day staging
-lifecycle rule.
+The `face-staging/` lifecycle fallback remains restricted to that prefix. Local probe
+media and results are never uploaded or persisted, so they have no server-side
+retention or deletion mechanism.
 
 ## Recommended rollout
 

@@ -7,6 +7,9 @@ durable embeddings, queue state, and provenance in Cloud SQL PostgreSQL/pgvector
 `CLOUD_RUN_IMPLEMENTATION_PLAN.md` for the managed-worker migration.
 See `CLEANUP_ASSESSMENT.md` for what can be removed now versus what must remain through
 bulk reconciliation and the rollback window.
+See `FUTURE_VIDEOS.md` for safely uploading, recording, enqueueing, launching, and
+reconciling videos added after the initial corpus.
+See `PROBE_IMPLEMENTATION_PLAN.md` for the probe security and acceptance contract.
 
 ## Current topology
 
@@ -112,6 +115,33 @@ When `FACE_OUTPUT_DIR` is set, each job also writes its retained best face crops
 job-specific directory. Each directory contains a JSON manifest with track, timestamp,
 quality, and source provenance. These local biometric artifacts are mode `0600` and are
 not uploaded to GCS.
+
+## Ephemeral local probes
+
+The `face-probe` command reads a local JPEG, PNG, or MP4, runs the shared inference
+pipeline, and performs a read-only search of model-compatible gallery subjects. Probe
+media, embeddings, and results are never uploaded or written to Cloud SQL. Results are
+ranked candidates rather than automatic identity decisions; each includes the nullable
+operator-managed display name and all current succeeded training-track provenance.
+
+The command creates a private local review directory containing `result.json` and the
+exact detected face or retained track crops used for comparison:
+
+```bash
+face-probe submit --file ./person.jpg --top-k 10
+face-probe submit --file ./short-clip.mp4 --top-k 10
+face-probe submit --file ./person.jpg --top-k 10 --review-output-dir ./probe-review
+face-probe submit --crop-dir ./existing-track-crops --top-k 10
+```
+
+Review directories are mode `0700`; JSON and JPEG files are mode `0600` and never
+overwritten. Inputs are limited to JPEG/PNG at 25 MiB and 50 megapixels, or MP4 at
+250 MiB and 15 minutes. Local gallery access uses the existing developer ADC and Cloud
+SQL IAM permissions; there is no remote probe service.
+
+The retained `track-000001` fixture was tested through both `--crop-dir` and a temporary
+MP4 using the real CPU inference stack and live read-only gallery connection. Both
+ranked its enrolled subject first (similarities `0.9776067747` and `0.9114904947`).
 
 ## Tests
 

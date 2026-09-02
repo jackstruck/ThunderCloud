@@ -30,6 +30,10 @@ class Settings:
     embedding_color_order: str = "RGB"
     detector_fps: float = 8.0
     max_video_bytes: int = 10_737_418_240
+    max_probe_image_bytes: int = 26_214_400
+    max_probe_image_pixels: int = 50_000_000
+    max_probe_video_bytes: int = 262_144_000
+    max_probe_video_duration_seconds: float = 900.0
     best_n: int = 5
     top_k: int = 5
     match_threshold: float = 0.55
@@ -66,9 +70,23 @@ class Settings:
             face_output_dir=(
                 Path(value) if (value := os.getenv("FACE_OUTPUT_DIR")) else None
             ),
-            embedding_color_order=os.getenv("FACE_EMBEDDING_COLOR_ORDER", "RGB").upper(),
+            embedding_color_order=os.getenv(
+                "FACE_EMBEDDING_COLOR_ORDER", "RGB"
+            ).upper(),
             detector_fps=float(os.getenv("FACE_DETECTOR_FPS", "8")),
             max_video_bytes=int(os.getenv("FACE_MAX_VIDEO_BYTES", "10737418240")),
+            max_probe_image_bytes=int(
+                os.getenv("FACE_MAX_PROBE_IMAGE_BYTES", "26214400")
+            ),
+            max_probe_image_pixels=int(
+                os.getenv("FACE_MAX_PROBE_IMAGE_PIXELS", "50000000")
+            ),
+            max_probe_video_bytes=int(
+                os.getenv("FACE_MAX_PROBE_VIDEO_BYTES", "262144000")
+            ),
+            max_probe_video_duration_seconds=float(
+                os.getenv("FACE_MAX_PROBE_VIDEO_DURATION_SECONDS", "900")
+            ),
             best_n=int(os.getenv("FACE_BEST_N", "5")),
             top_k=int(os.getenv("FACE_TOP_K", "5")),
             match_threshold=float(os.getenv("FACE_MATCH_THRESHOLD", "0.55")),
@@ -86,22 +104,32 @@ class Settings:
 
     def validate(self) -> None:
         if (self.csek_file is None) == (self.csek_secret is None):
-            raise ValueError("configure exactly one of FACE_CSEK_FILE or FACE_CSEK_SECRET")
-        if not self.source_prefix.endswith("/") or not self.staging_prefix.endswith(
-            "/"
-        ):
+            raise ValueError(
+                "configure exactly one of FACE_CSEK_FILE or FACE_CSEK_SECRET"
+            )
+        prefixes = (self.source_prefix, self.staging_prefix)
+        if any(not prefix.endswith("/") for prefix in prefixes):
             raise ValueError("source and staging prefixes must end with /")
-        if self.source_prefix == self.staging_prefix:
-            raise ValueError("source and staging prefixes must differ")
+        if len(set(prefixes)) != len(prefixes) or any(
+            left.startswith(right) or right.startswith(left)
+            for index, left in enumerate(prefixes)
+            for right in prefixes[index + 1 :]
+        ):
+            raise ValueError("source and staging prefixes must not overlap")
         if (
             self.detector_fps <= 0
             or self.max_video_bytes <= 0
+            or self.max_probe_image_bytes <= 0
+            or self.max_probe_image_pixels <= 0
+            or self.max_probe_video_bytes <= 0
             or self.best_n <= 0
             or self.top_k <= 0
         ):
             raise ValueError(
                 "detector_fps, max_video_bytes, best_n, and top_k must be positive"
             )
+        if self.max_probe_video_duration_seconds <= 0:
+            raise ValueError("probe video duration limit must be positive")
         if not 0 <= self.match_threshold <= 1:
             raise ValueError("match threshold must be between 0 and 1")
         if self.embedding_color_order not in {"RGB", "BGR"}:

@@ -1,6 +1,24 @@
 # Local test commands
 
+For the end-to-end workflow for newly arriving videos, including CSEK upload and
+manifest formats, see `FUTURE_VIDEOS.md`.
+
 Run these commands from `/workspaces/ThunderCloud/face-batch-gcp-scaffold`.
+
+## Ephemeral local probe
+
+Load the existing local settings and search a retained test crop:
+
+```bash
+set -a; . ./.env; set +a
+face-probe submit \
+  --crop-dir data/f2477a64-b487-4362-96e7-99b27300dddb/track-000001 \
+  --top-k 10
+```
+
+Stdout and the private local review directory include ranked candidates, nullable
+display names, complete live source-video provenance, and review crops. No probe input,
+embedding, or result is written to GCS or Cloud SQL.
 
 ## One-time setup
 

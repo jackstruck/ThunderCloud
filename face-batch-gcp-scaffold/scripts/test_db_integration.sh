@@ -77,6 +77,41 @@ assert cursor.fetchone() == [1, 1, 1]
 cursor.close()
 connection.close()
 
+# Probe search uses a read-only transaction and returns live candidate provenance.
+before = connect(); before_cursor = before.cursor()
+before_cursor.execute("SELECT subject_id, canonical_embedding::text FROM subject ORDER BY subject_id")
+gallery_before = before_cursor.fetchall(); before_cursor.close(); before.close()
+ranked = database.search_subjects([embedding], "embedding", 10)
+assert len(ranked) == 1 and len(ranked[0]) == 1
+assert ranked[0][0].similarity > .999
+assert ranked[0][0].display_name is None
+assert ranked[0][0].observations[0]["video_uri"] == "gs://teak-banner-dome-bulk-videos/videos/test.mp4"
+after = connect(); after_cursor = after.cursor()
+after_cursor.execute("SELECT subject_id, canonical_embedding::text FROM subject ORDER BY subject_id")
+assert after_cursor.fetchall() == gallery_before
+after_cursor.execute("SELECT to_regclass('probe'), to_regclass('probe_face'), to_regclass('probe_match')")
+assert after_cursor.fetchone() == [None, None, None]
+after_cursor.close(); after.close()
+
+class MutatingProbeDatabase(Database):
+    @staticmethod
+    def rank_subjects(cursor, embedding, embedding_model_version, top_k):
+        cursor.execute("DELETE FROM subject")
+        return []
+
+mutating = MutatingProbeDatabase("unused", "unused", "unused")
+mutating.connect = connect
+try:
+    mutating.search_subjects([embedding], "embedding", 1)
+except Exception as exc:
+    assert "read-only" in str(exc).lower()
+else:
+    raise AssertionError("probe transaction unexpectedly permitted gallery mutation")
+check = connect(); check_cursor = check.cursor()
+check_cursor.execute("SELECT count(*) FROM subject")
+assert check_cursor.fetchone() == [1]
+check_cursor.close(); check.close()
+
 queue_database = Database("unused", "unused", "unused")
 queue_database.connect = connect
 queue = QueueDatabase(queue_database)
@@ -156,5 +191,5 @@ cursor.close()
 connection.close()
 assert queue.expire_exhausted_leases(lease_rollout_id) == 1
 assert queue.refresh_rollout(lease_rollout_id)["status"] == "failed"
-print("database transaction, idempotency, and durable queue integration passed")
+print("database transaction, ephemeral read-only probe search, gallery immutability, idempotency, and durable queue integration passed")
 PY

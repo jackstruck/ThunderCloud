@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from .models import Match, TrackTemplate
 
@@ -16,6 +17,14 @@ class Versions:
     detector: str
     embedding: str
     threshold: str
+
+
+@dataclass(frozen=True)
+class RankedSubject:
+    subject_id: str
+    similarity: float
+    display_name: str | None = None
+    observations: tuple[dict[str, Any], ...] = ()
 
 
 class Database:
@@ -48,6 +57,75 @@ class Database:
         if self._connector is not None:
             self._connector.close()
             self._connector = None
+
+    @staticmethod
+    def rank_subjects(
+        cursor, embedding, embedding_model_version: str, top_k: int
+    ) -> list[RankedSubject]:
+        if not 1 <= top_k <= 100:
+            raise ValueError("top_k must be between 1 and 100")
+        vector = pgvector(embedding)
+        cursor.execute(
+            """SELECT s.subject_id, 1 - (s.canonical_embedding <=> %s::vector) AS similarity,
+                      i.display_name
+               FROM subject s
+               LEFT JOIN identity i ON i.identity_id = s.identity_id
+               WHERE s.canonical_embedding IS NOT NULL AND s.model_version = %s
+               ORDER BY s.canonical_embedding <=> %s::vector, s.subject_id
+               LIMIT %s""",
+            (vector, embedding_model_version, vector, top_k),
+        )
+        ranked = []
+        for subject_id, similarity, display_name in cursor.fetchall():
+            cursor.execute(
+                """SELECT sa.external_source_ref, sa.source_sha256, ft.track_id,
+                          ft.start_ms, ft.end_ms, ft.max_quality, ft.mean_quality,
+                          pj.completed_at, sa.source_id, pj.job_id
+                   FROM face_track ft
+                   JOIN source_asset sa ON sa.source_id = ft.source_id
+                   JOIN processing_job pj ON pj.job_id = ft.processing_job_id
+                   WHERE ft.subject_id = %s AND pj.status = 'succeeded'
+                   ORDER BY pj.completed_at, sa.external_source_ref, ft.start_ms, ft.track_id""",
+                (subject_id,),
+            )
+            observations = tuple(
+                {
+                    "video_uri": row[0],
+                    "source_sha256": str(row[1]),
+                    "track_id": str(row[2]),
+                    "start_ms": int(row[3]),
+                    "end_ms": int(row[4]),
+                    "max_quality": None if row[5] is None else float(row[5]),
+                    "mean_quality": None if row[6] is None else float(row[6]),
+                    "processing_completed_at": row[7],
+                    "source_id": str(row[8]),
+                    "processing_job_id": str(row[9]),
+                }
+                for row in cursor.fetchall()
+            )
+            ranked.append(
+                RankedSubject(
+                    str(subject_id), float(similarity), display_name, observations
+                )
+            )
+        return ranked
+
+    def search_subjects(
+        self, embeddings, embedding_model_version: str, top_k: int
+    ) -> list[list[RankedSubject]]:
+        """Search the gallery inside an explicitly read-only transaction."""
+        connection = self.connect()
+        cursor = connection.cursor()
+        try:
+            cursor.execute("SET TRANSACTION READ ONLY")
+            return [
+                self.rank_subjects(cursor, embedding, embedding_model_version, top_k)
+                for embedding in embeddings
+            ]
+        finally:
+            connection.rollback()
+            cursor.close()
+            connection.close()
 
     def commit_results(
         self,

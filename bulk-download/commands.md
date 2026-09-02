@@ -98,4 +98,6 @@ The script refuses to run unless bucket soft-delete retention is zero. It resolv
 
 
 # Continue Codex convo
-codex resume 01a059d9-0b0d-7592-a137-15ba8d60bf8e
+Bulk Download: codex resume 01a059d9-0b0d-7592-a137-15ba8d60bf8e
+Face Batch: codex resume 01a05d3f-5aa4-7a71-97d5-29d7999a1ca9
+Face Probe: 
