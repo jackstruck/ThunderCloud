@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
+import os
 import sys
 import time
 from contextlib import contextmanager
@@ -40,6 +42,44 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--partition", choices=("all", "front", "back"), default="all")
     parser.add_argument("--reverse", action="store_true")
     return parser.parse_args()
+
+
+def recover_existing(blob, config, uid: str) -> dict[str, object]:
+    """Download an existing CSEK object once to recover ingestion-grade provenance."""
+    size = int(blob.size or 0)
+    content_type = (blob.content_type or "").split(";", 1)[0].strip().lower()
+    if size <= 0 or size > config.http.max_video_bytes:
+        raise RuntimeError("video_too_large" if size > config.http.max_video_bytes else "verification_failure")
+    if content_type not in config.allowed_content_types:
+        raise RuntimeError("unsupported_video_type")
+
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    path = config.temp_dir / f"{uid}.recovery.part"
+    digest = hashlib.sha256()
+    downloaded_size = 0
+    try:
+        with path.open("xb") as handle:
+            blob.download_to_file(
+                handle,
+                if_generation_match=int(blob.generation),
+                timeout=300,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(config.chunk_bytes), b""):
+                downloaded_size += len(chunk)
+                digest.update(chunk)
+        if downloaded_size != size:
+            raise RuntimeError("verification_failure")
+        return {
+            "sha256": digest.hexdigest(),
+            "bytes": downloaded_size,
+            "generation": int(blob.generation),
+            "content_type": content_type,
+        }
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -84,11 +124,12 @@ def main() -> int:
                 object_name = f"{config.gcp.prefix}/{item.uid}.mp4"
                 existing = storage.existing(object_name)
                 if existing is not None:
+                    provenance = recover_existing(existing, config, item.uid)
                     append(config.manifest_file, {
                         "timestamp": now(), "status": "complete", "recovered_from_gcs": True,
                         "luluvid_url": item.luluvid_url, "uid": item.uid,
                         "object": f"gs://{config.gcp.bucket}/{object_name}",
-                        "generation": int(existing.generation),
+                        **provenance,
                     })
                     print(f"{index}/{len(pending)} recovered uid={item.uid}", flush=True)
                     continue

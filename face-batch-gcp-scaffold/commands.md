@@ -20,6 +20,24 @@ Stdout and the private local review directory include ranked candidates, nullabl
 display names, complete live source-video provenance, and review crops. No probe input,
 embedding, or result is written to GCS or Cloud SQL.
 
+## Download a CSEK source for local review
+
+Load the existing local settings, then provide one `gs://` URL beneath the configured
+`videos/` prefix. The downloader generation-pins the object, decrypts it locally using
+the configured CSEK, creates the output with mode `0600`, and refuses to overwrite an
+existing file:
+
+```bash
+set -a; . ./.env; set +a
+python scripts/download_csek_object.py \
+  gs://teak-banner-dome-bulk-videos/videos/OBJECT.mp4 \
+  --output ./review-source.mp4
+```
+
+The command prints the downloaded generation, byte count, and SHA-256. Delete the
+local plaintext review copy when it is no longer needed. It never creates a decrypted
+GCS object.
+
 ## One-time setup
 
 Create the environment file if it does not already exist, then fill in the Cloud SQL connection, database user, and model paths:

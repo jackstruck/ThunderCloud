@@ -15,13 +15,23 @@ from worker.manifest import read_manifest
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("--manifest", type=Path, required=True)
-    result.add_argument("--output", type=Path, required=True)
-    result.add_argument("--confirm-count", type=int, required=True)
+    result.add_argument("--output", type=Path)
+    result.add_argument("--confirm-count", type=int)
+    result.add_argument(
+        "--count-only",
+        action="store_true",
+        help="print the number of unique unprocessed manifest items without writing a file",
+    )
     return result
 
 
 def main(argv=None) -> None:
     args = parser().parse_args(argv)
+    if args.count_only:
+        if args.output is not None or args.confirm_count is not None:
+            raise ValueError("--count-only cannot be combined with --output or --confirm-count")
+    elif args.output is None or args.confirm_count is None:
+        raise ValueError("--output and --confirm-count are required unless --count-only is used")
     settings = Settings.from_env()
     settings.validate()
     database = Database(
@@ -51,6 +61,9 @@ def main(argv=None) -> None:
             continue
         seen.add(identity)
         remaining.append(item.uid)
+    if args.count_only:
+        print(len(remaining))
+        return
     if len(remaining) != args.confirm_count:
         raise RuntimeError(
             f"refusing to write selection: expected {args.confirm_count}, found {len(remaining)}"

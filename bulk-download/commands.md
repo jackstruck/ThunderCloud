@@ -96,8 +96,59 @@ The two-worker mode uses a cross-process content lock for the final SHA-256 chec
 
 The script refuses to run unless bucket soft-delete retention is zero. It resolves one Luluvid page at a time, downloads its HLS segments, remuxes them locally to a UID-named MP4, uploads with the configured CSEK, verifies the stored size, appends completion to `data/manifest.jsonl`, and deletes the local temporary video. Rerunning skips completed manifest entries and recovers objects already present in GCS. If a new Luluvid URL downloads to a SHA-256 hash already recorded in the manifest, it is recorded with status `duplicate` and a `duplicate_of` object reference; no second object is uploaded.
 
+## Hand off new uploads to face processing
+
+Completing the download command does not enqueue face processing. After all new URLs
+have a terminal `complete` or `duplicate` manifest record, switch to the face-processing
+project:
+
+```bash
+cd /workspaces/ThunderCloud/face-batch-gcp-scaffold
+set -a
+. ./.env
+set +a
+```
+
+Do not create a second rollout while an existing rollout is `running`. Check and
+reconcile the active rollout documented in `commands.md` in this directory before
+continuing. Once no rollout is active, count the unique manifest items that do not yet
+have a succeeded processing job:
+
+```bash
+python scripts/select_remaining.py \
+  --manifest ../bulk-download/data/manifest.jsonl \
+  --count-only
+```
+
+Review that count. Then create a new, private selection file using the exact reported
+number; the command refuses to overwrite an existing file or proceed if the count
+changed between review and creation:
+
+```bash
+python scripts/select_remaining.py \
+  --manifest ../bulk-download/data/manifest.jsonl \
+  --output selections/justpaste-YYYYMMDD.txt \
+  --confirm-count REVIEWED_COUNT
+```
+
+Follow the manifest enqueue command in `FUTURE_VIDEOS.md`, using that selection file,
+a new stable request key, and the documented immutable image and model versions. Then:
+
+```bash
+face-cloud-run status --rollout-id ROLLOUT_ID
+face-cloud-run start --rollout-id ROLLOUT_ID --tasks 1 --parallelism 1
+face-cloud-run reconcile --rollout-id ROLLOUT_ID
+```
+
+The start command returns while processing continues remotely. Run reconciliation only
+after the rollout is terminal. Completion requires every requested item to succeed and
+zero retryable, dead-letter, active, missing-commit, provenance-mismatch, or lingering
+staging counts. Do not silently omit failed acquisition records; resolve or explicitly
+record them before declaring the added JustPaste set complete.
+
 
 # Continue Codex convo
 Bulk Download: codex resume 01a059d9-0b0d-7592-a137-15ba8d60bf8e
 Face Batch: codex resume 01a05d3f-5aa4-7a71-97d5-29d7999a1ca9
-Face Probe: 
+Face Probe and Planning: codex resume 01a063ae-b120-7323-8818-601721b8bae1
+Internal Team Version: codex resume 

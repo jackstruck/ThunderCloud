@@ -252,7 +252,7 @@ videos/61f1047c-7e2c-5d16-b4fc-9022f2f52f16.mp4
 
 At startup, read `manifest.jsonl` and collect the latest `complete` record for each canonical Luluvid URL. Skip those items.
 
-Before downloading any item not marked complete, construct its deterministic object name and query GCS using the CSEK. If that object exists, record `complete` with `recovered_from_gcs: true` and skip it. If it does not exist, proceed. A local manifest is a convenience record, not the source of truth.
+Before downloading any item not marked complete, construct its deterministic object name and query GCS using the CSEK. If that object exists, download that exact generation once with the CSEK to calculate SHA-256 and verify its byte length, then record an ingestion-complete `complete` entry with `recovered_from_gcs: true`, `sha256`, `bytes`, `generation`, and `content_type`. Delete the temporary recovery file after verification. If the object does not exist, proceed. A local manifest is a convenience record, not the source of truth.
 
 ### 8. Download locally
 
@@ -352,6 +352,11 @@ manifest_failure
 - Reruns skip completed objects using the manifest and GCS checks.
 - If different Luluvid URLs produce identical SHA-256 content, only the first completed object is uploaded. Later matches are recorded as `duplicate` with a `duplicate_of` object reference.
 - No key material, credentials, signed media URLs, or cookies enter logs, the manifest, GCS metadata, or source control.
+
+Uploading completes acquisition but does not start face processing. After adding new
+JustPaste links, follow **Hand off new uploads to face processing** in `commands.md` to
+select manifest items not yet represented by a succeeded Cloud SQL processing job,
+enqueue them, start the Cloud Run GPU Job, and reconcile the result.
 
 ## References
 

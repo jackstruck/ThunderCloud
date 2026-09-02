@@ -144,6 +144,11 @@ face-ingest enqueue-manifest \
 Manifest selection deduplicates by SHA-256 and rejects selectors that do not resolve
 to usable `complete` or canonicalized `duplicate` records.
 
+When records were produced by the sibling JustPaste/Luluvid acquisition workflow, use
+its `commands.md` handoff. The documented `scripts/select_remaining.py --count-only`
+step compares the complete manifest with succeeded Cloud SQL jobs, so the resulting
+selection includes newly acquired content without reprocessing completed content.
+
 ## 3. Launch and reconcile
 
 For one video or a small future batch, one task can drain multiple items while warm:
