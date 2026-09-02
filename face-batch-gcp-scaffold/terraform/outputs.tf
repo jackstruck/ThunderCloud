@@ -73,3 +73,11 @@ output "postgres_admin_password_secret" {
   description = "Secret Manager secret ID retaining the PostgreSQL administrator password."
   value       = google_secret_manager_secret.postgres_admin_password.secret_id
 }
+
+output "cloud_run_job_name" {
+  value = google_cloud_run_v2_job.gpu_drain.name
+}
+
+output "cloud_run_job_region" {
+  value = google_cloud_run_v2_job.gpu_drain.location
+}

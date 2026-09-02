@@ -3,6 +3,7 @@ locals {
     "roles/batch.jobsEditor",
     "roles/cloudsql.client",
     "roles/cloudsql.instanceUser",
+    "roles/run.developer",
     "roles/serviceusage.serviceUsageConsumer",
   ])
 }

@@ -69,3 +69,15 @@ resource "google_storage_bucket_iam_member" "batch_worker_staging_user" {
     expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${var.staging_prefix}')"
   }
 }
+
+resource "google_storage_bucket_iam_member" "runtime_source_reader" {
+  bucket = google_storage_bucket.archive.name
+  role   = "roles/storage.objectViewer"
+  member = google_service_account.batch_worker.member
+
+  condition {
+    title       = "Read immutable sources for remote processing"
+    description = "Restrict the Cloud Run and Batch runtime to the immutable video prefix."
+    expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${var.source_prefix}')"
+  }
+}

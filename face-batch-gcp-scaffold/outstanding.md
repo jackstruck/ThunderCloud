@@ -1,11 +1,60 @@
 # Outstanding Work Before Remote Bulk Processing
 
+> Operator handoff: after the production execution was launched, the operator directed
+> that subsequent work be documentation-only. Do not poll, reconcile, restart, cancel,
+> or otherwise modify Cloud Run, Cloud SQL, GCS, IAM, Monitoring, or Terraform unless
+> the operator explicitly authorizes a new operational action.
+
+> Cloud Run migration update (2026-09-02): the durable Cloud SQL queue, shared local and
+> remote worker code, CSEK just-in-time staging, Direct VPC Cloud Run L4 Job, prefix-only
+> runtime source access, immutable queue-aware image, and visible Monitoring incident
+> policies are implemented. Final digest `sha256:eefc55e1e48a9e5d367ce1f9dac7f7be4a13c1a289ca0fc565d9aa668c91955c`
+> passed a one-video L4 canary and a ten-video controlled drain. Both reconciled with
+> zero missing commits, source-provenance mismatches, dead-letter items, or lingering
+> staging objects. Cloud Run is now the primary orchestrator; the Batch discussion
+> below is retained as rollback history.
+
+The implementation has no known missing IAM permissions. The operator approved the
+16–20 task-hour planning ceiling, immutable r4 digest, and exact 1,859-item selection
+on 2026-09-02. The Cloud Monitoring email channel for `jack@jackstruck.info` is
+configured and attached to the execution-failure, dead-letter, and successful-completion
+policies. Parallelism remains
+deliberately fixed at one. The controlled rollout
+completed all ten videos on one warm L4 in about 3 minutes 14 seconds of active drain
+time (about 6 minutes 14 seconds from local launch through queue completion). The
+manifest/database selection currently resolves to 1,859 unique unprocessed UIDs; this
+count must be regenerated and explicitly confirmed immediately before bulk enqueueing.
+
+The prepared selection is
+`selections/cloud-run-remaining-20260902.txt` (mode `0600`, 1,859 lines, SHA-256
+`3a463e5ed0c786c9b81dd70c558808b2f116c798b2fbf3b59057ac78a3279ed6`).
+It is a UID filter over the authoritative manifest, not a copy or replacement of that
+manifest. Enqueueing resolves each UID back to its full immutable manifest record.
+
+Cloud SQL on-demand backup `1788375603542`, description
+`pre-cloud-run-remaining-20260902`, completed successfully on 2026-09-02 before the
+remaining-corpus enqueue. It uses the database instance's existing customer-managed
+KMS key. The intentionally interrupted recovery canary was marked cancelled and only
+its exact ephemeral staging generation was removed; its immutable source remains in
+the prepared selection. There were zero active rollouts immediately before production
+launch.
+
+The approved remaining-corpus rollout was enqueued and launched on 2026-09-02. Rollout
+ID `f01c13b8-318f-4df1-944b-41daa3f67faa` contains 1,859 work items and is attached to
+Cloud Run execution `face-batch-gpu-drain-ktrhl`, with 30 tasks and parallelism one.
+This managed execution continues independently of the local terminal. Final
+reconciliation and post-acceptance cleanup remain pending until it completes.
+The completion policy triggers when a final `drain_finished` event reports durable
+rollout status `succeeded`; its message directs the operator to run the documented
+reconciliation command.
+
 The local milestone succeeded end to end: one CSEK-encrypted video was staged,
 processed locally, committed to Cloud SQL, exported to the local `data/` directory,
 and removed from `face-staging/`. The manifest contains 1,875 usable completed videos
 totaling 47.85 GiB, leaving 1,874 videos after the test.
 
-The remote worker is not ready for the bulk run until the following work is complete.
+The historical Batch implementation record below predates the Cloud Run migration. It
+is not the current launch checklist and remains here only for rollback and audit context.
 
 ## 1. Build and validate the GPU image
 

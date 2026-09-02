@@ -15,3 +15,9 @@ db_disk_size_gb = 10
 
 # Turn on once you want Terraform deletion protection for the DB.
 db_deletion_protection = false
+
+# Replace with the digest produced after building the queue-aware image.
+cloud_run_worker_image = "us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/worker@sha256:REPLACE_WITH_64_HEX_DIGEST"
+
+# Cloud Monitoring sends execution-failure and dead-letter alerts here.
+monitoring_email_address = "jack@jackstruck.info"

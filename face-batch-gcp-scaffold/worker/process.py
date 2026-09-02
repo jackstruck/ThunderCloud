@@ -62,61 +62,92 @@ def export_face_crops(
     return job_dir
 
 
-def run(
-    *,
-    gcs_uri: str,
-    external_source_ref: str,
-    expected_sha256: str | None,
-    job_id: str,
-    staging_generation: int | None = None,
-    source_metadata: dict | None = None,
-    settings: Settings | None = None,
-) -> bool:
-    settings = settings or Settings.from_env()
-    settings.validate()
-    uuid.UUID(job_id)
-    expected_sha256 = validate_sha256(expected_sha256)
-    csek = load_configured_csek(
-        settings.project_id, settings.csek_file, settings.csek_secret
-    )
-    storage = StorageRepository(
-        settings.project_id,
-        settings.bucket,
-        settings.source_prefix,
-        settings.staging_prefix,
-        csek,
-    )
-    # Validate the source reference separately so it can never be confused with the deletion target.
-    storage.source_uri(external_source_ref)
-    video_bytes, actual_sha256 = storage.download_staging(
-        gcs_uri, staging_generation, settings.max_video_bytes
-    )
-    if expected_sha256 and actual_sha256 != expected_sha256:
-        raise ValueError("staging object SHA-256 does not match expected value")
+class VideoProcessor:
+    """Reusable one-video processor shared by local, Batch, and Cloud Run entrypoints."""
 
-    detector = ScrfdDetector(settings.detector_model)
-    tracker = ByteTrackTracker(frame_rate=max(1, round(settings.detector_fps)))
-    embedder = OnnxFaceEmbedder(
-        settings.embedding_model, color_order=settings.embedding_color_order
-    )
-    templates = process_video(
-        video_bytes, detector, tracker, embedder, settings.detector_fps, settings.best_n
-    )
-    if settings.face_output_dir is not None:
-        output_path = export_face_crops(
-            settings.face_output_dir, job_id, external_source_ref, templates
+    def __init__(self, settings: Settings):
+        settings.validate()
+        self.settings = settings
+        csek = load_configured_csek(
+            settings.project_id, settings.csek_file, settings.csek_secret
         )
-        logging.getLogger(__name__).info(
-            "face_crops_exported", extra={"job_id": job_id, "path": str(output_path)}
+        self.storage = StorageRepository(
+            settings.project_id,
+            settings.bucket,
+            settings.source_prefix,
+            settings.staging_prefix,
+            csek,
         )
-    database = Database(
-        settings.cloud_sql_instance,
-        settings.db_user,
-        settings.db_name,
-        settings.cloud_sql_ip_type,
-    )
-    try:
-        wrote = database.commit_results(
+        self.detector = None
+        self.embedder = None
+        self.database = None
+
+    def _ensure_models(self) -> None:
+        if self.detector is not None:
+            return
+        settings = self.settings
+        self.detector = ScrfdDetector(settings.detector_model)
+        self.embedder = OnnxFaceEmbedder(
+            settings.embedding_model, color_order=settings.embedding_color_order
+        )
+        if settings.require_cuda:
+            for name, session in (
+                ("detector", self.detector.session),
+                ("embedder", self.embedder.session),
+            ):
+                if session.get_providers()[0] != "CUDAExecutionProvider":
+                    raise RuntimeError(f"{name} did not initialize on CUDA")
+
+    def close(self) -> None:
+        if self.database is not None:
+            self.database.close()
+
+    def process(
+        self,
+        *,
+        gcs_uri: str,
+        external_source_ref: str,
+        expected_sha256: str | None,
+        job_id: str,
+        staging_generation: int | None = None,
+        source_metadata: dict | None = None,
+    ) -> bool:
+        settings = self.settings
+        uuid.UUID(job_id)
+        expected_sha256 = validate_sha256(expected_sha256)
+        # Validate source provenance separately from the ephemeral deletion target.
+        self.storage.source_uri(external_source_ref)
+        video_bytes, actual_sha256 = self.storage.download_staging(
+            gcs_uri, staging_generation, settings.max_video_bytes
+        )
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise ValueError("staging object SHA-256 does not match expected value")
+
+        self._ensure_models()
+        tracker = ByteTrackTracker(frame_rate=max(1, round(settings.detector_fps)))
+        templates = process_video(
+            video_bytes,
+            self.detector,
+            tracker,
+            self.embedder,
+            settings.detector_fps,
+            settings.best_n,
+        )
+        if settings.face_output_dir is not None:
+            output_path = export_face_crops(
+                settings.face_output_dir, job_id, external_source_ref, templates
+            )
+            logging.getLogger(__name__).info(
+                "face_crops_exported", extra={"job_id": job_id, "path": str(output_path)}
+            )
+        if self.database is None:
+            self.database = Database(
+                settings.cloud_sql_instance,
+                settings.db_user,
+                settings.db_name,
+                settings.cloud_sql_ip_type,
+            )
+        wrote = self.database.commit_results(
             job_id=job_id,
             idempotency_key=idempotency_key(
                 external_source_ref, actual_sha256, settings
@@ -135,9 +166,33 @@ def run(
             threshold=settings.match_threshold,
             matching_enabled=settings.matching_enabled,
         )
+        # A previous successful idempotent run is also committed, so stale staging is safe to remove.
+        self.storage.delete_staging(gcs_uri, staging_generation)
+        logging.getLogger(__name__).info(
+            "processing_succeeded", extra={"job_id": job_id}
+        )
+        return wrote
+
+
+def run(
+    *,
+    gcs_uri: str,
+    external_source_ref: str,
+    expected_sha256: str | None,
+    job_id: str,
+    staging_generation: int | None = None,
+    source_metadata: dict | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    processor = VideoProcessor(settings or Settings.from_env())
+    try:
+        return processor.process(
+            gcs_uri=gcs_uri,
+            external_source_ref=external_source_ref,
+            expected_sha256=expected_sha256,
+            job_id=job_id,
+            staging_generation=staging_generation,
+            source_metadata=source_metadata,
+        )
     finally:
-        database.close()
-    # A previous successful idempotent run is also a committed result, so stale staging is safe to remove.
-    storage.delete_staging(gcs_uri, staging_generation)
-    logging.getLogger(__name__).info("processing_succeeded", extra={"job_id": job_id})
-    return wrote
+        processor.close()

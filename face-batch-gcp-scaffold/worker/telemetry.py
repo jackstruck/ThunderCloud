@@ -6,14 +6,21 @@ import logging
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        return json.dumps(
-            {
-                "level": record.levelname,
-                "event": record.getMessage(),
-                "job_id": getattr(record, "job_id", None),
-            },
-            separators=(",", ":"),
-        )
+        payload = {"severity": record.levelname, "event": record.getMessage()}
+        for field in (
+            "job_id",
+            "rollout_id",
+            "work_item_id",
+            "attempt",
+            "error_code",
+            "processed_by_task",
+            "failed_by_task",
+            "status",
+        ):
+            value = getattr(record, field, None)
+            if value is not None:
+                payload[field] = value
+        return json.dumps(payload, separators=(",", ":"))
 
 
 def configure_logging() -> None:

@@ -34,10 +34,11 @@ class Settings:
     top_k: int = 5
     match_threshold: float = 0.55
     matching_enabled: bool = False
+    require_cuda: bool = False
     threshold_version: str = "unvalidated-v1"
     detector_version: str = "scrfd-onnx"
     embedding_model_version: str = "adaface-onnx"
-    worker_version: str = "0.1.0"
+    worker_version: str = "0.2.0"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -73,12 +74,14 @@ class Settings:
             match_threshold=float(os.getenv("FACE_MATCH_THRESHOLD", "0.55")),
             matching_enabled=os.getenv("FACE_MATCHING_ENABLED", "false").lower()
             in {"1", "true", "yes"},
+            require_cuda=os.getenv("FACE_REQUIRE_CUDA", "false").lower()
+            in {"1", "true", "yes"},
             threshold_version=os.getenv("FACE_THRESHOLD_VERSION", "unvalidated-v1"),
             detector_version=os.getenv("FACE_DETECTOR_VERSION", "scrfd-onnx"),
             embedding_model_version=os.getenv(
                 "FACE_EMBEDDING_MODEL_VERSION", "adaface-onnx"
             ),
-            worker_version=os.getenv("FACE_WORKER_VERSION", "0.1.0"),
+            worker_version=os.getenv("FACE_WORKER_VERSION", "0.2.0"),
         )
 
     def validate(self) -> None:

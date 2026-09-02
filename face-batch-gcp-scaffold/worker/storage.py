@@ -131,10 +131,22 @@ class StorageRepository:
     def staging_uri(self, value: str) -> GcsUri:
         return self._require_uri(value, self.staging_prefix)
 
+    def verify_source(self, source_uri: str) -> tuple[int, int]:
+        uri = self.source_uri(source_uri)
+        blob = self.bucket.blob(uri.object_name, encryption_key=self.csek)
+        blob.reload()
+        if not has_customer_encryption(blob):
+            raise RuntimeError("source object does not report customer-supplied encryption")
+        return int(blob.generation), int(blob.size)
+
     def stage(self, source_uri: str, metadata: dict[str, str]) -> tuple[str, int, int]:
         source = self.source_uri(source_uri)
         source_blob = self.bucket.blob(source.object_name, encryption_key=self.csek)
         source_blob.reload()
+        if not has_customer_encryption(source_blob):
+            raise RuntimeError(
+                "source object does not report customer-supplied encryption"
+            )
         destination_name = (
             f"{self.staging_prefix}{uuid.uuid4()}/{Path(source.object_name).name}"
         )
@@ -166,6 +178,21 @@ class StorageRepository:
             int(destination.generation),
             int(destination.size),
         )
+
+    def verify_staging(
+        self, staging_uri: str, generation: int | None = None
+    ) -> tuple[int, int]:
+        """Return the immutable generation and size of an existing CSEK staging object."""
+        uri = self.staging_uri(staging_uri)
+        blob = self.bucket.blob(
+            uri.object_name, generation=generation, encryption_key=self.csek
+        )
+        blob.reload()
+        if not has_customer_encryption(blob):
+            raise RuntimeError(
+                "staging object does not report customer-supplied encryption"
+            )
+        return int(blob.generation), int(blob.size)
 
     def download_staging(
         self,

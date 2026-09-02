@@ -1,6 +1,12 @@
 # Local-first historical face-video processing
 
-This project processes explicitly selected CSEK-encrypted historical videos with a local containerized worker while storing durable embeddings and provenance in Cloud SQL PostgreSQL/pgvector. See `IMPLEMENTATION_PLAN.md` for the full architecture and `outstanding.md` for decisions that remain outside the first functional milestone.
+This project processes explicitly selected CSEK-encrypted historical videos with the
+same containerized worker locally or as an unattended Cloud Run GPU Job, while storing
+durable embeddings, queue state, and provenance in Cloud SQL PostgreSQL/pgvector. See
+`IMPLEMENTATION_PLAN.md` for the original architecture and
+`CLOUD_RUN_IMPLEMENTATION_PLAN.md` for the managed-worker migration.
+See `CLEANUP_ASSESSMENT.md` for what can be removed now versus what must remain through
+bulk reconciliation and the rollback window.
 
 ## Current topology
 
@@ -9,11 +15,14 @@ This project processes explicitly selected CSEK-encrypted historical videos with
 - Immutable inputs: `videos/`
 - Ephemeral CSEK staging: `face-staging/`
 - Regional resources: `us-central1`
-- Worker: local process/container using developer ADC and the local CSEK file
+- Worker: local process/container or Cloud Run Job using the same processing modules
 - Local review output: retained face crops under `data/<job-id>/`
 - Database: Cloud SQL PostgreSQL 17, public connector path with no authorized networks, automatic IAM database authentication
 
-The application validates prefixes again in code. It only deletes an object under `face-staging/`, and only after a successful or previously successful idempotent database transaction.
+The application validates prefixes again in code. It only deletes an object under
+`face-staging/`, and only after a successful or previously successful idempotent
+database transaction. Cloud Run obtains the CSEK from Secret Manager directly into
+memory and reaches Cloud SQL over Direct VPC egress and private IP.
 
 ## Prerequisites
 
@@ -55,11 +64,14 @@ Do not apply a plan that deletes the bucket, changes its location/encryption, or
 
 ## Bootstrap Cloud SQL
 
-Connect as a one-time PostgreSQL administrator through the Cloud SQL Auth Proxy or connector, then run:
+Apply the additive schema and least-privilege grants with the connector-based migration
+utility. It reads the administrator password from Secret Manager without printing or
+persisting it:
 
 ```bash
-psql -d face_index -f scripts/db_schema.sql
-psql -d face_index -v app_user='developer@example.com' -f scripts/db_grants.sql
+python scripts/apply_db_migrations.py \
+  --app-user YOUR_DEVELOPER_ACCOUNT \
+  --app-user face-batch-runtime@teak-banner-dome.iam
 ```
 
 The worker uses the developer IAM database user after bootstrap; it does not use a static database password.
@@ -111,6 +123,31 @@ PYTHON_BIN=.venv/bin/python scripts/test_db_integration.sh
 
 Cloud integration tests are skipped unless explicitly enabled and configured. The CSEK is never read by unit tests.
 
-## Later Batch migration
+## Run with Cloud Run
 
-The same tested image will move to a Spot L4 Batch job. That phase adds a runtime service account, Secret Manager delivery of the CSEK, Cloud SQL private-IP selection, GPU-driver validation, and eventually removal of Cloud SQL public IP. No database or schema migration is required merely to change worker location.
+Cloud Run is an orchestration adapter around the same one-video processor. Enqueueing
+creates durable rollout/work-item rows but does not start compute. Remote rollout
+arguments require the exact image and all behavior-affecting versions explicitly:
+
+```bash
+face-ingest enqueue-manifest \
+  --manifest ../bulk-download/data/manifest.jsonl \
+  --select-file selected-uids.txt \
+  --name controlled-cloud-run \
+  --request-key controlled-cloud-run-v1 \
+  --image-digest IMAGE_DIGEST \
+  --creator-principal YOUR_DEVELOPER_ACCOUNT \
+  --worker-version 0.2.0-cloud-run-r4 \
+  --detector-version scrfd-10g-5838f7fe \
+  --embedding-model-version adaface-ir18-6b6a3577 \
+  --threshold-version controlled-eval-0p55-v1
+
+face-cloud-run status --rollout-id ROLLOUT_ID
+face-cloud-run start --rollout-id ROLLOUT_ID --tasks 1 --parallelism 1
+face-cloud-run reconcile --rollout-id ROLLOUT_ID
+```
+
+The start command returns after Google accepts the execution. The job continues without
+the local terminal. Parallelism is deliberately locked to one until subject-creation
+concurrency and the small Cloud SQL tier have been validated. The existing Batch path
+is retained as rollback during this migration.
