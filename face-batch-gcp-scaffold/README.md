@@ -3,13 +3,11 @@
 This project processes explicitly selected CSEK-encrypted historical videos with the
 same containerized worker locally or as an unattended Cloud Run GPU Job, while storing
 durable embeddings, queue state, and provenance in Cloud SQL PostgreSQL/pgvector. See
-`IMPLEMENTATION_PLAN.md` for the original architecture and
-`CLOUD_RUN_IMPLEMENTATION_PLAN.md` for the managed-worker migration.
-See `CLEANUP_ASSESSMENT.md` for what can be removed now versus what must remain through
-bulk reconciliation and the rollback window.
+`ARCHITECTURE.md` for the canonical system architecture and
+`IMPLEMENTATION_PLAN.md` for implementation status and remaining work.
+See `CLEANUP_ASSESSMENT.md` for safe cleanup guidance.
 See `FUTURE_VIDEOS.md` for safely uploading, recording, enqueueing, launching, and
 reconciling videos added after the initial corpus.
-See `PROBE_IMPLEMENTATION_PLAN.md` for the probe security and acceptance contract.
 
 ## Current topology
 
@@ -179,5 +177,4 @@ face-cloud-run reconcile --rollout-id ROLLOUT_ID
 
 The start command returns after Google accepts the execution. The job continues without
 the local terminal. Parallelism is deliberately locked to one until subject-creation
-concurrency and the small Cloud SQL tier have been validated. The existing Batch path
-is retained as rollback during this migration.
+concurrency and the small Cloud SQL tier have been validated.

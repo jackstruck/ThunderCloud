@@ -77,7 +77,7 @@ scripts/run_local_container.sh submit-object \
   gs://teak-banner-dome-bulk-videos/videos/dd9e430f-9636-5068-9e0f-7ebdae82357e.mp4 \
   --sha256 f5bcf982dbb4f93fd19286193eee62b39858c3eaf99944a2ba0aec0729708b1c
 ```
-# Cloud Run queue migration
+# Cloud Run processing queue
 
 The local one-video commands below remain supported. Cloud Run uses the same shared
 processing code through a queue-draining entry point.

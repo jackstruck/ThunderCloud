@@ -1,72 +1,44 @@
-# Cleanup Assessment for the Settled Cloud Run Shape
+# Cleanup Assessment
 
-## Safe local cleanup now
+This assessment applies to the current local-acquisition, Cloud Run GPU processing,
+Cloud SQL gallery, and local ephemeral-probe architecture described in
+`ARCHITECTURE.md`.
 
-- Delete ignored `terraform/*.tfplan` files after the production launch review. They
-  are reproducible point-in-time plans, not state. They currently use less than 1 MiB.
-- Remove `.test-venv/` when local development is finished. It is reproducible from
-  `pyproject.toml` and currently uses about 131 MiB.
-- Remove Terraform's `.terraform/` provider cache only if roughly 259 MiB matters; run
-  `terraform init` before the next plan afterward.
-- Delete reviewed face-crop directories under `data/` according to the biometric-data
-  retention decision. These are local sensitive artifacts and are not required by the
-  Cloud Run worker or Cloud SQL.
-- Prune unused Docker test images only when disk pressure returns. Keep the validated
-  `thundercloud-face-batch:cloud-run-r4` image until the bulk rollout and rollback
-  window are complete. The PostgreSQL/pgvector and Terraform images are reproducible
-  but useful for tests and local administration.
+## Safe local cleanup
 
-Do not delete `terraform.tfstate`, `terraform.tfstate.backup`, `.env`, the model files,
-or either CSEK copy. Local Terraform state is currently authoritative, the non-secret
-environment and model files support local execution, the local CSEK supports local
-processing, and the Secret Manager CSEK supports Cloud Run.
+- Delete ignored `terraform/*.tfplan` files after reviewing or applying them.
+- Remove `.test-venv/` when it is no longer needed; it is reproducible from
+  `pyproject.toml`.
+- Remove Terraform's `.terraform/` provider cache when disk space matters, then run
+  `terraform init` before the next plan.
+- Delete local face-crop and probe-review directories after review. They contain
+  sensitive biometric artifacts and are not required by Cloud SQL or Cloud Run.
+- Prune unused local Docker images when they are no longer needed for validation.
 
-## Retain through the production rollout and rollback window
+Do not delete `terraform.tfstate`, `terraform.tfstate.backup`, `.env`, model files, or
+either CSEK copy. They support current infrastructure, local execution, or recovery.
 
-- Keep the Cloud Batch API, Batch IAM bindings, Batch submission code, and last known
-  good Batch image as a rollback path.
-- Keep all rollout/work-item rows, including cancelled and superseded canaries, as an
-  operational audit trail.
-- Keep the controlled and production selection files and their checksums so each
-  enqueue can be reproduced and audited.
-- Keep prior Artifact Registry digests until the production rollout reconciles and a
-  rollback window has been explicitly closed. Never delete the deployed r4 digest
-  while the Cloud Run Job references it.
-- Keep Cloud SQL's connector-only public IP while local processing and administration
-  are requirements. It has no authorized networks and local clients still need the
-  public Cloud SQL Connector route.
-- Keep the `face-staging/` lifecycle policy. It remains the last-resort cleanup for an
-  object left behind by process termination before transactional completion.
+## Retain for current operation
 
-## Cleanup after successful bulk reconciliation
+- Keep rollout and work-item rows as the processing audit trail.
+- Keep selection files and checksums needed to reproduce an enqueue operation.
+- Keep the deployed Artifact Registry digest and any deliberately selected known-good
+  predecessor until the current rollout is reconciled.
+- Keep Cloud SQL's connector-only public-IP configuration while developer-local access
+  remains required. It has no authorized networks.
+- Keep the `face-staging/` lifecycle policy as last-resort cleanup for interrupted work.
+- Keep monitoring for job completion, execution failure, and dead-letter conditions.
 
-Perform these as a separate reviewed Terraform change with a no-destroy check for the
-source bucket, Cloud SQL, KMS key, CSEK secret, and Cloud Run resources:
+## Follow-up cleanup and hardening
 
-1. Remove Batch-only IAM roles (`roles/batch.agentReporter` and
-   `roles/batch.jobsEditor`), Batch-only resources, and eventually
-   `batch.googleapis.com` after the rollback window.
-2. Remove or archive `scripts/submit_batch.py` and Batch-specific documentation after
-   confirming no operator still uses that path.
-3. Apply an Artifact Registry retention policy that preserves the deployed digest and
-   a chosen number or age of known-good rollback images.
-4. Rename legacy Terraform identifiers such as `batch_worker` and `batch_subnet_name`
-   only with Terraform `moved` blocks; cosmetic renaming must not recreate identities
-   or networking.
-5. Reconsider Cloud SQL's public IP only if local access is replaced by a private route
-   such as VPN or an approved bastion. Removing it now would break the required local
-   workflow.
-6. Reassess whether probe matching should receive its own runtime identity when it is
-   deployed as a separate service.
+1. Add an Artifact Registry retention policy that preserves deployed digests.
+2. Rename legacy Terraform identifiers only with Terraform
+   `moved` blocks so resources are not recreated.
+3. Reconsider Cloud SQL public IP only after an approved private route replaces local
+   connector access.
+4. Apply explicit retention policies to local review artifacts and durable Cloud SQL
+   application data; these are governance decisions, not incidental cleanup.
 
-## Items that are not cleanup
-
-- Immutable source objects under `videos/` are records of input and must not be
-  deleted by this project.
-- Cloud SQL biometric results are application data, not disposable orchestration
-  residue. Any retention or erasure operation needs a separate data-governance decision.
-- The CSEK and database KMS key must remain available for as long as their encrypted
-  data or backups must be recoverable.
-- Monitoring policies (including completion, execution failure, and dead letter) and
-  the operator email channel are part of unattended operation, not temporary migration
-  scaffolding.
+Immutable source objects under `videos/` are input records and must not be deleted by
+this project. The CSEK and database KMS key must remain recoverable for as long as their
+encrypted data or backups must be recoverable.

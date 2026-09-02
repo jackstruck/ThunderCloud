@@ -7,6 +7,5 @@ terraform.tfvars
 __pycache__
 *.pyc
 tests
-outstanding.md
 **/.secrets
 **/gcs-csek.base64
