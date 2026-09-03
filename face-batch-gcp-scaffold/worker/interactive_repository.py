@@ -256,11 +256,13 @@ class InteractiveRepository:
                     cursor.execute(
                         """INSERT INTO run_candidate
                              (run_id, group_id, subject_id, rank, similarity,
-                              display_name_snapshot, source_count, observation_count)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                              display_name_snapshot, source_count, observation_count,
+                              page_urls)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
                            ON CONFLICT (run_id, group_id, subject_id) DO UPDATE
                            SET rank = EXCLUDED.rank, similarity = EXCLUDED.similarity,
-                               display_name_snapshot = EXCLUDED.display_name_snapshot""",
+                               display_name_snapshot = EXCLUDED.display_name_snapshot,
+                               page_urls = EXCLUDED.page_urls""",
                         (
                             run_id,
                             group.group_id,
@@ -270,6 +272,7 @@ class InteractiveRepository:
                             candidate.display_name,
                             len({item["video_uri"] for item in candidate.observations}),
                             len(candidate.observations),
+                            json.dumps(list(getattr(candidate, "page_urls", ()))),
                         ),
                     )
             cursor.execute(
@@ -294,12 +297,16 @@ class InteractiveRepository:
                          (source_id, external_source_ref, source_sha256, metadata,
                           object_name, object_generation, object_bytes, content_type,
                           encryption_mode)
-                       VALUES (%s,%s,%s,'{}'::jsonb,%s,%s,%s,
+                       VALUES (%s,%s,%s,
+                               CASE WHEN (SELECT source_page_url FROM media_run WHERE run_id=%s) IS NULL
+                                    THEN '{}'::jsonb ELSE jsonb_build_object(
+                                      'page_url',(SELECT source_page_url FROM media_run WHERE run_id=%s)) END,
+                               %s,%s,%s,
                                (SELECT content_type FROM media_run WHERE run_id=%s),'CSEK')
                        ON CONFLICT (source_sha256) WHERE object_name IS NOT NULL AND deleted_at IS NULL
                        DO UPDATE SET source_sha256=EXCLUDED.source_sha256
                        RETURNING source_id""",
-                    (source_id, f"submission:{run_id}", source_sha256, retained_name,
+                    (source_id, f"submission:{run_id}", source_sha256, run_id, run_id, retained_name,
                      retained_generation, retained_bytes, run_id),
                 )
                 effective_source_id = str(cursor.fetchone()[0])

@@ -31,6 +31,7 @@ def parser() -> argparse.ArgumentParser:
         default=[
             Path("migrations/001_phase1_runs.sql"),
             Path("migrations/002_phase2_enrollment.sql"),
+            Path("migrations/003_candidate_page_urls.sql"),
         ],
         help="Additive migration to apply after the base schema; may be repeated.",
     )

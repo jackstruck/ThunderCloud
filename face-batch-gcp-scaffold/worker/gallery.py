@@ -69,6 +69,17 @@ class GalleryRepository:
                    ORDER BY quality_score DESC NULLS LAST, representative_id LIMIT 20""",
                 (subject_id,),
             )
+            faces = cursor.fetchall()
+            cursor.execute(
+                """SELECT DISTINCT COALESCE(metadata->>'page_url', metadata->>'luluvid_url')
+                   FROM source_asset WHERE source_id IN (
+                     SELECT source_id FROM face_track WHERE subject_id=%s
+                     UNION SELECT source_id FROM submission_enrollment WHERE subject_id=%s
+                   ) AND COALESCE(metadata->>'page_url', metadata->>'luluvid_url') IS NOT NULL
+                   ORDER BY 1""",
+                (subject_id, subject_id),
+            )
+            page_urls = [str(item[0]) for item in cursor.fetchall()]
             return {
                 "subject_id": str(row[0]),
                 "display_name": row[1],
@@ -76,6 +87,7 @@ class GalleryRepository:
                 "sample_count": int(row[3]),
                 "source_count": int(row[4]),
                 "observation_count": int(row[5]),
+                "page_urls": page_urls,
                 "representative_faces": [
                     {
                         "representative_id": str(face[0]),
@@ -83,7 +95,7 @@ class GalleryRepository:
                         "quality_score": None if face[1] is None else float(face[1]),
                         "source_timestamp_ms": face[2],
                     }
-                    for face in cursor.fetchall()
+                    for face in faces
                 ],
             }
         finally:

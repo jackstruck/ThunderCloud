@@ -337,7 +337,7 @@ components:
                 type: array
                 items:
                   type: object
-                  required: [subject_id, rank, similarity, source_count, observation_count, representative_faces]
+                  required: [subject_id, rank, similarity, source_count, observation_count, page_urls, representative_faces]
                   properties:
                     subject_id: {type: string, format: uuid}
                     display_name: {type: [string, 'null']}
@@ -345,6 +345,9 @@ components:
                     similarity: {type: number}
                     source_count: {type: integer, minimum: 0}
                     observation_count: {type: integer, minimum: 0}
+                    page_urls:
+                      type: array
+                      items: {type: string, format: uri}
                     representative_faces:
                       type: array
                       maxItems: 5
@@ -359,7 +362,7 @@ components:
         source_timestamp_ms: {type: [integer, 'null']}
     Subject:
       type: object
-      required: [subject_id, model_version, sample_count, source_count, observation_count, representative_faces]
+      required: [subject_id, model_version, sample_count, source_count, observation_count, page_urls, representative_faces]
       properties:
         subject_id: {type: string, format: uuid}
         display_name: {type: [string, 'null']}
@@ -367,6 +370,9 @@ components:
         sample_count: {type: integer, minimum: 0}
         source_count: {type: integer, minimum: 0}
         observation_count: {type: integer, minimum: 0}
+        page_urls:
+          type: array
+          items: {type: string, format: uri}
         representative_faces:
           type: array
           maxItems: 20

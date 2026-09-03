@@ -445,7 +445,7 @@ class RunRepository:
                           rc.observation_count, gallery.representative_id,
                           gallery.quality_score, gallery.source_timestamp_ms
                           , enrollment.subject_id, enrollment.decision,
-                          enrollment.source_id
+                          enrollment.source_id, rc.page_urls
                    FROM submission_face_group face
                    LEFT JOIN run_candidate rc
                      ON rc.run_id = face.run_id AND rc.group_id = face.group_id
@@ -474,6 +474,7 @@ class RunRepository:
                         "similarity": float(row[3]),
                         "source_count": int(row[5]),
                         "observation_count": int(row[6]),
+                        "page_urls": list(row[13] or []),
                         "representative_faces": [],
                     },
                 )

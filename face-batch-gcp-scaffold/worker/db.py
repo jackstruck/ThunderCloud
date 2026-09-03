@@ -25,6 +25,7 @@ class RankedSubject:
     similarity: float
     display_name: str | None = None
     observations: tuple[dict[str, Any], ...] = ()
+    page_urls: tuple[str, ...] = ()
 
 
 class Database:
@@ -103,9 +104,20 @@ class Database:
                 }
                 for row in cursor.fetchall()
             )
+            cursor.execute(
+                """SELECT DISTINCT COALESCE(metadata->>'page_url', metadata->>'luluvid_url')
+                   FROM source_asset WHERE source_id IN (
+                     SELECT source_id FROM face_track WHERE subject_id=%s
+                     UNION SELECT source_id FROM submission_enrollment WHERE subject_id=%s
+                   ) AND COALESCE(metadata->>'page_url', metadata->>'luluvid_url') IS NOT NULL
+                   ORDER BY 1""",
+                (subject_id, subject_id),
+            )
+            page_urls = tuple(str(row[0]) for row in cursor.fetchall())
             ranked.append(
                 RankedSubject(
-                    str(subject_id), float(similarity), display_name, observations
+                    str(subject_id), float(similarity), display_name, observations,
+                    page_urls,
                 )
             )
         return ranked
