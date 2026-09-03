@@ -1,0 +1,360 @@
+openapi: 3.1.0
+info:
+  title: ThunderCloud Face Console
+  version: 0.1.0
+  description: Phase 1 search-only API. IAP authentication is required for every operation.
+servers:
+  - url: /
+security:
+  - iap: []
+paths:
+  /api/runs:
+    post:
+      operationId: createRun
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRunRequest'}
+      responses:
+        '202':
+          description: Run created, or the identical idempotent request replayed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /api/runs/{run_id}:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    get:
+      operationId: getRun
+      responses:
+        '200':
+          description: Safe status visible to every approved internal user.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/runs/{run_id}/upload-session:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      operationId: createUploadSession
+      description: Initiates a CSEK upload; the bearer session URI must never be logged or persisted.
+      responses:
+        '201':
+          description: Scoped resumable upload session.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_uri]
+                properties:
+                  session_uri: {type: string, format: uri}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/runs/{run_id}/upload-complete:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      operationId: completeUpload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [bytes, sha256]
+              properties:
+                bytes: {type: integer, minimum: 1}
+                sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+      responses:
+        '202':
+          description: Object metadata accepted; streaming checksum verification remains queued.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/runs/{run_id}/face-groups:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    get:
+      operationId: listFaceGroups
+      responses:
+        '200':
+          description: Temporary opaque face-group previews.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups: {type: array, items: {$ref: '#/components/schemas/FaceGroup'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/runs/{run_id}/face-selection:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    put:
+      operationId: selectFaceGroups
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [group_ids]
+              properties:
+                group_ids:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: {type: string, format: uuid}
+      responses:
+        '202':
+          description: Selection locked and matching queued.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/Error'}
+  /api/runs/{run_id}/face-groups/{group_id}/preview:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+      - name: group_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: getFaceGroupPreview
+      responses:
+        '200':
+          description: Generation-pinned temporary JPEG preview.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {image/jpeg: {schema: {type: string, contentEncoding: binary}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/runs/{run_id}/results:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    get:
+      operationId: getResults
+      responses:
+        '200':
+          description: Pre-enrollment candidate snapshot.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Results'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/runs/{run_id}/retry:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      operationId: retryRun
+      responses:
+        '202':
+          description: The persisted failed step was requeued.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/runs/{run_id}/cancel:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      operationId: cancelRun
+      responses:
+        '202':
+          description: Cancelled or cooperative cancellation requested.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Run'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/gallery/faces/{representative_id}:
+    parameters:
+      - name: representative_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: getRepresentativeFace
+      responses:
+        '200':
+          description: Active generation-pinned representative JPEG.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {image/jpeg: {schema: {type: string, contentEncoding: binary}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/subjects/{subject_id}:
+    parameters:
+      - name: subject_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: getSubject
+      responses:
+        '200':
+          description: Bounded subject summary and representative gallery.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Subject'}
+        '404': {$ref: '#/components/responses/NotFound'}
+components:
+  securitySchemes:
+    iap: {type: openIdConnect, openIdConnectUrl: 'https://cloud.google.com/iap'}
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 16, maxLength: 128}
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+  headers:
+    NoStore: {schema: {type: string, const: no-store}}
+    ETag: {schema: {type: string}}
+  responses:
+    Error:
+      description: Request error.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Conflict:
+      description: Request conflicts with current state or idempotency payload.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    NotFound:
+      description: Unknown run.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    CreateRunRequest:
+      type: object
+      additionalProperties: false
+      required: [handling_policy, source]
+      properties:
+        handling_policy:
+          type: string
+          enum: [search_then_discard, retain_and_enroll]
+          description: retain_and_enroll is reserved and returns feature_not_available in Phase 1.
+        source:
+          oneOf:
+            - $ref: '#/components/schemas/UrlSource'
+            - $ref: '#/components/schemas/UploadSource'
+          discriminator: {propertyName: kind}
+    UrlSource:
+      type: object
+      additionalProperties: false
+      required: [kind, url]
+      properties:
+        kind: {type: string, const: url}
+        url: {type: string, format: uri, pattern: '^https://'}
+    UploadSource:
+      type: object
+      additionalProperties: false
+      required: [kind, content_type, bytes]
+      properties:
+        kind: {type: string, const: upload}
+        content_type: {type: string, enum: [image/jpeg, image/png, video/mp4]}
+        bytes: {type: integer, minimum: 1}
+    Run:
+      type: object
+      required: [run_id, state, handling_policy, status_url, created_at, expires_at]
+      properties:
+        run_id: {type: string, format: uuid}
+        state: {$ref: '#/components/schemas/RunState'}
+        handling_policy: {type: string, const: search_then_discard}
+        status_url: {type: string}
+        outcome: {type: [string, 'null'], enum: [candidates, no_faces, null]}
+        retryable: {type: boolean, default: false}
+        error: {$ref: '#/components/schemas/Error'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+    RunState:
+      type: string
+      enum: [awaiting_media, fetching, queued, detecting, awaiting_face_selection, matching, enrolling, succeeded, failed, cancelled, expired]
+    FaceGroup:
+      type: object
+      required: [group_id, preview_url, selected, quality]
+      properties:
+        group_id: {type: string, format: uuid}
+        preview_url: {type: string}
+        selected: {type: boolean}
+        quality: {type: object}
+        time_range_ms:
+          type: [object, 'null']
+          properties: {start: {type: integer}, end: {type: integer}}
+    Results:
+      type: object
+      required: [run_id, groups]
+      properties:
+        run_id: {type: string, format: uuid}
+        groups:
+          type: array
+          items:
+            type: object
+            required: [group_id, candidates]
+            properties:
+              group_id: {type: string, format: uuid}
+              candidates:
+                type: array
+                items:
+                  type: object
+                  required: [subject_id, rank, similarity, source_count, observation_count, representative_faces]
+                  properties:
+                    subject_id: {type: string, format: uuid}
+                    display_name: {type: [string, 'null']}
+                    rank: {type: integer, minimum: 1}
+                    similarity: {type: number}
+                    source_count: {type: integer, minimum: 0}
+                    observation_count: {type: integer, minimum: 0}
+                    representative_faces:
+                      type: array
+                      maxItems: 5
+                      items: {$ref: '#/components/schemas/RepresentativeFace'}
+    RepresentativeFace:
+      type: object
+      required: [representative_id, url]
+      properties:
+        representative_id: {type: string, format: uuid}
+        url: {type: string}
+        quality_score: {type: [number, 'null']}
+        source_timestamp_ms: {type: [integer, 'null']}
+    Subject:
+      type: object
+      required: [subject_id, model_version, sample_count, source_count, observation_count, representative_faces]
+      properties:
+        subject_id: {type: string, format: uuid}
+        display_name: {type: [string, 'null']}
+        model_version: {type: string}
+        sample_count: {type: integer, minimum: 0}
+        source_count: {type: integer, minimum: 0}
+        observation_count: {type: integer, minimum: 0}
+        representative_faces:
+          type: array
+          maxItems: 20
+          items: {$ref: '#/components/schemas/RepresentativeFace'}
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}

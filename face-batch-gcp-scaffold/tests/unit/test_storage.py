@@ -1,9 +1,11 @@
 import base64
+import hashlib
 
 import pytest
 
 from worker.storage import (
     GcsUri,
+    StorageRepository,
     decode_csek,
     has_customer_encryption,
     load_configured_csek,
@@ -57,3 +59,48 @@ def test_customer_encryption_resource_detection():
         {"_properties": {"customerEncryption": {"encryptionAlgorithm": "AES256"}}},
     )()
     assert has_customer_encryption(blob)
+
+
+def test_temporary_upload_is_csek_generation_guarded_and_verified():
+    class Blob:
+        generation = 9
+        size = 8
+
+        def __init__(self):
+            self.customer_encryption = {"encryptionAlgorithm": "AES256"}
+
+        def upload_from_file(self, stream, **kwargs):
+            self.uploaded = stream.read()
+            self.kwargs = kwargs
+
+        def reload(self, **_kwargs):
+            pass
+
+    class Bucket:
+        def __init__(self):
+            self.value = Blob()
+
+        def blob(self, name, **kwargs):
+            self.call = (name, kwargs)
+            return self.value
+
+    repository = object.__new__(StorageRepository)
+    repository.bucket = Bucket()
+    repository.csek = b"k" * 32
+    data = b"\x89PNG\r\n\x1a\n"
+    result = repository.upload_temporary(
+        "00000000-0000-4000-8000-000000000000",
+        data,
+        "image/png",
+        hashlib.sha256(data).hexdigest(),
+    )
+    assert result == (
+        "submissions-temporary/00000000-0000-4000-8000-000000000000/source.png",
+        9,
+        8,
+    )
+    assert repository.bucket.value.kwargs["if_generation_match"] == 0
+    # GCS validates its supported CRC32C/MD5 transport checksum. The repository
+    # independently validates the caller's SHA-256 before upload.
+    assert repository.bucket.value.kwargs["checksum"] == "auto"
+    assert repository.bucket.call[1] == {"encryption_key": b"k" * 32}

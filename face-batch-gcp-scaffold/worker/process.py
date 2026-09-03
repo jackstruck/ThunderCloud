@@ -138,7 +138,8 @@ class VideoProcessor:
                 settings.face_output_dir, job_id, external_source_ref, templates
             )
             logging.getLogger(__name__).info(
-                "face_crops_exported", extra={"job_id": job_id, "path": str(output_path)}
+                "face_crops_exported",
+                extra={"job_id": job_id, "path": str(output_path)},
             )
         if self.database is None:
             self.database = Database(

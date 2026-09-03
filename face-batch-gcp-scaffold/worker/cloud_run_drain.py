@@ -147,7 +147,10 @@ def drain(
             if expired:
                 logging.getLogger(__name__).error(
                     "work_item_dead_letter",
-                    extra={"rollout_id": rollout_id, "error_code": "TASK_LEASE_EXPIRED"},
+                    extra={
+                        "rollout_id": rollout_id,
+                        "error_code": "TASK_LEASE_EXPIRED",
+                    },
                 )
             # Current measurements are around 1.3 seconds/MiB. Three seconds/MiB plus
             # two minutes fixed overhead is deliberately conservative.

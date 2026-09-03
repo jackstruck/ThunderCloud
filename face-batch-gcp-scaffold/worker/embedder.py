@@ -42,9 +42,7 @@ class OnnxFaceEmbedder:
                 (112, 112),
             )
         model_input = (
-            cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            if self.color_order == "RGB"
-            else face
+            cv2.cvtColor(face, cv2.COLOR_BGR2RGB) if self.color_order == "RGB" else face
         ).astype(np.float32)
         tensor = ((model_input - 127.5) / 127.5).transpose(2, 0, 1)[None, ...]
         output = self.session.run(None, {self.input_name: tensor})[0].reshape(-1)

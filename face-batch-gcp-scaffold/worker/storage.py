@@ -58,7 +58,9 @@ def load_csek_secret(project: str, secret_id: str) -> bytes:
     return decode_csek(response.payload.data)
 
 
-def load_configured_csek(project: str, path: Path | None, secret_id: str | None) -> bytes:
+def load_configured_csek(
+    project: str, path: Path | None, secret_id: str | None
+) -> bytes:
     if secret_id:
         return load_csek_secret(project, secret_id)
     if path is None:
@@ -136,7 +138,9 @@ class StorageRepository:
         blob = self.bucket.blob(uri.object_name, encryption_key=self.csek)
         blob.reload()
         if not has_customer_encryption(blob):
-            raise RuntimeError("source object does not report customer-supplied encryption")
+            raise RuntimeError(
+                "source object does not report customer-supplied encryption"
+            )
         return int(blob.generation), int(blob.size)
 
     def stage(self, source_uri: str, metadata: dict[str, str]) -> tuple[str, int, int]:
@@ -219,3 +223,165 @@ class StorageRepository:
         self.bucket.blob(
             uri.object_name, generation=generation, encryption_key=self.csek
         ).delete(if_generation_match=generation)
+
+    def upload_temporary(
+        self,
+        run_id: str,
+        data: bytes,
+        content_type: str,
+        sha256: str,
+    ) -> tuple[str, int, int]:
+        extension = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "video/mp4": ".mp4",
+        }.get(content_type)
+        if extension is None:
+            raise ValueError("unsupported temporary media content type")
+        if hashlib.sha256(data).hexdigest() != sha256:
+            raise ValueError("temporary media checksum mismatch")
+        uuid.UUID(run_id)
+        object_name = f"submissions-temporary/{run_id}/source{extension}"
+        blob = self.bucket.blob(object_name, encryption_key=self.csek)
+        blob.upload_from_file(
+            io.BytesIO(data),
+            size=len(data),
+            content_type=content_type,
+            if_generation_match=0,
+            checksum="auto",
+            timeout=300,
+        )
+        blob.reload(timeout=30)
+        if not has_customer_encryption(blob):
+            raise RuntimeError(
+                "temporary object does not report customer-supplied encryption"
+            )
+        if int(blob.size) != len(data):
+            raise RuntimeError("temporary object size differs from fetched media")
+        return object_name, int(blob.generation), int(blob.size)
+
+    def delete_temporary(self, object_name: str, generation: int) -> None:
+        if not object_name.startswith("submissions-temporary/"):
+            raise ValueError(
+                "cleanup object is outside the temporary submission prefix"
+            )
+        if generation <= 0:
+            raise ValueError("cleanup generation must be positive")
+        self.bucket.blob(
+            object_name, generation=generation, encryption_key=self.csek
+        ).delete(if_generation_match=generation, timeout=30)
+
+    def temporary_generation(self, object_name: str) -> int:
+        if not object_name.startswith("submissions-temporary/"):
+            raise ValueError("object is outside the temporary submission prefix")
+        blob = self.bucket.blob(object_name, encryption_key=self.csek)
+        blob.reload(timeout=30)
+        if not has_customer_encryption(blob):
+            raise RuntimeError(
+                "temporary object does not report customer-supplied encryption"
+            )
+        return int(blob.generation)
+
+    def download_temporary(
+        self, object_name: str, generation: int, max_bytes: int
+    ) -> tuple[bytes, str]:
+        if not object_name.startswith("submissions-temporary/"):
+            raise ValueError("media object is outside the temporary submission prefix")
+        blob = self.bucket.blob(
+            object_name, generation=generation, encryption_key=self.csek
+        )
+        blob.reload(timeout=30)
+        if not has_customer_encryption(blob):
+            raise RuntimeError(
+                "temporary object does not report customer-supplied encryption"
+            )
+        if int(blob.size or 0) <= 0 or int(blob.size) > max_bytes:
+            raise ValueError("temporary object exceeds configured byte limit")
+        data = blob.download_as_bytes(
+            if_generation_match=generation, timeout=300, checksum="auto"
+        )
+        return data, hashlib.sha256(data).hexdigest()
+
+    def upload_preview(
+        self, run_id: str, group_id: str, data: bytes
+    ) -> tuple[str, int]:
+        uuid.UUID(run_id)
+        uuid.UUID(group_id)
+        object_name = f"submissions-temporary/{run_id}/previews/{group_id}.jpg"
+        blob = self.bucket.blob(object_name, encryption_key=self.csek)
+        blob.upload_from_file(
+            io.BytesIO(data),
+            size=len(data),
+            content_type="image/jpeg",
+            if_generation_match=0,
+            checksum="auto",
+            timeout=60,
+        )
+        blob.reload(timeout=30)
+        if not has_customer_encryption(blob):
+            raise RuntimeError("preview does not report customer-supplied encryption")
+        return object_name, int(blob.generation)
+
+    def download_private_jpeg(self, object_name: str, generation: int) -> bytes:
+        if not object_name.startswith(("submissions-temporary/", "subject-gallery/")):
+            raise ValueError("image object is outside an allowed private prefix")
+        blob = self.bucket.blob(
+            object_name, generation=generation, encryption_key=self.csek
+        )
+        blob.reload(timeout=30)
+        if not has_customer_encryption(blob):
+            raise RuntimeError(
+                "private image does not report customer-supplied encryption"
+            )
+        if blob.content_type != "image/jpeg" or int(blob.size or 0) > 5_000_000:
+            raise ValueError("private image metadata is invalid")
+        return blob.download_as_bytes(
+            if_generation_match=generation, timeout=60, checksum="auto"
+        )
+
+    def download_source_generation(
+        self, source_uri: str, generation: int, max_bytes: int
+    ) -> bytes:
+        uri = self.source_uri(source_uri)
+        blob = self.bucket.blob(
+            uri.object_name, generation=generation, encryption_key=self.csek
+        )
+        blob.reload(timeout=30)
+        if not has_customer_encryption(blob):
+            raise RuntimeError("source does not report customer-supplied encryption")
+        if int(blob.size or 0) <= 0 or int(blob.size) > max_bytes:
+            raise ValueError("source exceeds gallery backfill byte limit")
+        return blob.download_as_bytes(
+            if_generation_match=generation, timeout=900, checksum="auto"
+        )
+
+    def upload_gallery_face(
+        self, subject_id: str, representative_id: str, data: bytes
+    ) -> tuple[str, int]:
+        uuid.UUID(subject_id)
+        uuid.UUID(representative_id)
+        if not data.startswith(b"\xff\xd8\xff") or len(data) > 5_000_000:
+            raise ValueError("representative face must be a bounded JPEG")
+        object_name = f"subject-gallery/{subject_id}/{representative_id}.jpg"
+        blob = self.bucket.blob(object_name, encryption_key=self.csek)
+        blob.upload_from_file(
+            io.BytesIO(data),
+            size=len(data),
+            content_type="image/jpeg",
+            if_generation_match=0,
+            checksum="auto",
+            timeout=60,
+        )
+        blob.reload(timeout=30)
+        if not has_customer_encryption(blob):
+            raise RuntimeError(
+                "gallery object does not report customer-supplied encryption"
+            )
+        return object_name, int(blob.generation)
+
+    def delete_gallery_face(self, object_name: str, generation: int) -> None:
+        if not object_name.startswith("subject-gallery/"):
+            raise ValueError("object is outside the gallery prefix")
+        self.bucket.blob(
+            object_name, generation=generation, encryption_key=self.csek
+        ).delete(if_generation_match=generation, timeout=30)

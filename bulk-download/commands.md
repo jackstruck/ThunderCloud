@@ -151,4 +151,4 @@ record them before declaring the added JustPaste set complete.
 Bulk Download: codex resume 01a059d9-0b0d-7592-a137-15ba8d60bf8e
 Face Batch: codex resume 01a05d3f-5aa4-7a71-97d5-29d7999a1ca9
 Face Probe and Planning: codex resume 01a063ae-b120-7323-8818-601721b8bae1
-Internal Team Version: codex resume 
+Phase One: codex resume 01a06444-3cfd-7743-aca4-6975a19c4668

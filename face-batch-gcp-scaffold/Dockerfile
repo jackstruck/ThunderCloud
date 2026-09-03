@@ -13,6 +13,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY worker ./worker
+COPY ui ./ui
 RUN python3 -m venv /opt/venv \
     && python -m pip install --upgrade pip \
     && python -m pip install . \

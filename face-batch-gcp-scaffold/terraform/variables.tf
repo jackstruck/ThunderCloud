@@ -106,6 +106,22 @@ variable "cloud_run_worker_image" {
   }
 }
 
+variable "interactive_gpu_image" {
+  description = "Optional immutable worker digest for the Phase 1 interactive GPU job; defaults to cloud_run_worker_image."
+  type        = string
+  default     = null
+  nullable    = true
+  validation {
+    condition = var.interactive_gpu_image == null || (
+      startswith(
+        var.interactive_gpu_image,
+        "${var.region}-docker.pkg.dev/${var.project_id}/",
+      ) && can(regex("@sha256:[0-9a-f]{64}$", var.interactive_gpu_image))
+    )
+    error_message = "interactive_gpu_image must be null or an immutable digest in the project's regional Artifact Registry."
+  }
+}
+
 variable "cloud_run_task_count" {
   description = "Default tasks per execution. Execution-time overrides are used for controlled runs."
   type        = number
@@ -144,4 +160,55 @@ variable "monitoring_email_address" {
     condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.monitoring_email_address))
     error_message = "monitoring_email_address must be a valid email address."
   }
+}
+
+variable "enable_phase1_console" {
+  description = "Create the Phase 1 console and ingestion stubs after a deployable console image is supplied."
+  type        = bool
+  default     = false
+}
+
+variable "console_image" {
+  description = "Immutable Artifact Registry digest containing face-console and face-ingest-drain entrypoints."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.console_image == null || (
+      startswith(var.console_image, "${var.region}-docker.pkg.dev/${var.project_id}/") &&
+      can(regex("@sha256:[0-9a-f]{64}$", var.console_image))
+    )
+    error_message = "console_image must be null or an immutable digest in the project's regional Artifact Registry."
+  }
+}
+
+variable "console_origin" {
+  description = "Exact HTTPS origin used for resumable-upload CORS and mutation Origin validation."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.console_origin == null || can(regex("^https://[^/]+$", var.console_origin))
+    error_message = "console_origin must be null or an exact HTTPS origin without a path."
+  }
+}
+
+variable "approved_iap_member" {
+  description = "Single IAM principal granted access through IAP, normally group:address and temporarily user:address during acceptance."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.approved_iap_member == null || can(regex("^(group|user):[^@[:space:]]+@[^@[:space:]]+$", var.approved_iap_member))
+    error_message = "approved_iap_member must be null or an explicit group: or user: IAM principal."
+  }
+}
+
+variable "enable_arbitrary_host_fetch" {
+  description = "Enable direct arbitrary HTTPS media after the connection-pinning SSRF matrix passes."
+  type        = bool
+  default     = false
 }

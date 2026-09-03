@@ -112,6 +112,10 @@ new submission cannot appear to have been its own prior match.
 Every approved internal user may select `retain_and_enroll`. Authentication and the
 closed user allowlist are the initial boundary protecting gallery writes.
 
+Phase 1 exposes only `search_then_discard`. The UI hides the retention control and the
+API rejects `retain_and_enroll` with a stable `feature_not_available` error until the
+Phase 2 enrollment gates pass. It must not accept a retention request and defer it.
+
 ### Technical implementation
 
 Create `POST /api/runs` with an idempotency key and one source object:
@@ -154,12 +158,24 @@ enabled source adapter.
 ### Technical implementation
 
 Normalize every resolver result into `{final_url, source_adapter, content_type,
-expected_bytes?}`. Reuse the URL canonicalization, DNS/IP rejection, redirect
-validation, bounded reads, and media checks from `bulk-download` by extracting shared
-code into a package rather than copying it.
+expected_bytes?}`. Extract the bounded reads and media checks from `bulk-download`, but
+do not reuse its current host check as the SSRF boundary: it validates one DNS lookup
+and then allows the HTTP client to resolve the host again when connecting. The shared
+fetch component must resolve once, reject every non-public address (including
+IPv4-mapped IPv6), connect only to one of those validated addresses while preserving
+the original TLS SNI and HTTP Host, and repeat the process independently for every
+redirect and retry. If that transport cannot be proven before Phase 1, limit link
+fetching to explicitly allowlisted adapters and direct upload; do not enable arbitrary
+public hosts.
 
-Run link retrieval asynchronously with `run_id` through one shared CPU queue-drain mode,
-not a separate Cloud Run Job for every URL. Write only to
+Run link retrieval asynchronously with `run_id` through one shared CPU Cloud Run Job
+named `face-ingest-drain`, not in the request-serving service. `face-console` inserts a
+work item and invokes the existing job definition through the Cloud Run Jobs API. A
+single-task execution drains available work using database leases and exits when the
+queue is empty. Concurrent invocations are harmless because workers claim rows with
+`FOR UPDATE SKIP LOCKED`; initially cap job parallelism and CPU ingestion concurrency at
+one. A scheduled reconciliation execution picks up work left queued after a failed
+invocation. Write only to
 `submissions-temporary/<run_id>/source.<ext>`, use `if_generation_match=0`, calculate
 SHA-256 while streaming, and record the resulting generation and size. Direct media may
 come from any public host that passes all network and media validation. Enable
@@ -192,14 +208,40 @@ The API should immediately return an opaque UUID `run_id` and a status URL such 
 `/runs/{run_id}`. The UI should show the ID with a copy button and provide a separate
 **Check a run** entry point where an authenticated user can paste it. A run ID is a
 locator, not a credential: every status/result request must still authorize the caller.
+With the initial single role, all approved `internal_user` members may view and resume
+all runs. Record the submitter for context, but do not add a per-run sharing model yet.
 
-Run states should be explicit, for example `awaiting_media`, `fetching`, `queued`,
-`detecting`, `awaiting_face_selection`, `matching`, `enrolling`, `succeeded`, `failed`,
-and `expired`. The status page should show safe progress, timestamps, retry state, and
+Run states are `awaiting_media`, `fetching`, `queued`, `detecting`,
+`awaiting_face_selection`, `matching`, `enrolling`, `succeeded`, `failed`, `cancelled`,
+and `expired`. Zero detected faces completes as `succeeded` with an empty result and a
+`no_faces` outcome. Zero selected faces remains `awaiting_face_selection`; the user may
+revise the selection or cancel. Selection becomes immutable when matching starts.
+Cleanup and promotion use operation states rather than multiplying run states, and a
+failure records its owning step and whether it is retryable. The status page should show
+safe progress, timestamps, retry state, and
 sanitized errors. When detection completes, that same page should present face groups
 for selection. It may poll with backoff; email or another notification can be added
 later. Image processing may be quick, but link retrieval, video processing, user
 selection, and GPU startup make a long synchronous HTTP request unreliable.
+
+Allowed principal transitions are intentionally small:
+
+```text
+awaiting_media → queued | expired | cancelled
+fetching → queued | failed | cancelled
+queued → detecting | failed | cancelled
+detecting → awaiting_face_selection | succeeded(no_faces) | failed | cancelled
+awaiting_face_selection → matching | expired | cancelled
+matching → succeeded | enrolling | failed
+enrolling → succeeded | failed
+failed(retryable) → owning pre-failure state
+```
+
+Cancellation after a worker starts is cooperative: record `cancel_requested`, stop at a
+safe checkpoint, then enter `cancelled` and enqueue cleanup. Cancellation is rejected
+once enrollment begins. A selection ETag permits revision only while
+`awaiting_face_selection`. Cleanup failure leaves the terminal run unchanged and its
+operation retryable; promotion failure occurs before enrollment and fails that step.
 
 Because the operation is asynchronous, some durable request and result state is
 unavoidable even when media retention is disabled. That state should contain only
@@ -221,14 +263,21 @@ Suggested endpoints:
 | --- | --- | --- |
 | `POST` | `/api/runs` | Create a URL or upload run |
 | `POST` | `/api/runs/{run_id}/upload-session` | Return a scoped resumable session URI |
+| `POST` | `/api/runs/{run_id}/upload-complete` | Finalize upload with expected size and SHA-256 |
 | `GET` | `/api/runs/{run_id}` | Return state, progress, and sanitized error |
 | `GET` | `/api/runs/{run_id}/face-groups` | Return temporary selection previews |
 | `PUT` | `/api/runs/{run_id}/face-selection` | Confirm selected group IDs |
 | `GET` | `/api/runs/{run_id}/results` | Return candidates and enrollment outcome |
 | `POST` | `/api/runs/{run_id}/retry` | Retry an explicitly retryable failed step |
+| `POST` | `/api/runs/{run_id}/cancel` | Cancel a run that has not begun enrollment |
 
-Return `404` for unknown or unauthorized run IDs. Use a row version or ETag for
-selection updates so two browser tabs cannot overwrite each other.
+Return `404` for unknown run IDs. Any approved group member is authorized under the
+initial team-wide visibility rule. Use a row version or ETag for selection updates so
+two browser tabs cannot overwrite each other. A retry is accepted only for the step
+recorded as failed; the worker that owns that step owns the retry. Enrollment of all
+selected groups is one idempotent database transaction, so the run cannot expose a
+partially enrolled result. Complete media promotion before that transaction; if
+promotion fails, remain retryable without gallery mutation.
 
 ## UI and serverless shape
 
@@ -252,8 +301,9 @@ the same service for the first version. Manage its runtime identity, Secret Mana
 access, Cloud SQL connection, GCS permissions, configuration, and invocation policy in
 Terraform.
 
-The service invokes Cloud Run Jobs and returns immediately; it never performs GPU work
-inside an HTTP handler. The UI polls `GET /api/runs/{run_id}` with exponential backoff
+The service invokes `face-ingest-drain` for CPU retrieval and the existing GPU job for
+inference, then returns immediately; it performs neither task inside an HTTP handler.
+The UI polls `GET /api/runs/{run_id}` with exponential backoff
 and stops on `awaiting_face_selection`, success, failure, or expiry. Set `Cache-Control:
 no-store` on run, preview, candidate, and gallery responses.
 
@@ -281,8 +331,10 @@ receive the CSEK at any step.
 For a direct file upload, the authenticated Cloud Run API should initiate a resumable
 GCS upload with the CSEK headers server-side and return only the scoped session URI to
 the browser. Cloud Storage treats that session URI as a bearer credential, so it must be
-short-lived in the UI, transmitted only over HTTPS, bound to a random object name, and
-never logged. The browser uploads bytes to that session without learning the CSEK.
+treated as a secret, transmitted only over HTTPS, bound to a random object name, and
+never logged. Cloud Storage sessions can remain usable for up to one week; hiding the
+URI in the UI does not revoke it. The browser uploads bytes to that session without
+learning the CSEK.
 
 For a submitted link, the backend fetcher writes the bytes with the Secret Manager CSEK.
 For processing and later evidence review, dedicated backend identities retrieve the key
@@ -305,10 +357,20 @@ short fail-safe lifecycle; retained training and gallery prefixes must not inher
 Every write uses `if_generation_match=0`; every read, promotion, or deletion supplies
 the recorded generation. Verify CSEK metadata, size, and SHA-256 before advancing.
 
-The API initializes resumable sessions with the Secret Manager CSEK. Never log the
-session URI. After browser completion, reload and verify the expected random object
-before queueing detection. Use an idempotent cleanup queue for abandoned completed
-uploads, exact-generation promotion, and deletion.
+The API initializes resumable sessions with the Secret Manager CSEK and forwards the
+browser's validated `Origin` on initiation. Configure bucket CORS for only the console
+origin and required upload methods and headers. Never log or persist the session URI.
+The browser may cancel an incomplete session with `DELETE`; otherwise it expires at the
+provider limit.
+
+After upload, the browser calls `POST /api/runs/{run_id}/upload-complete` with the
+expected byte length and SHA-256. The API reloads the random object, records its
+generation, verifies size and encryption metadata, and changes `awaiting_media` to
+`queued`. The ingestion worker verifies SHA-256 while streaming before detection; a
+mismatch fails the run and schedules exact-generation deletion. Runs not finalized
+within seven days expire. Only completed uploads create GCS objects, so lifecycle
+cleanup covers completed orphans; incomplete sessions are cancelled by the browser or
+expire within one week.
 
 ### Retention policy
 
@@ -330,6 +392,23 @@ uploads, exact-generation promotion, and deletion.
 
 Use a seven-day GCS lifecycle as fail-safe cleanup only on the temporary prefix. Do not
 apply it to training media or subject-gallery objects.
+
+Use a daily Cloud Scheduler invocation of the shared CPU job's `maintenance` mode as
+the cleanup authority. It expires stale runs, deletes expired candidate rows and
+temporary previews/media by exact generation, and retries `promotion_pending` and
+`deletion_pending` operations. Lifecycle rules remain a fail-safe, not the source of
+SQL state transitions. A reconciliation report lists items still failing after bounded
+retries.
+
+Deduplicate retained source storage by SHA-256 while keeping every `media_submission`
+distinct. A retained submission with an identical digest reuses the available
+generation-pinned `source_asset`; otherwise it creates a new retained source. Do not use
+the existing `(external_source_ref, source_sha256)` uniqueness rule as the upload
+identity because uploads have no stable external reference. Enrollment remains tied to
+the submission's selected face groups—two submissions of the same multi-person media
+may intentionally select different people—and its per-group idempotency keys prevent a
+retry of one submission from contributing twice. `search_then_discard` runs never claim
+or mutate a retained source merely because their digest matches.
 
 ## Face-group selection and enrollment
 
@@ -361,6 +440,13 @@ Refactor processing into two retryable stages:
    performs the read-only candidate query, snapshots candidates, and enrolls when the
    handling policy requires it.
 
+Invoke the same GPU Job definition once for `detect_groups`; it exits after recording
+`awaiting_face_selection`. Confirmation invokes it again for
+`match_selected_groups`. This second allocation is a Phase 1 cost and latency gate, not
+an assumed acceptable path. Benchmark CPU embedding of the small selected-crop set as
+the fallback; if it meets the two-minute image-stage target, keep GPU detection but run
+selected-crop embedding and matching in `face-ingest-drain` to avoid a second GPU start.
+
 `submission_face_group` stores a random `group_id`, run ID, bounding box or time range,
 quality summary, preview generation references, selection state, and model versions.
 The browser returns only server-generated group IDs, never coordinates or object paths.
@@ -377,6 +463,14 @@ The UI does not ask the user to confirm subject attachment because full source e
 is not yet available there for a better comparison. Candidate rankings must still show
 the pre-enrollment result and automatic outcome. Similarity does not assert a real-world
 identity, and later merge/split tools must repair incorrect clustering.
+
+Automatic enrollment is disabled until all Phase 2 gates pass. The threshold version
+must be calibrated and approved rather than `unvalidated-v1`; write-path matching must
+filter subjects by embedding model version; a matched subject's canonical embedding
+and `sample_count` must update atomically; subject creation must be race-safe; and a
+tested manual merge/split correction command must exist before the UI can mutate the
+gallery. Updating a canonical embedding uses a normalized, sample-count-weighted mean
+under a subject-row lock and records the enrolled group exactly once.
 
 ## Candidate response
 
@@ -426,11 +520,23 @@ and splits must recompute its membership so a crop never remains displayed for t
 wrong subject. Old crop objects can be removed by exact generation after they are no
 longer referenced and the applicable cleanup delay has passed.
 
-Existing subjects need a one-time backfill before the team UI is considered ready.
-Select their highest-quality `face_track` observations, retrieve the generation-pinned
-retained sources, regenerate representative crops around the recorded timestamps, and
-write the gallery records. The current locally retained review directories are not a
-complete or authoritative gallery source.
+Gallery replacement is publish-then-retire. Upload every new crop first and insert it
+as inactive. In one Cloud SQL transaction, activate the complete new set and deactivate
+the old set. Gallery reads resolve only active generation-pinned rows, so the response
+never points at an object deleted before publication. The maintenance job deletes
+retired objects after a short grace period; failed deletion is harmless and retryable.
+
+Existing subjects need a one-time backfill before the team UI is considered ready. The
+current `face_track` rows do not contain per-observation crop timestamps or boxes, so a
+backfill cannot simply retrieve an already identified best frame. Retrieve each
+generation-pinned retained source and rerun detection/tracking within the stored track
+time ranges. Associate a regenerated track to the existing row only when its time-range
+overlap and model-compatible aggregate-embedding similarity produce one unambiguous
+winner; ambiguous or missing matches are skipped and reported, never reassigned. Choose
+the best regenerated observation and write the gallery record without changing the
+existing subject. Measure scan cost and successful-association rate on a sample before
+the full backfill. The current locally retained review directories are not a complete
+or authoritative gallery source.
 
 Incoming face-selection previews and gallery representative crops serve different
 purposes. Submission previews are temporary and show what the user may select. Gallery
@@ -561,6 +667,10 @@ If any member is outside the project's Google organization, configure IAP's exte
 OAuth client once. Derive the principal from verified IAP identity, never a request-body
 field. Every approved group member passes the same application authorization check.
 
+Before deployment, inspect the actual project's organization and OAuth configuration
+and complete an end-to-end IAP login with one intended Proton-backed Google Account.
+Treat external-user access as deployment-verified, not guaranteed solely by the design.
+
 For cookie sessions, use secure, HTTP-only, same-site cookies and CSRF tokens on
 mutations. Validate Origin, rate-limit creation and status polling, cap concurrent active
 runs per user, and sanitize errors. The one new console/ingestion service account
@@ -632,6 +742,7 @@ detection, user wait, matching, and enrollment can be evaluated separately.
   storage.
 - Show representative faces on candidate cards and subject pages.
 - Run managed candidate search without enrollment.
+- Hide the retention control and reject `retain_and_enroll` at the API boundary.
 - Return a copyable run ID immediately and delete `search_then_discard` media after
   terminal processing.
 - Add seven-day result retention, 30-day operational logging, quotas, and rate limits.
@@ -667,11 +778,16 @@ detection, user wait, matching, and enrollment can be evaluated separately.
 - Phase 1: a link and direct upload both reach `awaiting_face_selection`; selected
   groups return the same ranking as the local probe; discarded media and previews are
   removed; run lookup survives browser/session loss; and representative galleries exist
-  for all candidate subjects used in acceptance tests.
+  for all candidate subjects used in acceptance tests. Arbitrary-host fetching remains
+  disabled until connection-time address binding passes the SSRF matrix. Browser upload
+  acceptance covers finalize, checksum mismatch, cancel/abandon, configured CORS, and
+  the actual project's IAP flow for an intended external account.
 - Phase 2: retained media is CSEK-encrypted and generation-pinned, only selected groups
   contribute exactly once, candidates reflect the pre-enrollment gallery, the calibrated
-  rule deterministically attaches or creates, and retries cannot duplicate a sample or
-  subject update.
+  and model-version-filtered rule deterministically attaches or creates, matched
+  canonical embeddings and sample counts update atomically, concurrent creation is
+  race-safe, a manual merge/split repair command is tested, and retries cannot duplicate
+  a sample or subject update.
 - Phase 3: crop, clip, and full-source endpoints cannot substitute object names or
   generations, never expose CSEK/GCS credentials, and leave no plaintext artifact after
   their cleanup window.
@@ -708,9 +824,19 @@ three active or queued runs per user, and interactive queue priority without pre
 Link support is decided: accept direct HTTPS image/video links from validated public
 hosts, direct JustPaste links, direct Luluvid links, and file uploads. Reject HeyLink and
 unsupported arbitrary HTML pages. Keep JustPaste/Luluvid modular and revisit it if usage
-or reliability no longer justifies maintenance.
+or reliability no longer justifies maintenance. Arbitrary-host support is conditional
+on the connection-time SSRF gate; adapters and upload can ship first.
 
-There are no outstanding product decisions currently identified in this plan.
+Run visibility is decided: all members of the one approved group may view all runs.
+Phase 1 policy exposure is decided: search-only is exposed; retention is rejected until
+Phase 2. CPU ingestion, upload finalization, maintenance ownership, deduplication, and
+gallery replacement are specified above. No unresolved product choice blocks interface
+design, but the bounded technical proofs below block enabling their dependent features.
+
+Before team launch, name one internal owner to acknowledge the intended collection use
+and the already-decided deletion behavior: deleting source media can preserve face
+embeddings and representative gallery faces. This is a launch sign-off, not a new audit
+service, role system, or governance workstream.
 
 ### Technical review artifacts
 
@@ -736,21 +862,38 @@ OpenAPI request/response schemas, run-state transition tests, Terraform stubs fo
 candidate gallery views. Review those interfaces before implementing remote media fetch
 or gallery mutation.
 
-Before that review closes, complete five bounded checks:
+Before that review closes, complete these bounded checks:
 
 1. prove a browser resumable upload works when the backend applies the CSEK without
-   exposing it;
-2. measure the second GPU allocation required by detect-then-select-then-match;
-3. estimate time and cost for representative-gallery backfill;
-4. calibrate the automatic subject-attachment rule; and
-5. finish and reconcile the current historical rollout.
+   exposing it, including Origin/CORS, explicit finalization, checksum failure,
+   cancellation, and abandonment;
+2. prove the arbitrary-URL transport binds the connection to the validated public IP
+   and rejects DNS rebinding, IPv4-mapped IPv6, redirect-to-private, and DNS-change test
+   cases;
+3. measure the second GPU allocation required by detect-then-select-then-match and the
+   CPU selected-crop fallback;
+4. sample the representative-gallery backfill to measure cost and unambiguous track
+   reassociation rate;
+5. calibrate the automatic subject-attachment rule and test model-version filtering,
+   canonical updates, creation races, idempotent retries, and manual merge/split repair;
+6. verify IAP against the actual project with the intended group and an external
+   Proton-backed Google Account; and
+7. finish and reconcile the current historical rollout.
 
 ## Platform references
 
 - Cloud Storage resumable uploads and delegated session URIs:
   https://docs.cloud.google.com/storage/docs/resumable-uploads
+- Cloud Storage resumable-upload cancellation:
+  https://docs.cloud.google.com/storage/docs/performing-resumable-uploads
+- Cloud Storage CORS configuration:
+  https://cloud.google.com/storage/docs/configuring-cors
 - Cloud Storage CSEK upload requirements:
   https://docs.cloud.google.com/storage/docs/encryption/using-customer-supplied-keys
+- Cloud Run Job execution:
+  https://docs.cloud.google.com/run/docs/execute-jobs
+- Scheduled Cloud Run maintenance:
+  https://docs.cloud.google.com/run/docs/triggering/using-scheduler
 - Cloud Run service request timeouts:
   https://docs.cloud.google.com/run/docs/configuring/request-timeout
 - Cloud Run service and function request-size limits:

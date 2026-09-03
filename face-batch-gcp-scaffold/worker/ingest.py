@@ -149,7 +149,12 @@ def main(argv=None) -> None:
             )
         finally:
             database.close()
-        print(json.dumps({"rollout_id": rollout_id, "requested_count": count}, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"rollout_id": rollout_id, "requested_count": count},
+                separators=(",", ":"),
+            )
+        )
         return
 
     csek = load_configured_csek(

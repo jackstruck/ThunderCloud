@@ -65,8 +65,13 @@ class QueueDatabase:
         items: Iterable[ManifestItem],
         max_attempts: int = 3,
     ) -> tuple[str, int]:
-        if not image_digest.startswith("us-central1-docker.pkg.dev/") or "@sha256:" not in image_digest:
-            raise ValueError("image must be an immutable us-central1 Artifact Registry digest")
+        if (
+            not image_digest.startswith("us-central1-docker.pkg.dev/")
+            or "@sha256:" not in image_digest
+        ):
+            raise ValueError(
+                "image must be an immutable us-central1 Artifact Registry digest"
+            )
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
         selected = list(items)
@@ -75,7 +80,9 @@ class QueueDatabase:
         if any(not item.sha256 for item in selected):
             raise ValueError("every remotely queued item must have a manifest SHA-256")
         if any(item.bytes is None or item.bytes <= 0 for item in selected):
-            raise ValueError("every remotely queued item must have a positive byte size")
+            raise ValueError(
+                "every remotely queued item must have a positive byte size"
+            )
         rollout_id = str(uuid.uuid4())
 
         def operation(cursor):
@@ -88,9 +95,16 @@ class QueueDatabase:
                    ON CONFLICT (request_key) DO NOTHING
                    RETURNING rollout_id""",
                 (
-                    rollout_id, name, request_key, image_digest, versions.worker,
-                    versions.detector, versions.embedding, versions.threshold,
-                    creator_principal, json.dumps(configuration),
+                    rollout_id,
+                    name,
+                    request_key,
+                    image_digest,
+                    versions.worker,
+                    versions.detector,
+                    versions.embedding,
+                    versions.threshold,
+                    creator_principal,
+                    json.dumps(configuration),
                 ),
             )
             inserted = cursor.fetchone()
@@ -123,10 +137,17 @@ class QueueDatabase:
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
                        ON CONFLICT (rollout_id,source_uri,source_sha256) DO NOTHING""",
                     (
-                        effective_id, item.uid, item.object_uri, item.sha256,
-                        int(item.generation) if item.generation else None, item.bytes,
-                        item.content_type, item.timestamp, json.dumps(metadata),
-                        str(uuid.uuid4()), max_attempts,
+                        effective_id,
+                        item.uid,
+                        item.object_uri,
+                        item.sha256,
+                        int(item.generation) if item.generation else None,
+                        item.bytes,
+                        item.content_type,
+                        item.timestamp,
+                        json.dumps(metadata),
+                        str(uuid.uuid4()),
+                        max_attempts,
                     ),
                 )
             cursor.execute(
@@ -163,7 +184,9 @@ class QueueDatabase:
                 (execution_name, rollout_id),
             )
             if cursor.fetchone() is None:
-                raise RuntimeError("rollout execution is already recorded or not running")
+                raise RuntimeError(
+                    "rollout execution is already recorded or not running"
+                )
 
         self._execute(operation)
 
@@ -224,7 +247,10 @@ class QueueDatabase:
             if row is None:
                 return None
             return WorkItem(
-                *(str(value) if index in {0, 1, 10} else value for index, value in enumerate(row[:13])),
+                *(
+                    str(value) if index in {0, 1, 10} else value
+                    for index, value in enumerate(row[:13])
+                ),
                 lease_owner=owner,
                 staged_uri=row[13],
                 staged_generation=row[14],
@@ -279,7 +305,11 @@ class QueueDatabase:
     def fail(self, item: WorkItem, error_code: str, retryable: bool) -> str:
         if not _ERROR_CODE.fullmatch(error_code):
             raise ValueError("error code must be a sanitized uppercase identifier")
-        state = "retry" if retryable and item.attempt_count < item.max_attempts else "dead_letter"
+        state = (
+            "retry"
+            if retryable and item.attempt_count < item.max_attempts
+            else "dead_letter"
+        )
         self._owned_update(
             item,
             """state=%s,last_error_code=%s,updated_at=now(),lease_owner=NULL,
@@ -314,7 +344,13 @@ class QueueDatabase:
             )
             succeeded, retryable, dead, active = (int(v) for v in cursor.fetchone())
             terminal = active == 0
-            status = "failed" if terminal and dead else "succeeded" if terminal else "running"
+            status = (
+                "failed"
+                if terminal and dead
+                else "succeeded"
+                if terminal
+                else "running"
+            )
             cursor.execute(
                 """UPDATE processing_rollout SET succeeded_count=%s,retryable_count=%s,
                      dead_letter_count=%s,status=%s,
@@ -326,8 +362,14 @@ class QueueDatabase:
             row = cursor.fetchone()
             if row is None:
                 raise ValueError("rollout does not exist")
-            return {"requested": int(row[0]), "succeeded": succeeded, "retryable": retryable,
-                    "dead_letter": dead, "active": active, "status": status}
+            return {
+                "requested": int(row[0]),
+                "succeeded": succeeded,
+                "retryable": retryable,
+                "dead_letter": dead,
+                "active": active,
+                "status": status,
+            }
 
         return self._execute(operation)
 
@@ -345,10 +387,20 @@ class QueueDatabase:
             if row is None:
                 raise ValueError("rollout does not exist")
             keys = (
-                "rollout_id", "name", "image_digest", "status", "requested_count",
-                "succeeded_count", "retryable_count", "dead_letter_count",
-                "matching_enabled", "threshold_version", "cloud_run_execution_name",
-                "created_at", "started_at", "completed_at",
+                "rollout_id",
+                "name",
+                "image_digest",
+                "status",
+                "requested_count",
+                "succeeded_count",
+                "retryable_count",
+                "dead_letter_count",
+                "matching_enabled",
+                "threshold_version",
+                "cloud_run_execution_name",
+                "created_at",
+                "started_at",
+                "completed_at",
             )
             return {
                 key: (str(value) if isinstance(value, (uuid.UUID, datetime)) else value)
@@ -378,7 +430,9 @@ class QueueDatabase:
             if row is None:
                 raise ValueError("rollout does not exist")
             if tuple(row) != expected:
-                raise RuntimeError("worker configuration does not match rollout contract")
+                raise RuntimeError(
+                    "worker configuration does not match rollout contract"
+                )
 
         self._execute(operation)
 

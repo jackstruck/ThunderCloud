@@ -24,6 +24,26 @@ resource "google_storage_bucket" "archive" {
     }
   }
 
+  dynamic "cors" {
+    for_each = var.console_origin == null ? [] : [var.console_origin]
+    content {
+      origin          = [cors.value]
+      method          = ["POST", "PUT", "DELETE", "OPTIONS"]
+      response_header = ["Content-Type", "Content-Range", "Range", "X-Upload-Content-Length", "X-Upload-Content-Type"]
+      max_age_seconds = 3600
+    }
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age            = 7
+      matches_prefix = ["submissions-temporary/"]
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
   }

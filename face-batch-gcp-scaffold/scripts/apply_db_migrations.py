@@ -23,8 +23,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--password-secret", default="face-batch-postgres-admin-password"
     )
+    result.add_argument("--schema", type=Path, default=Path("scripts/db_schema.sql"))
     result.add_argument(
-        "--schema", type=Path, default=Path("scripts/db_schema.sql")
+        "--migration",
+        type=Path,
+        action="append",
+        default=[Path("migrations/001_phase1_runs.sql")],
+        help="Additive migration to apply after the base schema; may be repeated.",
     )
     return result
 
@@ -38,11 +43,15 @@ def quote_identifier(value: str) -> str:
 def main(argv=None) -> None:
     args = parser().parse_args(argv)
     password_client = secretmanager.SecretManagerServiceClient()
-    secret = password_client.access_secret_version(
-        request={
-            "name": f"projects/{args.project}/secrets/{args.password_secret}/versions/latest"
-        }
-    ).payload.data.decode("utf-8").strip()
+    secret = (
+        password_client.access_secret_version(
+            request={
+                "name": f"projects/{args.project}/secrets/{args.password_secret}/versions/latest"
+            }
+        )
+        .payload.data.decode("utf-8")
+        .strip()
+    )
     connector = Connector()
     connection = None
     try:
@@ -57,6 +66,8 @@ def main(argv=None) -> None:
         cursor = connection.cursor()
         try:
             cursor.execute(args.schema.read_text(encoding="utf-8"))
+            for migration in args.migration:
+                cursor.execute(migration.read_text(encoding="utf-8"))
             for app_user in args.app_user:
                 principal = quote_identifier(app_user)
                 cursor.execute(f"GRANT CONNECT ON DATABASE face_index TO {principal}")
@@ -64,7 +75,10 @@ def main(argv=None) -> None:
                 cursor.execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON "
                     "identity, subject, source_asset, processing_job, face_track, "
-                    f"processing_rollout, processing_work_item TO {principal}"
+                    "processing_rollout, processing_work_item, media_run, "
+                    "submission_face_group, run_candidate, run_operation, "
+                    "subject_representative_face, run_cleanup_object, "
+                    f"gallery_cleanup_object TO {principal}"
                 )
             connection.commit()
         except Exception:

@@ -14,7 +14,9 @@ from .storage import StorageRepository, load_configured_csek
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Manage face-processing Cloud Run rollouts")
+    result = argparse.ArgumentParser(
+        description="Manage face-processing Cloud Run rollouts"
+    )
     sub = result.add_subparsers(dest="command", required=True)
     for name in ("status", "reconcile"):
         command = sub.add_parser(name)
@@ -81,9 +83,17 @@ def main(argv=None) -> None:
                 csek,
             )
             lingering_staging = source_mismatch = 0
-            for source_uri, source_generation, source_bytes, staged_uri, staged_generation in objects:
+            for (
+                source_uri,
+                source_generation,
+                source_bytes,
+                staged_uri,
+                staged_generation,
+            ) in objects:
                 generation, size = storage.verify_source(source_uri)
-                if source_generation is not None and generation != int(source_generation):
+                if source_generation is not None and generation != int(
+                    source_generation
+                ):
                     source_mismatch += 1
                 if source_bytes is not None and size != int(source_bytes):
                     source_mismatch += 1
@@ -107,15 +117,22 @@ def main(argv=None) -> None:
             if args.tasks < 1 or args.tasks > 10_000:
                 raise ValueError("tasks must be between 1 and 10000")
             if args.parallelism != 1:
-                raise ValueError("parallelism must remain 1 until matching concurrency is approved")
+                raise ValueError(
+                    "parallelism must remain 1 until matching concurrency is approved"
+                )
             rollout = queue.rollout_status(args.rollout_id)
             if not rollout["matching_enabled"]:
                 raise RuntimeError("rollout matching is not enabled")
             gcloud, environment = _gcloud()
             describe = subprocess.run(
                 [
-                    gcloud, "run", "jobs", "describe", args.job,
-                    f"--project={args.project}", f"--region={args.region}",
+                    gcloud,
+                    "run",
+                    "jobs",
+                    "describe",
+                    args.job,
+                    f"--project={args.project}",
+                    f"--region={args.region}",
                     "--format=value(spec.template.spec.template.spec.containers[0].image)",
                 ],
                 check=True,
@@ -125,14 +142,22 @@ def main(argv=None) -> None:
             )
             deployed_image = describe.stdout.strip()
             if deployed_image != rollout["image_digest"]:
-                raise RuntimeError("deployed Cloud Run image does not match rollout digest")
+                raise RuntimeError(
+                    "deployed Cloud Run image does not match rollout digest"
+                )
             queue.start_rollout(args.rollout_id)
             command = [
-                gcloud, "run", "jobs", "execute", args.job,
-                f"--project={args.project}", f"--region={args.region}",
+                gcloud,
+                "run",
+                "jobs",
+                "execute",
+                args.job,
+                f"--project={args.project}",
+                f"--region={args.region}",
                 f"--tasks={args.tasks}",
                 f"--update-env-vars=FACE_ROLLOUT_ID={args.rollout_id}",
-                "--async", "--format=json",
+                "--async",
+                "--format=json",
             ]
             try:
                 completed = subprocess.run(

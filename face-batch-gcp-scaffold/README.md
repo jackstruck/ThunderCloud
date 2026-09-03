@@ -178,3 +178,51 @@ face-cloud-run reconcile --rollout-id ROLLOUT_ID
 The start command returns after Google accepts the execution. The job continues without
 the local terminal. Parallelism is deliberately locked to one until subject-creation
 concurrency and the small Cloud SQL tier have been validated.
+
+## Phase 1 managed search
+
+Phase 1 adds the IAP-protected `face-console` service, the single-task
+`face-ingest-drain` CPU job, and the `face-interactive-gpu` detect/match/backfill job.
+The browser accepts JustPaste, Luluvid, gated direct HTTPS media, and direct JPEG, PNG,
+or MP4 uploads. It exposes only `search_then_discard`; the API returns the stable
+`feature_not_available` error for `retain_and_enroll`.
+
+The retention table, adapter matrix, load target, UI flow, and remaining deployment
+evidence are maintained in [`docs/phase1-review.md`](docs/phase1-review.md).
+
+Apply the additive schema and grants before enabling the service:
+
+```bash
+python scripts/apply_db_migrations.py \
+  --app-user FACE_CONSOLE_IAM_DATABASE_USER \
+  --app-user FACE_GPU_WORKER_IAM_DATABASE_USER
+```
+
+Build a CPU console/ingestion image separately from the GPU image, push both to the
+existing Artifact Registry repository, and put immutable digests in Terraform:
+
+```bash
+docker build -f Dockerfile.console -t CONSOLE_IMAGE_TAG .
+docker build -t GPU_IMAGE_TAG .
+```
+
+Set `enable_phase1_console`, `console_image`, `console_origin`, and
+`approved_iap_member` only after reviewing the plan. Set `interactive_gpu_image` when
+the Phase 1 GPU worker must advance independently of the active bulk job; otherwise it
+inherits `cloud_run_worker_image`. Use an explicit `group:` IAM principal for team
+launch; an explicit `user:` principal may be used for a temporary single-account
+acceptance deployment. Direct arbitrary-host fetching has a separate feature flag and
+stays off until the deployed connection-pinning probe passes. Terraform enables direct
+Cloud Run IAP and grants access only to the configured principal.
+
+Run a bounded gallery sample before full backfill:
+
+```bash
+gcloud run jobs execute face-interactive-gpu --region us-central1 \
+  --update-env-vars FACE_INTERACTIVE_MODE=backfill,FACE_BACKFILL_LIMIT=25 --wait
+```
+
+The job reports bytes scanned, elapsed time, unambiguous association rate, skipped
+tracks, and source failures. Review that report before increasing the limit. It uploads
+new crops inactive, then publishes the complete set and retires old generations in one
+database transaction. Daily maintenance deletes retired objects after the grace period.
