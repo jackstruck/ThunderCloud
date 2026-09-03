@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: ThunderCloud Face Console
-  version: 0.1.0
-  description: Phase 1 search-only API. IAP authentication is required for every operation.
+  version: 0.2.0
+  description: Phase 2 search and retained-enrollment API. IAP authentication is required for every operation.
 servers:
   - url: /
 security:
@@ -58,6 +58,19 @@ paths:
                   session_uri: {type: string, format: uri}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /api/sources/{source_id}:
+    parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    delete:
+      operationId: deleteRetainedSource
+      description: Tombstones and schedules exact-generation deletion without removing derived lineage.
+      responses:
+        '202':
+          description: Source tombstoned and deletion queued.
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/runs/{run_id}/upload-complete:
     parameters: [{$ref: '#/components/parameters/RunId'}]
     post:
@@ -253,7 +266,7 @@ components:
         handling_policy:
           type: string
           enum: [search_then_discard, retain_and_enroll]
-          description: retain_and_enroll is reserved and returns feature_not_available in Phase 1.
+          description: retain_and_enroll is accepted only when the deployment gate is enabled.
         source:
           oneOf:
             - $ref: '#/components/schemas/UrlSource'
@@ -280,7 +293,7 @@ components:
       properties:
         run_id: {type: string, format: uuid}
         state: {$ref: '#/components/schemas/RunState'}
-        handling_policy: {type: string, const: search_then_discard}
+        handling_policy: {type: string, enum: [search_then_discard, retain_and_enroll]}
         status_url: {type: string}
         outcome: {type: [string, 'null'], enum: [candidates, no_faces, null]}
         retryable: {type: boolean, default: false}
@@ -314,6 +327,12 @@ components:
             required: [group_id, candidates]
             properties:
               group_id: {type: string, format: uuid}
+              enrollment:
+                type: [object, 'null']
+                properties:
+                  subject_id: {type: string, format: uuid}
+                  decision: {type: string, enum: [matched, created]}
+                  source_id: {type: string, format: uuid}
               candidates:
                 type: array
                 items:

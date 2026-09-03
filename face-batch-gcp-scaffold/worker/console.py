@@ -62,20 +62,20 @@ def _json_object() -> dict[str, Any]:
 
 
 def _create_payload(
-    value: dict[str, Any], allow_arbitrary_hosts: bool
+    value: dict[str, Any], allow_arbitrary_hosts: bool, enrollment_enabled: bool
 ) -> dict[str, Any]:
     if set(value) != {"handling_policy", "source"}:
         raise RequestError(
             422, "invalid_request", "Unexpected or missing request fields."
         )
     policy = value["handling_policy"]
-    if policy == "retain_and_enroll":
+    if policy == "retain_and_enroll" and not enrollment_enabled:
         raise RequestError(
             422,
             "feature_not_available",
             "Retained enrollment is not available in Phase 1.",
         )
-    if policy != "search_then_discard":
+    if policy not in {"search_then_discard", "retain_and_enroll"}:
         raise RequestError(
             422, "invalid_handling_policy", "Unsupported handling policy."
         )
@@ -139,6 +139,7 @@ def create_app(
     *,
     allowed_origin: str | None = None,
     allow_arbitrary_hosts: bool | None = None,
+    enrollment_enabled: bool | None = None,
     invoke_ingest=None,
     invoke_gpu_detect=None,
     invoke_gpu_match=None,
@@ -174,6 +175,10 @@ def create_app(
     if allow_arbitrary_hosts is None:
         allow_arbitrary_hosts = os.getenv(
             "FACE_ALLOW_ARBITRARY_HOSTS", "false"
+        ).lower() in {"1", "true", "yes"}
+    if enrollment_enabled is None:
+        enrollment_enabled = os.getenv(
+            "FACE_RETAINED_ENROLLMENT_ENABLED", "false"
         ).lower() in {"1", "true", "yes"}
     rate_limiter = rate_limiter or FixedWindowRateLimiter()
     if upload_service is None and repository is not None and "storage" in locals():
@@ -264,7 +269,9 @@ def create_app(
                 "invalid_idempotency_key",
                 "Idempotency-Key must be 16–128 visible ASCII characters.",
             )
-        payload = _create_payload(_json_object(), allow_arbitrary_hosts)
+        payload = _create_payload(
+            _json_object(), allow_arbitrary_hosts, enrollment_enabled
+        )
         created = repository.create(g.principal, key, payload)
         if created.created and payload["source"]["kind"] == "url":
             invoke_ingest(created.record["run_id"])
@@ -403,6 +410,12 @@ def create_app(
         record = repository.cancel(str(run_id))
         if record["state"] == "cancelled":
             invoke_maintenance(record["run_id"])
+        return jsonify(record), 202
+
+    @app.delete("/api/sources/<uuid:source_id>")
+    def delete_source(source_id: uuid.UUID):
+        record = repository.tombstone_source(str(source_id), g.principal)
+        invoke_maintenance(record["source_id"])
         return jsonify(record), 202
 
     @app.get("/")

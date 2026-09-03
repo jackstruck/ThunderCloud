@@ -2,6 +2,7 @@ locals {
   phase1_enabled              = var.enable_phase1_console && var.console_image != null && var.console_origin != null && var.approved_iap_member != null
   temporary_submission_prefix = "submissions-temporary/"
   gallery_prefix              = "subject-gallery/"
+  training_media_prefix       = "training-media/"
 }
 
 resource "google_service_account" "console" {
@@ -117,6 +118,28 @@ resource "google_storage_bucket_iam_member" "interactive_gallery_user" {
   }
 }
 
+resource "google_storage_bucket_iam_member" "interactive_training_user" {
+  count  = local.phase1_enabled && var.enable_retained_enrollment ? 1 : 0
+  bucket = google_storage_bucket.archive.name
+  role   = "roles/storage.objectUser"
+  member = google_service_account.batch_worker.member
+  condition {
+    title      = "Manage retained training submissions"
+    expression = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${local.training_media_prefix}')"
+  }
+}
+
+resource "google_storage_bucket_iam_member" "console_training_user" {
+  count  = local.phase1_enabled && var.enable_retained_enrollment ? 1 : 0
+  bucket = google_storage_bucket.archive.name
+  role   = "roles/storage.objectUser"
+  member = google_service_account.console[0].member
+  condition {
+    title      = "Delete tombstoned training submissions"
+    expression = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${local.training_media_prefix}')"
+  }
+}
+
 resource "google_cloud_run_v2_service" "console" {
   count               = local.phase1_enabled ? 1 : 0
   name                = "face-console"
@@ -193,6 +216,10 @@ resource "google_cloud_run_v2_service" "console" {
         name  = "FACE_ALLOW_ARBITRARY_HOSTS"
         value = tostring(var.enable_arbitrary_host_fetch)
       }
+      env {
+        name  = "FACE_RETAINED_ENROLLMENT_ENABLED"
+        value = tostring(var.enable_retained_enrollment)
+      }
     }
     vpc_access {
       egress = "PRIVATE_RANGES_ONLY"
@@ -208,6 +235,7 @@ resource "google_cloud_run_v2_service" "console" {
     google_secret_manager_secret_iam_member.console_csek_accessor,
     google_storage_bucket_iam_member.console_temporary_user,
     google_storage_bucket_iam_member.console_gallery_viewer,
+    google_storage_bucket_iam_member.console_training_user,
   ]
 }
 
@@ -312,6 +340,7 @@ resource "google_cloud_run_v2_job" "ingest_drain" {
     google_project_iam_member.console_roles,
     google_secret_manager_secret_iam_member.console_csek_accessor,
     google_storage_bucket_iam_member.console_temporary_user,
+    google_storage_bucket_iam_member.console_training_user,
   ]
 }
 
@@ -388,7 +417,15 @@ resource "google_cloud_run_v2_job" "interactive_gpu" {
         }
         env {
           name  = "FACE_MATCHING_ENABLED"
-          value = "false"
+          value = "true"
+        }
+        env {
+          name  = "FACE_MATCH_THRESHOLD"
+          value = tostring(var.match_threshold)
+        }
+        env {
+          name  = "FACE_THRESHOLD_VERSION"
+          value = var.threshold_version
         }
         env {
           name  = "FACE_REQUIRE_CUDA"
@@ -416,6 +453,7 @@ resource "google_cloud_run_v2_job" "interactive_gpu" {
     google_storage_bucket_iam_member.runtime_source_reader,
     google_storage_bucket_iam_member.interactive_temporary_user,
     google_storage_bucket_iam_member.interactive_gallery_user,
+    google_storage_bucket_iam_member.interactive_training_user,
   ]
 }
 

@@ -168,6 +168,12 @@ variable "enable_phase1_console" {
   default     = false
 }
 
+variable "enable_retained_enrollment" {
+  description = "Enable Phase 2 retained enrollment after its operational gates pass."
+  type        = bool
+  default     = false
+}
+
 variable "console_image" {
   description = "Immutable Artifact Registry digest containing face-console and face-ingest-drain entrypoints."
   type        = string

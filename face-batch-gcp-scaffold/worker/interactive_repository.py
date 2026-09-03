@@ -5,6 +5,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from .db import pgvector
 
 
@@ -23,6 +25,18 @@ class DetectionWork:
 class MatchGroup:
     group_id: str
     embedding: Any
+
+
+@dataclass(frozen=True)
+class MatchWork:
+    lease_owner: str
+    groups: list[MatchGroup]
+    handling_policy: str
+    object_name: str
+    generation: int
+    content_type: str
+    sha256: str
+    object_bytes: int
 
 
 class InteractiveRepository:
@@ -177,7 +191,7 @@ class InteractiveRepository:
             (run_id, run_id),
         )
 
-    def claim_matching(self, run_id: str) -> tuple[str, list[MatchGroup]] | None:
+    def claim_matching(self, run_id: str) -> MatchWork | None:
         owner = str(uuid.uuid4())
         connection = self.database.connect()
         cursor = connection.cursor()
@@ -190,7 +204,9 @@ class InteractiveRepository:
                    WHERE operation.run_id = %s AND operation.run_id = run.run_id
                      AND operation.kind = 'match' AND operation.state = 'queued'
                      AND run.state = 'matching'
-                   RETURNING operation.operation_id""",
+                   RETURNING operation.operation_id, run.handling_policy,
+                             run.object_name, run.object_generation, run.content_type,
+                             run.source_sha256, run.object_bytes""",
                 (owner, self.lease_seconds, run_id),
             )
             operation = cursor.fetchone()
@@ -210,7 +226,9 @@ class InteractiveRepository:
                 connection.rollback()
                 return None
             connection.commit()
-            return owner, groups
+            return MatchWork(owner, groups, str(operation[1]), str(operation[2]),
+                             int(operation[3]), str(operation[4]), str(operation[5]),
+                             int(operation[6]))
         except Exception:
             connection.rollback()
             raise
@@ -224,6 +242,11 @@ class InteractiveRepository:
         lease_owner: str,
         groups: list[MatchGroup],
         rankings,
+        *,
+        retained=None,
+        threshold: float | None = None,
+        threshold_version: str | None = None,
+        model_version: str | None = None,
     ) -> bool:
         connection = self.database.connect()
         cursor = connection.cursor()
@@ -259,6 +282,75 @@ class InteractiveRepository:
             if cursor.rowcount != 1:
                 connection.rollback()
                 return False
+            if retained is not None:
+                if threshold is None or threshold_version is None or model_version is None:
+                    raise ValueError("enrollment configuration is required")
+                cursor.execute("SELECT pg_advisory_xact_lock(8675309)")
+                source_id, retained_name, retained_generation, retained_bytes = retained
+                cursor.execute("SELECT source_sha256 FROM media_run WHERE run_id=%s", (run_id,))
+                source_sha256 = str(cursor.fetchone()[0])
+                cursor.execute(
+                    """INSERT INTO source_asset
+                         (source_id, external_source_ref, source_sha256, metadata,
+                          object_name, object_generation, object_bytes, content_type,
+                          encryption_mode)
+                       VALUES (%s,%s,%s,'{}'::jsonb,%s,%s,%s,
+                               (SELECT content_type FROM media_run WHERE run_id=%s),'CSEK')
+                       ON CONFLICT (source_sha256) WHERE object_name IS NOT NULL AND deleted_at IS NULL
+                       DO UPDATE SET source_sha256=EXCLUDED.source_sha256
+                       RETURNING source_id""",
+                    (source_id, f"submission:{run_id}", source_sha256, retained_name,
+                     retained_generation, retained_bytes, run_id),
+                )
+                effective_source_id = str(cursor.fetchone()[0])
+                for group, ranked in zip(groups, rankings, strict=True):
+                    top = ranked[0] if ranked else None
+                    matched = top is not None and float(top.similarity) >= threshold
+                    subject_id = str(top.subject_id) if matched else str(uuid.uuid4())
+                    cursor.execute(
+                        """INSERT INTO submission_enrollment
+                             (group_id, run_id, source_id, subject_id, decision,
+                              candidate_subject_id, candidate_similarity,
+                              embedding_model_version, threshold_version)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON CONFLICT (group_id) DO NOTHING RETURNING subject_id""",
+                        (group.group_id, run_id, effective_source_id, subject_id,
+                         "matched" if matched else "created",
+                         None if top is None else top.subject_id,
+                         None if top is None else top.similarity,
+                         model_version, threshold_version),
+                    )
+                    if not cursor.fetchone():
+                        continue
+                    if matched:
+                        cursor.execute(
+                            """SELECT canonical_embedding::text, sample_count FROM subject
+                               WHERE subject_id=%s AND model_version=%s FOR UPDATE""",
+                            (subject_id, model_version),
+                        )
+                        old, count = cursor.fetchone()
+                        combined = np.asarray(json.loads(old), dtype=np.float32) * int(count)
+                        combined += np.asarray(group.embedding, dtype=np.float32)
+                        combined /= np.linalg.norm(combined)
+                        cursor.execute(
+                            """UPDATE subject SET canonical_embedding=%s::vector,
+                                      sample_count=sample_count+1, updated_at=now()
+                               WHERE subject_id=%s""",
+                            (pgvector(combined), subject_id),
+                        )
+                    else:
+                        cursor.execute(
+                            """INSERT INTO subject
+                                 (subject_id, canonical_embedding, model_version, sample_count)
+                               VALUES (%s,%s::vector,%s,1)""",
+                            (subject_id, pgvector(group.embedding), model_version),
+                        )
+                cursor.execute(
+                    """UPDATE media_run SET retained_source_id=%s,
+                              threshold_version=%s, enrollment_completed_at=now()
+                       WHERE run_id=%s""",
+                    (effective_source_id, threshold_version, run_id),
+                )
             cursor.execute(
                 """UPDATE media_run SET state = 'succeeded', outcome = 'candidates',
                           completed_at = now(), updated_at = now(), row_version = row_version + 1
@@ -282,6 +374,23 @@ class InteractiveRepository:
         return self.database.search_subjects(
             [group.embedding for group in groups], model_version, top_k
         )
+
+    def retained_source(self, sha256: str):
+        connection = self.database.connect()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """SELECT source_id, object_name, object_generation, object_bytes
+                   FROM source_asset WHERE source_sha256=%s AND object_name IS NOT NULL
+                     AND deleted_at IS NULL""",
+                (sha256,),
+            )
+            row = cursor.fetchone()
+            return None if row is None else (str(row[0]), str(row[1]), int(row[2]), int(row[3]))
+        finally:
+            connection.rollback()
+            cursor.close()
+            connection.close()
 
     def fail(self, run_id: str, step: str, error_code: str, retryable: bool) -> None:
         if step not in {"detecting", "matching"}:

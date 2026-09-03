@@ -226,3 +226,19 @@ The job reports bytes scanned, elapsed time, unambiguous association rate, skipp
 tracks, and source failures. Review that report before increasing the limit. It uploads
 new crops inactive, then publishes the complete set and retires old generations in one
 database transaction. Daily maintenance deletes retired objects after the grace period.
+
+## Phase 2 retained enrollment
+
+Apply both additive migrations, then set `enable_retained_enrollment = true` only with
+the approved `match_threshold` and `threshold_version`. Selected groups snapshot their
+pre-enrollment candidates, copy the exact temporary generation to CSEK-encrypted
+`training-media/`, and contribute once to a model-compatible subject. The source can
+later be tombstoned through `DELETE /api/sources/{source_id}` without removing its
+derived enrollment lineage.
+
+Operators can repair clustering without direct SQL:
+
+```bash
+face-gallery-correct merge KEEP_SUBJECT_UUID MERGE_SUBJECT_UUID
+face-gallery-correct split-group ENROLLED_GROUP_UUID
+```

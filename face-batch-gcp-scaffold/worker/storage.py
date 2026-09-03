@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from google.api_core.exceptions import NotFound
+
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -270,6 +272,51 @@ class StorageRepository:
         self.bucket.blob(
             object_name, generation=generation, encryption_key=self.csek
         ).delete(if_generation_match=generation, timeout=30)
+
+    def delete_retained(self, object_name: str, generation: int) -> None:
+        if not object_name.startswith("training-media/"):
+            raise ValueError("retained object is outside the training-media prefix")
+        self.bucket.blob(
+            object_name, generation=generation, encryption_key=self.csek
+        ).delete(if_generation_match=generation, timeout=30)
+
+    def promote_temporary(
+        self, source_id: str, object_name: str, generation: int
+    ) -> tuple[str, int, int]:
+        uuid.UUID(source_id)
+        if not object_name.startswith("submissions-temporary/"):
+            raise ValueError("promotion source is outside the temporary prefix")
+        suffix = Path(object_name).suffix
+        destination_name = f"training-media/{source_id}/source{suffix}"
+        source = self.bucket.blob(
+            object_name, generation=generation, encryption_key=self.csek
+        )
+        source.reload(timeout=30)
+        if not has_customer_encryption(source):
+            raise RuntimeError("promotion source is not CSEK encrypted")
+        destination = self.bucket.blob(destination_name, encryption_key=self.csek)
+        try:
+            destination.reload(timeout=30)
+        except NotFound:
+            pass
+        else:
+            if not has_customer_encryption(destination) or destination.size != source.size:
+                raise RuntimeError("existing retained source verification failed")
+            return destination_name, int(destination.generation), int(destination.size)
+        token = None
+        while True:
+            token, _, _ = destination.rewrite(
+                source,
+                token=token,
+                if_generation_match=0,
+                if_source_generation_match=generation,
+            )
+            if token is None:
+                break
+        destination.reload(timeout=30)
+        if not has_customer_encryption(destination) or destination.size != source.size:
+            raise RuntimeError("retained source verification failed")
+        return destination_name, int(destination.generation), int(destination.size)
 
     def temporary_generation(self, object_name: str) -> int:
         if not object_name.startswith("submissions-temporary/"):

@@ -110,13 +110,14 @@ class RunRepository:
                     (run_id, submitter_principal, idempotency_key,
                      request_fingerprint, handling_policy, source_kind,
                      source_page_url, content_type, expected_bytes, state)
-                    VALUES (%s,%s,%s,%s,'search_then_discard',%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING {_RUN_COLUMNS}""",
                 (
                     str(run_id),
                     principal,
                     idempotency_key,
                     fingerprint,
+                    payload["handling_policy"],
                     source["kind"],
                     source.get("url"),
                     source.get("content_type"),
@@ -443,11 +444,15 @@ class RunRepository:
                           rc.display_name_snapshot, rc.source_count,
                           rc.observation_count, gallery.representative_id,
                           gallery.quality_score, gallery.source_timestamp_ms
+                          , enrollment.subject_id, enrollment.decision,
+                          enrollment.source_id
                    FROM submission_face_group face
                    LEFT JOIN run_candidate rc
                      ON rc.run_id = face.run_id AND rc.group_id = face.group_id
                    LEFT JOIN subject_representative_face gallery
                      ON gallery.subject_id = rc.subject_id AND gallery.active
+                   LEFT JOIN submission_enrollment enrollment
+                     ON enrollment.group_id = face.group_id
                    WHERE face.run_id = %s AND face.selected
                    ORDER BY rc.group_id, rc.rank, gallery.quality_score DESC NULLS LAST,
                             gallery.representative_id""",
@@ -491,11 +496,58 @@ class RunRepository:
                         "candidates": sorted(
                             candidates.values(), key=lambda item: item["rank"]
                         ),
+                        "enrollment": self._enrollment_for_group(
+                            cursor, run_id, group_id
+                        ),
                     }
                     for group_id, candidates in groups.items()
                 ],
             }
         finally:
             connection.rollback()
+            cursor.close()
+            connection.close()
+
+    @staticmethod
+    def _enrollment_for_group(cursor, run_id: str, group_id: str):
+        cursor.execute(
+            """SELECT subject_id, decision, source_id FROM submission_enrollment
+               WHERE run_id=%s AND group_id=%s""",
+            (run_id, group_id),
+        )
+        row = cursor.fetchone()
+        return None if row is None else {
+            "subject_id": str(row[0]), "decision": str(row[1]),
+            "source_id": str(row[2]),
+        }
+
+    def tombstone_source(self, source_id: str, principal: str) -> dict[str, Any]:
+        connection = self.database.connect()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """UPDATE source_asset SET deleted_at = COALESCE(deleted_at, now()),
+                          deletion_principal = COALESCE(deletion_principal, %s)
+                   WHERE source_id = %s AND object_name IS NOT NULL
+                   RETURNING source_id, object_name, object_generation, deleted_at""",
+                (principal, source_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise RunNotFoundError(source_id)
+            cursor.execute(
+                """INSERT INTO run_cleanup_object
+                     (run_id, object_name, object_generation)
+                   SELECT run_id, %s, %s FROM media_run
+                   WHERE retained_source_id = %s ORDER BY created_at LIMIT 1
+                   ON CONFLICT (object_name, object_generation) DO NOTHING""",
+                (row[1], row[2], source_id),
+            )
+            connection.commit()
+            return {"source_id": str(row[0]), "deleted_at": row[3]}
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
             cursor.close()
             connection.close()

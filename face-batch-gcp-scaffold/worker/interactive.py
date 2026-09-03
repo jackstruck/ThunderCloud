@@ -157,12 +157,32 @@ class InteractiveProcessor:
         claimed = self.repository.claim_matching(run_id)
         if claimed is None:
             return False
-        owner, groups = claimed
+        # Tuple support keeps lightweight repository adapters usable.
+        owner = claimed.lease_owner if hasattr(claimed, "lease_owner") else claimed[0]
+        groups = claimed.groups if hasattr(claimed, "groups") else claimed[1]
         try:
             rankings = self.repository.rank(
                 groups, self.settings.embedding_model_version, self.settings.top_k
             )
-            return self.repository.complete_matching(run_id, owner, groups, rankings)
+            retained = None
+            if getattr(claimed, "handling_policy", "search_then_discard") == "retain_and_enroll":
+                if (not self.settings.matching_enabled or
+                        self.settings.threshold_version == "unvalidated-v1"):
+                    raise RuntimeError("retained enrollment gate is not configured")
+                retained = self.repository.retained_source(claimed.sha256)
+                if retained is None:
+                    source_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-run:{run_id}"))
+                    retained = (source_id, *self.storage.promote_temporary(
+                        source_id, claimed.object_name, claimed.generation
+                    ))
+            if retained is None:
+                return self.repository.complete_matching(run_id, owner, groups, rankings)
+            return self.repository.complete_matching(
+                run_id, owner, groups, rankings, retained=retained,
+                threshold=self.settings.match_threshold,
+                threshold_version=self.settings.threshold_version,
+                model_version=self.settings.embedding_model_version,
+            )
         except RuntimeError:
             self.repository.fail(run_id, "matching", "matching_failed", True)
             return False

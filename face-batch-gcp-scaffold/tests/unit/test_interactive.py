@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 from worker.interactive import InteractiveProcessor
-from worker.interactive_repository import DetectionWork, MatchGroup
+from worker.interactive_repository import DetectionWork, MatchGroup, MatchWork
 from worker.models import Detection
 
 RUN_ID = "00000000-0000-4000-8000-000000000000"
@@ -43,6 +43,10 @@ class Storage:
         self.previews.append((run_id, group_id, content))
         return f"submissions-temporary/{run_id}/previews/{group_id}.jpg", 5
 
+    def promote_temporary(self, source_id, name, generation):
+        self.promoted = (source_id, name, generation)
+        return f"training-media/{source_id}/source.jpg", 8, len(self.data)
+
 
 class Repository:
     def __init__(self, data):
@@ -50,6 +54,7 @@ class Repository:
         self.detected = None
         self.failed = []
         self.match_completed = None
+        self.existing_retained = None
 
     def claim_detection(self, run_id):
         return DetectionWork(
@@ -81,6 +86,9 @@ class Repository:
         self.match_completed = (run_id, owner, groups, rankings)
         return True
 
+    def retained_source(self, _sha256):
+        return self.existing_retained
+
 
 def settings():
     return SimpleNamespace(
@@ -97,6 +105,9 @@ def settings():
         detector_version="detector-v1",
         embedding_model_version="embedding-v1",
         top_k=10,
+        matching_enabled=True,
+        match_threshold=0.8,
+        threshold_version="approved-v1",
     )
 
 
@@ -152,3 +163,20 @@ def test_matching_uses_model_compatible_read_only_ranker():
     )
     assert processor.match(RUN_ID)
     assert repository.match_completed[0:2] == (RUN_ID, "owner")
+
+
+def test_retained_matching_promotes_before_enrollment_commit():
+    data = jpeg()
+    repository = Repository(data)
+    repository.claim_matching = lambda _run_id: MatchWork(
+        "owner", [MatchGroup("group", [1.0] * 512)], "retain_and_enroll",
+        "submissions-temporary/run/source.jpg", 3, "image/jpeg",
+        hashlib.sha256(data).hexdigest(), len(data),
+    )
+    calls = []
+    repository.complete_matching = lambda *args, **kwargs: calls.append(kwargs) or True
+    storage = Storage(data)
+    processor = InteractiveProcessor(settings(), repository, storage, Detector(), Embedder())
+    assert processor.match(RUN_ID)
+    assert storage.promoted[1:] == ("submissions-temporary/run/source.jpg", 3)
+    assert calls[0]["threshold_version"] == "approved-v1"

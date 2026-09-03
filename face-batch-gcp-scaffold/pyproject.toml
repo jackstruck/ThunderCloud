@@ -31,6 +31,7 @@ face-ingest = "worker.ingest:main"
 face-cloud-run = "worker.cloud_run:main"
 face-probe = "worker.probe:main"
 face-console = "worker.console:main"
+face-gallery-correct = "worker.gallery_correction:main"
 
 [tool.setuptools]
 packages = ["worker"]

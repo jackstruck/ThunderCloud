@@ -49,7 +49,10 @@ class MaintenanceRepository:
                 (expired_ids, expired_ids),
             )
             cursor.execute(
-                "DELETE FROM submission_face_group WHERE run_id = ANY(%s::uuid[])",
+                """DELETE FROM submission_face_group face
+                   USING media_run run
+                   WHERE face.run_id=run.run_id AND run.run_id=ANY(%s::uuid[])
+                     AND run.handling_policy='search_then_discard'""",
                 (expired_ids,),
             )
             connection.commit()
@@ -236,7 +239,10 @@ def maintain(repository, storage) -> dict[str, int]:
     deleted = failed = 0
     while item := repository.claim_cleanup():
         try:
-            storage.delete_temporary(item.object_name, item.generation)
+            if item.object_name.startswith("training-media/"):
+                storage.delete_retained(item.object_name, item.generation)
+            else:
+                storage.delete_temporary(item.object_name, item.generation)
         except NotFound:
             # The idempotent desired state is already true.
             repository.finish_cleanup(item)

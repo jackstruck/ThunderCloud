@@ -28,7 +28,10 @@ def parser() -> argparse.ArgumentParser:
         "--migration",
         type=Path,
         action="append",
-        default=[Path("migrations/001_phase1_runs.sql")],
+        default=[
+            Path("migrations/001_phase1_runs.sql"),
+            Path("migrations/002_phase2_enrollment.sql"),
+        ],
         help="Additive migration to apply after the base schema; may be repeated.",
     )
     return result
@@ -78,7 +81,8 @@ def main(argv=None) -> None:
                     "processing_rollout, processing_work_item, media_run, "
                     "submission_face_group, run_candidate, run_operation, "
                     "subject_representative_face, run_cleanup_object, "
-                    f"gallery_cleanup_object TO {principal}"
+                    "gallery_cleanup_object, submission_enrollment "
+                    f"TO {principal}"
                 )
             connection.commit()
         except Exception:
