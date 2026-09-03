@@ -180,3 +180,20 @@ def test_retained_matching_promotes_before_enrollment_commit():
     assert processor.match(RUN_ID)
     assert storage.promoted[1:] == ("submissions-temporary/run/source.jpg", 3)
     assert calls[0]["threshold_version"] == "approved-v1"
+
+
+def test_enroll_only_does_not_promote_temporary_media():
+    data = jpeg()
+    repository = Repository(data)
+    repository.claim_matching = lambda _run_id: MatchWork(
+        "owner", [MatchGroup("group", [1.0] * 512)], "enroll_only",
+        "submissions-temporary/run/source.jpg", 3, "image/jpeg",
+        hashlib.sha256(data).hexdigest(), len(data),
+    )
+    calls = []
+    repository.complete_matching = lambda *args, **kwargs: calls.append(kwargs) or True
+    storage = Storage(data)
+    processor = InteractiveProcessor(settings(), repository, storage, Detector(), Embedder())
+    assert processor.match(RUN_ID)
+    assert not hasattr(storage, "promoted")
+    assert calls[0]["enrollment_source"][1:] == (None, None, None)

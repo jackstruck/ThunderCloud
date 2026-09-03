@@ -167,7 +167,7 @@ def test_phase1_rejects_retention_with_stable_error():
     assert response.status_code == 422
     assert response.json == {
         "code": "feature_not_available",
-        "message": "Retained enrollment is not available in Phase 1.",
+        "message": "Enrollment is not available in Phase 1.",
     }
 
 
@@ -180,6 +180,17 @@ def test_phase2_accepts_explicit_retention_policy():
     )
     assert response.status_code == 202
     assert repository.create_calls[0][2]["handling_policy"] == "retain_and_enroll"
+
+
+def test_phase2_accepts_enroll_only_policy():
+    repository = Repository()
+    response = post_run(
+        client(repository, enrollment=True),
+        {"kind": "upload", "content_type": "image/jpeg", "bytes": 10},
+        policy="enroll_only",
+    )
+    assert response.status_code == 202
+    assert repository.create_calls[0][2]["handling_policy"] == "enroll_only"
 
 
 def test_upload_run_returns_immediately_and_records_verified_principal():

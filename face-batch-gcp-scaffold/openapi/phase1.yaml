@@ -265,8 +265,8 @@ components:
       properties:
         handling_policy:
           type: string
-          enum: [search_then_discard, retain_and_enroll]
-          description: retain_and_enroll is accepted only when the deployment gate is enabled.
+          enum: [search_then_discard, retain_and_enroll, enroll_only]
+          description: Enrollment policies are accepted only when the deployment gate is enabled.
         source:
           oneOf:
             - $ref: '#/components/schemas/UrlSource'
@@ -293,7 +293,7 @@ components:
       properties:
         run_id: {type: string, format: uuid}
         state: {$ref: '#/components/schemas/RunState'}
-        handling_policy: {type: string, enum: [search_then_discard, retain_and_enroll]}
+        handling_policy: {type: string, enum: [search_then_discard, retain_and_enroll, enroll_only]}
         status_url: {type: string}
         outcome: {type: [string, 'null'], enum: [candidates, no_faces, null]}
         retryable: {type: boolean, default: false}

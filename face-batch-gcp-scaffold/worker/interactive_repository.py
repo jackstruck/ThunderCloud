@@ -243,7 +243,7 @@ class InteractiveRepository:
         groups: list[MatchGroup],
         rankings,
         *,
-        retained=None,
+        enrollment_source=None,
         threshold: float | None = None,
         threshold_version: str | None = None,
         model_version: str | None = None,
@@ -285,15 +285,32 @@ class InteractiveRepository:
             if cursor.rowcount != 1:
                 connection.rollback()
                 return False
-            if retained is not None:
+            if enrollment_source is not None:
                 if threshold is None or threshold_version is None or model_version is None:
                     raise ValueError("enrollment configuration is required")
                 cursor.execute("SELECT pg_advisory_xact_lock(8675309)")
-                source_id, retained_name, retained_generation, retained_bytes = retained
+                source_id, retained_name, retained_generation, retained_bytes = enrollment_source
                 cursor.execute("SELECT source_sha256 FROM media_run WHERE run_id=%s", (run_id,))
                 source_sha256 = str(cursor.fetchone()[0])
-                cursor.execute(
-                    """INSERT INTO source_asset
+                if retained_name is None:
+                    cursor.execute(
+                        """INSERT INTO source_asset
+                             (source_id, external_source_ref, source_sha256, metadata,
+                              content_type)
+                           VALUES (%s,%s,%s,
+                                   CASE WHEN (SELECT source_page_url FROM media_run WHERE run_id=%s) IS NULL
+                                        THEN '{}'::jsonb ELSE jsonb_build_object(
+                                          'page_url',(SELECT source_page_url FROM media_run WHERE run_id=%s)) END,
+                                   (SELECT content_type FROM media_run WHERE run_id=%s))
+                           ON CONFLICT (external_source_ref, source_sha256)
+                           DO UPDATE SET metadata=EXCLUDED.metadata
+                           RETURNING source_id""",
+                        (source_id, f"submission:{run_id}", source_sha256,
+                         run_id, run_id, run_id),
+                    )
+                else:
+                    cursor.execute(
+                        """INSERT INTO source_asset
                          (source_id, external_source_ref, source_sha256, metadata,
                           object_name, object_generation, object_bytes, content_type,
                           encryption_mode)
@@ -306,9 +323,10 @@ class InteractiveRepository:
                        ON CONFLICT (source_sha256) WHERE object_name IS NOT NULL AND deleted_at IS NULL
                        DO UPDATE SET source_sha256=EXCLUDED.source_sha256
                        RETURNING source_id""",
-                    (source_id, f"submission:{run_id}", source_sha256, run_id, run_id, retained_name,
-                     retained_generation, retained_bytes, run_id),
-                )
+                        (source_id, f"submission:{run_id}", source_sha256, run_id,
+                         run_id, retained_name, retained_generation, retained_bytes,
+                         run_id),
+                    )
                 effective_source_id = str(cursor.fetchone()[0])
                 for group, ranked in zip(groups, rankings, strict=True):
                     top = ranked[0] if ranked else None

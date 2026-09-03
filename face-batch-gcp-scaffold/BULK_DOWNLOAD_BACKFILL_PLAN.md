@@ -26,6 +26,30 @@ UUIDv5 object naming and CSEK encryption remain unchanged.
   face-batch jobs. Teardown applies only to resources and files used solely by the old
   bulk rollout or temporary backfill orchestration.
 
+### Historical cutoff and new URL queue
+
+Freeze the historical backfill input at the existing completed manifest/GCS corpus.
+Adding a URL to `../bulk-download/input/justpaste_urls.txt` does not put it into the
+backfill: a URL is historical only if it had already resolved to a usable manifest
+record and immutable GCS object at the cutoff.
+
+At review time, the JustPaste input contains 98 entries without a completed resolution
+checkpoint. This includes the three newly prepended entries:
+
+- `https://justpaste.it/ah7w2`
+- `https://justpaste.it/c3bec`
+- `https://justpaste.it/6tg6b`
+
+Treat all 98 unresolved entries as the initial post-backfill acquisition queue. Do not
+resolve or upload them with the legacy historical scripts before the backfill. Preserve
+their current file order, but deduplicate by canonical URL when the local-first command
+loads them.
+
+Use the three newly prepended entries as the first bounded acceptance batch for the new
+local-first path. Process the remaining unresolved entries only after that batch proves
+resolution, upload, durable enqueue, attribution, gallery generation, and idempotent
+retry behavior.
+
 ## Stage 0 — inventory and freeze the contract
 
 Before changing data, produce one machine-readable inventory that joins:
@@ -35,6 +59,10 @@ Before changing data, produce one machine-readable inventory that joins:
 3. `source_asset`, `processing_job`, `face_track`, `subject`, and
    `subject_representative_face` rows; and
 4. active/dead-letter work from the historical rollout.
+
+Record the cutoff timestamp and hashes of `manifest.jsonl` and the generated inventory.
+Also report the unresolved JustPaste count separately; those entries must not be counted
+as missing or blocked historical videos because they are outside the frozen corpus.
 
 Classify every canonical video into exactly one state:
 
@@ -87,21 +115,51 @@ missing-commit, provenance-mismatch, and lingering-staging items.
 ### 3. Generate representative gallery images
 
 Run the existing `worker.interactive` backfill mode on `face-interactive-gpu`. Extend
-its checkpoint/reporting only if the Stage 0 inventory shows it cannot cover all
-historical subjects. Keep its current safety properties:
+it to use the historical track timestamps instead of performing full-video inference
+by default. Historical `face_track` rows already provide `start_ms`, `end_ms`, aggregate
+embedding, model version, and quality score. They do not contain the exact timestamp of
+the original best-quality crop, so the worker must sample within each track interval.
+
+For each source video, the optimized worker should:
+
+1. collect the missing-gallery tracks selected for that source;
+2. add a small configurable margin before `start_ms` and after `end_ms`, clamp the
+   intervals to the video bounds, and merge overlapping windows;
+3. seek to the nearest usable keyframe before each merged window and decode only until
+   the end of that window;
+4. run detection and embedding within the requested track intervals, selecting the
+   highest-quality face whose embedding is compatible with the stored aggregate;
+5. disambiguate co-occurring faces using embedding similarity and reject candidates
+   below the existing association threshold or within the ambiguity margin; and
+6. cache decoded windows so multiple subjects/tracks from the same source do not repeat
+   the same work.
+
+The source object may still be downloaded completely once to preserve the existing
+generation and SHA-256 integrity check. Store it in a private bounded temporary file so
+the decoder can seek; do not hold a large complete video in memory. Timestamp-window
+decoding is intended to reduce CPU/GPU inference, not weaken source verification.
+
+If targeted extraction finds no acceptable crop or produces an ambiguous match, record
+the reason and optionally queue that source for a separate full-video fallback pass.
+Do not silently invoke the expensive fallback inline. Run the fallback set only after
+reviewing its count and estimated bytes/duration. Report targeted and fallback costs
+separately.
+
+Keep the backfill's current publication safety properties:
 
 - select subjects with fewer than five active representatives;
 - verify source generation and SHA-256 before inference;
-- regenerate tracks with the current model and associate them unambiguously with the
-  committed track rather than changing subject membership;
+- associate new crops unambiguously with the committed track rather than changing
+  subject membership;
 - upload CSEK-encrypted JPEGs under `subject-gallery/<subject-id>/` as inactive;
 - atomically publish a complete representative set and queue retired generations for
   cleanup.
 
 Run an initial bounded sample (25 subjects), review association/skipped/source-failure
-metrics and gallery rendering, then execute repeatable bounded batches until the query
-returns no candidates. A non-zero skipped set must be exported for review rather than
-silently treated as complete.
+metrics, decoded-window duration, avoided full-video duration, and gallery rendering.
+Then execute repeatable bounded batches until the query returns no candidates. A
+non-zero skipped set must be exported for review rather than silently treated as
+complete.
 
 Invocation must use execution-time overrides or a dedicated backfill job definition;
 do not leave `FACE_INTERACTIVE_MODE=backfill` persisted on the normal interactive job.
@@ -123,6 +181,8 @@ Generate a final report and require:
   processing result;
 - every eligible subject has one to five active gallery representatives, with no
   dangling database rows or missing objects;
+- timestamp-window metrics and any separately approved full-video fallback executions
+  are included in the final report;
 - all gallery objects report CSEK encryption;
 - historical candidate and subject responses contain all distinct expected page URLs;
 - the processing rollout reconciles cleanly and gallery backfill has no remaining
@@ -179,8 +239,8 @@ disaster-recovery path during the transition.
 
 ### Local-first acceptance
 
-Use a small set containing a new URL, an already-uploaded URL, and duplicate content.
-Verify that:
+Start with `ah7w2`, `c3bec`, and `6tg6b`, then exercise an already-uploaded URL and
+duplicate content. Verify that:
 
 - the new item uploads once and creates exactly one durable face-batch work item;
 - a rerun performs neither a second upload nor duplicate processing;
@@ -218,6 +278,8 @@ backfill.
 4. Run the 25-subject gallery sample, then drain the full gallery backfill unattended.
 5. Refresh attribution and sign off the historical acceptance report.
 6. Implement the local `JustPaste -> Luluvid -> upload -> enqueue-source` workflow.
-7. Prove retry/idempotency behavior with the small acceptance set.
-8. Apply a separately reviewed teardown plan for historical-only resources and files.
-
+7. Process `ah7w2`, `c3bec`, and `6tg6b` as the bounded acceptance batch and prove
+   retry/idempotency behavior before releasing the other 95 unresolved entries.
+8. Drain the remaining post-backfill acquisition queue through the accepted local-first
+   workflow.
+9. Apply a separately reviewed teardown plan for historical-only resources and files.

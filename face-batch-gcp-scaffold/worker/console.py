@@ -69,13 +69,13 @@ def _create_payload(
             422, "invalid_request", "Unexpected or missing request fields."
         )
     policy = value["handling_policy"]
-    if policy == "retain_and_enroll" and not enrollment_enabled:
+    if policy in {"retain_and_enroll", "enroll_only"} and not enrollment_enabled:
         raise RequestError(
             422,
             "feature_not_available",
-            "Retained enrollment is not available in Phase 1.",
+            "Enrollment is not available in Phase 1.",
         )
-    if policy not in {"search_then_discard", "retain_and_enroll"}:
+    if policy not in {"search_then_discard", "retain_and_enroll", "enroll_only"}:
         raise RequestError(
             422, "invalid_handling_policy", "Unsupported handling policy."
         )

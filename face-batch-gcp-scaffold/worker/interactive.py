@@ -164,21 +164,27 @@ class InteractiveProcessor:
             rankings = self.repository.rank(
                 groups, self.settings.embedding_model_version, self.settings.top_k
             )
-            retained = None
-            if getattr(claimed, "handling_policy", "search_then_discard") == "retain_and_enroll":
+            enrollment_source = None
+            policy = getattr(claimed, "handling_policy", "search_then_discard")
+            if policy in {"retain_and_enroll", "enroll_only"}:
                 if (not self.settings.matching_enabled or
                         self.settings.threshold_version == "unvalidated-v1"):
-                    raise RuntimeError("retained enrollment gate is not configured")
-                retained = self.repository.retained_source(claimed.sha256)
-                if retained is None:
+                    raise RuntimeError("enrollment gate is not configured")
+                if policy == "retain_and_enroll":
+                    enrollment_source = self.repository.retained_source(claimed.sha256)
+                if enrollment_source is None:
                     source_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-run:{run_id}"))
-                    retained = (source_id, *self.storage.promote_temporary(
-                        source_id, claimed.object_name, claimed.generation
-                    ))
-            if retained is None:
+                    enrollment_source = (
+                        (source_id, *self.storage.promote_temporary(
+                            source_id, claimed.object_name, claimed.generation
+                        ))
+                        if policy == "retain_and_enroll"
+                        else (source_id, None, None, None)
+                    )
+            if enrollment_source is None:
                 return self.repository.complete_matching(run_id, owner, groups, rankings)
             return self.repository.complete_matching(
-                run_id, owner, groups, rankings, retained=retained,
+                run_id, owner, groups, rankings, enrollment_source=enrollment_source,
                 threshold=self.settings.match_threshold,
                 threshold_version=self.settings.threshold_version,
                 model_version=self.settings.embedding_model_version,
