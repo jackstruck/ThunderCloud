@@ -284,6 +284,10 @@ def create_app(
     def get_run(run_id: uuid.UUID):
         return jsonify(repository.get(str(run_id)))
 
+    @app.get("/api/runs/recent")
+    def recent_runs():
+        return jsonify({"runs": repository.recent(g.principal)})
+
     @app.post("/api/runs/<uuid:run_id>/upload-session")
     def upload_session(run_id: uuid.UUID):
         if upload_service is None:

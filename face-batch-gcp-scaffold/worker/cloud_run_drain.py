@@ -208,6 +208,8 @@ def drain(
                         "work_item_id": item.work_item_id,
                         "attempt": item.attempt_count,
                         "error_code": code,
+                        "error_type": type(error).__name__,
+                        "error_message": str(error),
                     },
                 )
                 final_state = queue.fail(item, code, retryable)

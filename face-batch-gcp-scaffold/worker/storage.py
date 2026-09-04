@@ -300,7 +300,10 @@ class StorageRepository:
         except NotFound:
             pass
         else:
-            if not has_customer_encryption(destination) or destination.size != source.size:
+            if (
+                not has_customer_encryption(destination)
+                or destination.size != source.size
+            ):
                 raise RuntimeError("existing retained source verification failed")
             return destination_name, int(destination.generation), int(destination.size)
         token = None
@@ -402,6 +405,30 @@ class StorageRepository:
             if_generation_match=generation, timeout=900, checksum="auto"
         )
 
+    def download_source_file(
+        self, source_uri: str, generation: int, max_bytes: int, destination: Path
+    ) -> tuple[int, str]:
+        uri = self.source_uri(source_uri)
+        blob = self.bucket.blob(
+            uri.object_name, generation=generation, encryption_key=self.csek
+        )
+        blob.reload(timeout=30)
+        size = int(blob.size or 0)
+        if not has_customer_encryption(blob):
+            raise RuntimeError("source does not report customer-supplied encryption")
+        if size <= 0 or size > max_bytes:
+            raise ValueError("source exceeds gallery backfill byte limit")
+        digest = hashlib.sha256()
+        with (
+            destination.open("wb") as output,
+            blob.open("rb", if_generation_match=generation) as reader,
+        ):
+            while block := reader.read(8 * 1024 * 1024):
+                output.write(block)
+                digest.update(block)
+        destination.chmod(0o600)
+        return size, digest.hexdigest()
+
     def upload_gallery_face(
         self, subject_id: str, representative_id: str, data: bytes
     ) -> tuple[str, int]:
@@ -411,6 +438,14 @@ class StorageRepository:
             raise ValueError("representative face must be a bounded JPEG")
         object_name = f"subject-gallery/{subject_id}/{representative_id}.jpg"
         blob = self.bucket.blob(object_name, encryption_key=self.csek)
+        try:
+            blob.reload(timeout=30)
+        except NotFound:
+            pass
+        else:
+            if not has_customer_encryption(blob) or blob.content_type != "image/jpeg":
+                raise RuntimeError("existing gallery object verification failed")
+            return object_name, int(blob.generation)
         blob.upload_from_file(
             io.BytesIO(data),
             size=len(data),

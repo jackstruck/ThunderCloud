@@ -226,9 +226,16 @@ class InteractiveRepository:
                 connection.rollback()
                 return None
             connection.commit()
-            return MatchWork(owner, groups, str(operation[1]), str(operation[2]),
-                             int(operation[3]), str(operation[4]), str(operation[5]),
-                             int(operation[6]))
+            return MatchWork(
+                owner,
+                groups,
+                str(operation[1]),
+                str(operation[2]),
+                int(operation[3]),
+                str(operation[4]),
+                str(operation[5]),
+                int(operation[6]),
+            )
         except Exception:
             connection.rollback()
             raise
@@ -286,11 +293,19 @@ class InteractiveRepository:
                 connection.rollback()
                 return False
             if enrollment_source is not None:
-                if threshold is None or threshold_version is None or model_version is None:
+                if (
+                    threshold is None
+                    or threshold_version is None
+                    or model_version is None
+                ):
                     raise ValueError("enrollment configuration is required")
                 cursor.execute("SELECT pg_advisory_xact_lock(8675309)")
-                source_id, retained_name, retained_generation, retained_bytes = enrollment_source
-                cursor.execute("SELECT source_sha256 FROM media_run WHERE run_id=%s", (run_id,))
+                source_id, retained_name, retained_generation, retained_bytes = (
+                    enrollment_source
+                )
+                cursor.execute(
+                    "SELECT source_sha256 FROM media_run WHERE run_id=%s", (run_id,)
+                )
                 source_sha256 = str(cursor.fetchone()[0])
                 if retained_name is None:
                     cursor.execute(
@@ -305,8 +320,14 @@ class InteractiveRepository:
                            ON CONFLICT (external_source_ref, source_sha256)
                            DO UPDATE SET metadata=EXCLUDED.metadata
                            RETURNING source_id""",
-                        (source_id, f"submission:{run_id}", source_sha256,
-                         run_id, run_id, run_id),
+                        (
+                            source_id,
+                            f"submission:{run_id}",
+                            source_sha256,
+                            run_id,
+                            run_id,
+                            run_id,
+                        ),
                     )
                 else:
                     cursor.execute(
@@ -323,9 +344,17 @@ class InteractiveRepository:
                        ON CONFLICT (source_sha256) WHERE object_name IS NOT NULL AND deleted_at IS NULL
                        DO UPDATE SET source_sha256=EXCLUDED.source_sha256
                        RETURNING source_id""",
-                        (source_id, f"submission:{run_id}", source_sha256, run_id,
-                         run_id, retained_name, retained_generation, retained_bytes,
-                         run_id),
+                        (
+                            source_id,
+                            f"submission:{run_id}",
+                            source_sha256,
+                            run_id,
+                            run_id,
+                            retained_name,
+                            retained_generation,
+                            retained_bytes,
+                            run_id,
+                        ),
                     )
                 effective_source_id = str(cursor.fetchone()[0])
                 for group, ranked in zip(groups, rankings, strict=True):
@@ -339,11 +368,17 @@ class InteractiveRepository:
                               embedding_model_version, threshold_version)
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT (group_id) DO NOTHING RETURNING subject_id""",
-                        (group.group_id, run_id, effective_source_id, subject_id,
-                         "matched" if matched else "created",
-                         None if top is None else top.subject_id,
-                         None if top is None else top.similarity,
-                         model_version, threshold_version),
+                        (
+                            group.group_id,
+                            run_id,
+                            effective_source_id,
+                            subject_id,
+                            "matched" if matched else "created",
+                            None if top is None else top.subject_id,
+                            None if top is None else top.similarity,
+                            model_version,
+                            threshold_version,
+                        ),
                     )
                     if not cursor.fetchone():
                         continue
@@ -354,7 +389,9 @@ class InteractiveRepository:
                             (subject_id, model_version),
                         )
                         old, count = cursor.fetchone()
-                        combined = np.asarray(json.loads(old), dtype=np.float32) * int(count)
+                        combined = np.asarray(json.loads(old), dtype=np.float32) * int(
+                            count
+                        )
                         combined += np.asarray(group.embedding, dtype=np.float32)
                         combined /= np.linalg.norm(combined)
                         cursor.execute(
@@ -411,7 +448,11 @@ class InteractiveRepository:
                 (sha256,),
             )
             row = cursor.fetchone()
-            return None if row is None else (str(row[0]), str(row[1]), int(row[2]), int(row[3]))
+            return (
+                None
+                if row is None
+                else (str(row[0]), str(row[1]), int(row[2]), int(row[3]))
+            )
         finally:
             connection.rollback()
             cursor.close()

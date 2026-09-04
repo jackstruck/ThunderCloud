@@ -6,7 +6,6 @@ from types import ModuleType
 
 from worker.manifest import ManifestItem
 
-
 google = ModuleType("google")
 google_auth = ModuleType("google.auth")
 google_transport = ModuleType("google.auth.transport")

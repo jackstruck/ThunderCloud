@@ -45,6 +45,10 @@ class Repository:
             raise RunNotFoundError(run_id)
         return self.record
 
+    def recent(self, principal):
+        assert principal == "member@example.test"
+        return [self.record]
+
     def groups(self, run_id):
         return (
             [
@@ -146,6 +150,13 @@ def test_iap_identity_is_required_for_every_endpoint():
     response = client().get(f"/api/runs/{RUN_ID}")
     assert response.status_code == 401
     assert response.json["code"] == "authentication_required"
+
+
+def test_recent_runs_are_scoped_to_authenticated_principal():
+    response = client().get("/api/runs/recent", headers=AUTH)
+    assert response.status_code == 200
+    assert len(response.json["runs"]) == 1
+    assert response.json["runs"][0]["run_id"] == RUN_ID
 
 
 def test_mutation_rejects_wrong_origin():

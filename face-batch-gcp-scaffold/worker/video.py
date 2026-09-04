@@ -12,6 +12,17 @@ def frame_timestamp_ms(frame, stream, fallback_ms: float) -> int:
     return int(fallback_ms)
 
 
+def decoded_frames(container, stream) -> Iterator[object]:
+    import av
+
+    for packet in container.demux(stream):
+        try:
+            yield from packet.decode()
+        except av.error.InvalidDataError:
+            # A damaged packet should not discard an otherwise decodable archive video.
+            continue
+
+
 def sampled_frames(
     video_bytes: bytes, detector_fps: float
 ) -> Iterator[tuple[int, object]]:
@@ -23,7 +34,7 @@ def sampled_frames(
         stream = container.streams.video[0]
         interval_ms = 1000.0 / detector_fps
         next_ms = 0.0
-        for frame in container.decode(stream):
+        for frame in decoded_frames(container, stream):
             timestamp_ms = frame_timestamp_ms(frame, stream, next_ms)
             if timestamp_ms + 0.001 < next_ms:
                 continue

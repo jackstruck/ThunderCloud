@@ -159,6 +159,23 @@ class RunRepository:
             cursor.close()
             connection.close()
 
+    def recent(self, principal: str, limit: int = 10) -> list[dict[str, Any]]:
+        connection = self.database.connect()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                f"""SELECT {_RUN_COLUMNS} FROM media_run
+                    WHERE submitter_principal = %s AND expires_at > now()
+                      AND state <> 'expired'
+                    ORDER BY created_at DESC LIMIT %s""",
+                (principal, limit),
+            )
+            return [serialize_run(row) for row in cursor.fetchall()]
+        finally:
+            connection.rollback()
+            cursor.close()
+            connection.close()
+
     def prepare_upload(self, run_id: str) -> dict[str, Any]:
         connection = self.database.connect()
         cursor = connection.cursor()
@@ -517,10 +534,15 @@ class RunRepository:
             (run_id, group_id),
         )
         row = cursor.fetchone()
-        return None if row is None else {
-            "subject_id": str(row[0]), "decision": str(row[1]),
-            "source_id": str(row[2]),
-        }
+        return (
+            None
+            if row is None
+            else {
+                "subject_id": str(row[0]),
+                "decision": str(row[1]),
+                "source_id": str(row[2]),
+            }
+        )
 
     def tombstone_source(self, source_id: str, principal: str) -> dict[str, Any]:
         connection = self.database.connect()

@@ -52,14 +52,20 @@ def process_video(
             quality = score_face(frame, tracked.detection)
             if not state.candidates.would_retain(quality.score):
                 continue
-            embedding = embedder.embed(frame, tracked.detection)
+            try:
+                embedding = embedder.embed(frame, tracked.detection)
+                crop_jpeg = _face_crop_jpeg(frame, tracked.detection.bbox)
+            except ValueError:
+                # A degenerate landmark fit or crop invalidates this observation,
+                # not the otherwise valid source video or track.
+                continue
             state.candidates.add(
                 Candidate(
                     quality.score,
                     timestamp_ms,
                     embedding,
                     quality.components,
-                    _face_crop_jpeg(frame, tracked.detection.bbox),
+                    crop_jpeg,
                 )
             )
 

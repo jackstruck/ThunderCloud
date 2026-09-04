@@ -358,7 +358,7 @@ resource "google_cloud_run_v2_job" "interactive_gpu" {
 
     template {
       service_account               = google_service_account.batch_worker.email
-      timeout                       = "1800s"
+      timeout                       = "3600s"
       max_retries                   = 1
       execution_environment         = "EXECUTION_ENVIRONMENT_GEN2"
       gpu_zonal_redundancy_disabled = true

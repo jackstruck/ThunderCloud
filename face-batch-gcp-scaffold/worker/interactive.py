@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 import uuid
 
 import cv2
@@ -115,9 +116,7 @@ class InteractiveProcessor:
                 group_id = str(uuid.uuid4())
                 crop_prefix = f"{prefix}-{face['local_face_id']:06d}/"
                 review_crops = [
-                    item
-                    for item in crops
-                    if item.relative_path.startswith(crop_prefix)
+                    item for item in crops if item.relative_path.startswith(crop_prefix)
                 ]
                 preview_name, preview_generation = self.storage.upload_preview(
                     work.run_id, group_id, _review_preview(review_crops)
@@ -167,24 +166,37 @@ class InteractiveProcessor:
             enrollment_source = None
             policy = getattr(claimed, "handling_policy", "search_then_discard")
             if policy in {"retain_and_enroll", "enroll_only"}:
-                if (not self.settings.matching_enabled or
-                        self.settings.threshold_version == "unvalidated-v1"):
+                if (
+                    not self.settings.matching_enabled
+                    or self.settings.threshold_version == "unvalidated-v1"
+                ):
                     raise RuntimeError("enrollment gate is not configured")
                 if policy == "retain_and_enroll":
                     enrollment_source = self.repository.retained_source(claimed.sha256)
                 if enrollment_source is None:
-                    source_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-run:{run_id}"))
+                    source_id = str(
+                        uuid.uuid5(uuid.NAMESPACE_URL, f"face-run:{run_id}")
+                    )
                     enrollment_source = (
-                        (source_id, *self.storage.promote_temporary(
-                            source_id, claimed.object_name, claimed.generation
-                        ))
+                        (
+                            source_id,
+                            *self.storage.promote_temporary(
+                                source_id, claimed.object_name, claimed.generation
+                            ),
+                        )
                         if policy == "retain_and_enroll"
                         else (source_id, None, None, None)
                     )
             if enrollment_source is None:
-                return self.repository.complete_matching(run_id, owner, groups, rankings)
+                return self.repository.complete_matching(
+                    run_id, owner, groups, rankings
+                )
             return self.repository.complete_matching(
-                run_id, owner, groups, rankings, enrollment_source=enrollment_source,
+                run_id,
+                owner,
+                groups,
+                rankings,
+                enrollment_source=enrollment_source,
                 threshold=self.settings.match_threshold,
                 threshold_version=self.settings.threshold_version,
                 model_version=self.settings.embedding_model_version,
@@ -232,14 +244,46 @@ def main() -> None:
                 for name, model in (("detector", detector), ("embedder", embedder)):
                     if model.session.get_providers()[0] != "CUDAExecutionProvider":
                         raise RuntimeError(f"{name} did not initialize on CUDA")
-            report = GalleryBackfill(
+            backfill = GalleryBackfill(
                 settings,
                 BackfillRepository(database),
                 storage,
                 detector,
                 embedder,
-            ).run(int(os.getenv("FACE_BACKFILL_LIMIT", "25")))
-            print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+            )
+            limit = int(os.getenv("FACE_BACKFILL_LIMIT", "25"))
+            repeat = os.getenv("FACE_BACKFILL_REPEAT", "false").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            repeat_started = time.monotonic()
+            repeat_seconds = int(os.getenv("FACE_BACKFILL_REPEAT_SECONDS", "2400"))
+            batch_index = 0
+            while True:
+                batch_index += 1
+                report = backfill.run(limit)
+                report["batch_index"] = batch_index
+                print(
+                    json.dumps(report, sort_keys=True, separators=(",", ":")),
+                    flush=True,
+                )
+                if not repeat or report["subjects_scanned"] == 0:
+                    break
+                if time.monotonic() - repeat_started >= repeat_seconds:
+                    CloudRunJobInvoker(
+                        settings.project_id,
+                        os.getenv("FACE_REGION", "us-central1"),
+                        os.getenv("FACE_INTERACTIVE_JOB", "face-interactive-gpu"),
+                        env={
+                            "FACE_INTERACTIVE_MODE": "backfill",
+                            "FACE_BACKFILL_LIMIT": str(limit),
+                            "FACE_BACKFILL_REPEAT": "true",
+                            "FACE_BACKFILL_REPEAT_SECONDS": str(repeat_seconds),
+                        },
+                        strict=True,
+                    )("")
+                    break
         else:
             processor = InteractiveProcessor(
                 settings, InteractiveRepository(database), storage

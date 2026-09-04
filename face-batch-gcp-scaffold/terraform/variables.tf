@@ -106,6 +106,19 @@ variable "cloud_run_worker_image" {
   }
 }
 
+variable "backfill_inventory_image" {
+  description = "Immutable CPU-only image for the temporary Stage 0 inventory job."
+  type        = string
+
+  validation {
+    condition = startswith(
+      var.backfill_inventory_image,
+      "${var.region}-docker.pkg.dev/${var.project_id}/",
+    ) && can(regex("@sha256:[0-9a-f]{64}$", var.backfill_inventory_image))
+    error_message = "backfill_inventory_image must be an immutable digest in the project's regional Artifact Registry."
+  }
+}
+
 variable "interactive_gpu_image" {
   description = "Optional immutable worker digest for the Phase 1 interactive GPU job; defaults to cloud_run_worker_image."
   type        = string

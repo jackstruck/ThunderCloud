@@ -33,6 +33,8 @@ def parser() -> argparse.ArgumentParser:
             Path("migrations/002_phase2_enrollment.sql"),
             Path("migrations/003_candidate_page_urls.sql"),
             Path("migrations/004_enroll_only.sql"),
+            Path("migrations/005_gallery_fallback.sql"),
+            Path("migrations/006_recent_runs.sql"),
         ],
         help="Additive migration to apply after the base schema; may be repeated.",
     )
@@ -83,7 +85,8 @@ def main(argv=None) -> None:
                     "processing_rollout, processing_work_item, media_run, "
                     "submission_face_group, run_candidate, run_operation, "
                     "subject_representative_face, run_cleanup_object, "
-                    "gallery_cleanup_object, submission_enrollment "
+                    "gallery_cleanup_object, gallery_fallback_source, "
+                    "submission_enrollment "
                     f"TO {principal}"
                 )
             connection.commit()

@@ -17,7 +17,8 @@ db_disk_size_gb = 10
 db_deletion_protection = false
 
 # Replace with the digest produced after building the queue-aware image.
-cloud_run_worker_image = "us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/worker@sha256:REPLACE_WITH_64_HEX_DIGEST"
+cloud_run_worker_image    = "us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/worker@sha256:REPLACE_WITH_64_HEX_DIGEST"
+backfill_inventory_image = "us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/inventory@sha256:REPLACE_WITH_64_HEX_DIGEST"
 
 # Phase 1 remains opt-in until the image, exact HTTPS origin, approved Google Group,
 # OAuth audience, and intended external-account login have been reviewed.
@@ -27,8 +28,8 @@ interactive_gpu_image  = null
 console_origin         = null
 approved_iap_member    = null # Prefer "group:team@example.com"; "user:name@example.com" is valid for acceptance.
 
-# Keep false until tests/unit/test_secure_fetch.py and a deployment transport probe pass.
-enable_arbitrary_host_fetch = false
+# Arbitrary hosts remain restricted to public, credential-free HTTPS endpoints.
+enable_arbitrary_host_fetch = true
 
 # Cloud Monitoring sends execution-failure and dead-letter alerts here.
 monitoring_email_address = "jack@jackstruck.info"

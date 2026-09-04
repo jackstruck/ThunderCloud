@@ -51,8 +51,14 @@ class GalleryCorrection:
                           updated_at=now() WHERE subject_id=%s""",
                 (pgvector(vector), count, keep_id),
             )
-            cursor.execute("UPDATE face_track SET subject_id=%s WHERE subject_id=%s", (keep_id, merge_id))
-            cursor.execute("UPDATE submission_enrollment SET subject_id=%s WHERE subject_id=%s", (keep_id, merge_id))
+            cursor.execute(
+                "UPDATE face_track SET subject_id=%s WHERE subject_id=%s",
+                (keep_id, merge_id),
+            )
+            cursor.execute(
+                "UPDATE submission_enrollment SET subject_id=%s WHERE subject_id=%s",
+                (keep_id, merge_id),
+            )
             cursor.execute(
                 """UPDATE subject SET canonical_embedding=NULL, sample_count=0,
                           metadata=metadata || jsonb_build_object('merged_into',%s),
@@ -99,7 +105,10 @@ class GalleryCorrection:
                 (pgvector(group_vector), model),
             )
             new_id = str(cursor.fetchone()[0])
-            cursor.execute("UPDATE submission_enrollment SET subject_id=%s WHERE group_id=%s", (new_id, group_id))
+            cursor.execute(
+                "UPDATE submission_enrollment SET subject_id=%s WHERE group_id=%s",
+                (new_id, group_id),
+            )
             cursor.execute(
                 """UPDATE subject SET canonical_embedding=%s::vector,
                           sample_count=sample_count-1, updated_at=now() WHERE subject_id=%s""",
@@ -130,8 +139,12 @@ def main(argv=None) -> None:
     split.add_argument("group_id")
     args = parser.parse_args(argv)
     settings = Settings.from_env()
-    database = Database(settings.cloud_sql_instance, settings.db_user, settings.db_name,
-                        settings.cloud_sql_ip_type)
+    database = Database(
+        settings.cloud_sql_instance,
+        settings.db_user,
+        settings.db_name,
+        settings.cloud_sql_ip_type,
+    )
     try:
         correction = GalleryCorrection(database)
         if args.command == "merge":

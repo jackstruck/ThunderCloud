@@ -116,7 +116,10 @@ class Database:
             page_urls = tuple(str(row[0]) for row in cursor.fetchall())
             ranked.append(
                 RankedSubject(
-                    str(subject_id), float(similarity), display_name, observations,
+                    str(subject_id),
+                    float(similarity),
+                    display_name,
+                    observations,
                     page_urls,
                 )
             )

@@ -79,6 +79,49 @@ The worker uses the developer IAM database user after bootstrap; it does not use
 
 Cross-video subject matching is required (`FACE_MATCHING_ENABLED=true`) for canary and bulk processing. A representative validation set, calibrated threshold, and non-placeholder threshold version are required before that rollout. Subject clustering does not itself authorize association with a real-world identity.
 
+## Freeze the historical backfill inventory
+
+Stage 0 is a read-only, full-content audit. It streams every object under `videos/`
+through SHA-256 using the configured CSEK, and reads the related Cloud SQL rows in one
+repeatable-read transaction. Load the normal non-secret environment settings, then run:
+
+```bash
+face-backfill-inventory \
+  --manifest ../bulk-download/data/manifest.jsonl \
+  --justpaste-input ../bulk-download/input/justpaste_urls.txt \
+  --justpaste-checkpoint ../bulk-download/data/justpaste_resolution.jsonl \
+  --output-dir data \
+  --worker-version 0.2.0-cloud-run-r4 \
+  --detector-version scrfd-10g-5838f7fe \
+  --embedding-model-version adaface-ir18-6b6a3577 \
+  --threshold-version controlled-eval-0p55-v1
+```
+
+The command writes timestamped `bulk-backfill-inventory-*.json` and
+`bulk-backfill-summary-*.json` files. The summary records the cutoff, manifest hash,
+inventory hash, all six classification counts, GCS-only objects, and the separately
+deduplicated unresolved JustPaste queue. Exit status `2` means blocked records or
+manifest errors require explicit review; no database or object mutation is performed.
+The compatible version tuple is required explicitly so stale environment defaults
+cannot silently classify historical results for reprocessing.
+
+To perform the entire audit remotely, apply the `face-batch-backfill-inventory`
+Terraform job using an image containing this code, then submit its small immutable
+inputs and return immediately:
+
+```bash
+face-backfill-cloud-run \
+  --worker-version 0.2.0-cloud-run-r4 \
+  --detector-version scrfd-10g-5838f7fe \
+  --embedding-model-version adaface-ir18-6b6a3577 \
+  --threshold-version controlled-eval-0p55-v1
+```
+
+The local launcher uploads only the manifest, JustPaste input, and resolution
+checkpoint. Cloud Run reads and hashes all archive videos, queries Cloud SQL, and
+writes CSEK-encrypted results under `backfill-audit/results/`. It uses two CPUs, no
+GPU, one task, no automatic retries, and a 24-hour timeout.
+
 ## Run locally
 
 Select one exact object:
@@ -222,10 +265,45 @@ gcloud run jobs execute face-interactive-gpu --region us-central1 \
   --update-env-vars FACE_INTERACTIVE_MODE=backfill,FACE_BACKFILL_LIMIT=25 --wait
 ```
 
-The job reports bytes scanned, elapsed time, unambiguous association rate, skipped
-tracks, and source failures. Review that report before increasing the limit. It uploads
-new crops inactive, then publishes the complete set and retires old generations in one
-database transaction. Daily maintenance deletes retired objects after the grace period.
+After reviewing the sample, an unattended execution can repeat bounded batches entirely
+inside Cloud Run and therefore survives operator or codespace disconnection:
+
+```bash
+gcloud run jobs execute face-interactive-gpu --region us-central1 \
+  --update-env-vars FACE_INTERACTIVE_MODE=backfill,FACE_BACKFILL_LIMIT=250,FACE_BACKFILL_REPEAT=true --async
+```
+
+GPU tasks are limited to one hour. Repeat mode runs bounded batches for about 40
+minutes and asynchronously starts a successor execution when more work may remain.
+
+For the frozen bulk-download corpus, first run the bounded metadata pass and derive the
+existing-ingest inputs for only the inventory's `process` classification:
+
+```bash
+face-backfill-stage1 --inventory FROZEN_INVENTORY.json \
+  --inventory-sha256 FROZEN_SHA256 reconcile-metadata
+face-backfill-stage1 --inventory FROZEN_INVENTORY.json \
+  --inventory-sha256 FROZEN_SHA256 export-process-set \
+  --manifest-output data/stage1-process.jsonl \
+  --selection-output data/stage1-process-uids.txt
+```
+
+Enqueue the generated files with `face-ingest enqueue-manifest`, pinning the deployed
+worker digest and the inventory's four versions, then use `face-cloud-run start` with
+one task and parallelism one. Require `face-cloud-run reconcile` to report
+`reconciled=true` before gallery work. After metadata normalization, refresh snapshots
+with `face-backfill-stage1 ... refresh-attribution`.
+
+Gallery backfill downloads and verifies each source generation once to a private temp
+file, then decodes only merged, padded track windows. The job reports bytes scanned,
+decoded-window and avoided-full-video duration, unambiguous association rate, skipped
+tracks, source failures, and a distinct `fallback_sources` review set. Review the
+25-subject report before increasing the limit; full-video fallback is never invoked
+inline. Skipped and failed sources are recorded in `gallery_fallback_source`, keeping
+later targeted batches convergent while retaining an explicit set for separately
+approved fallback processing. It uploads deterministic new crops inactive, then
+publishes the complete set and retires old generations in one database transaction.
+Daily maintenance deletes retired objects after the grace period.
 
 ## Phase 2 retained enrollment
 

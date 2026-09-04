@@ -11,6 +11,7 @@ class CloudRunJobInvoker:
         job: str,
         session=None,
         env: dict[str, str] | None = None,
+        strict: bool = False,
     ):
         self.url = (
             "https://run.googleapis.com/v2/"
@@ -26,6 +27,7 @@ class CloudRunJobInvoker:
             session = AuthorizedSession(credentials)
         self.session = session
         self.env = env or {}
+        self.strict = strict
 
     def __call__(self, run_id: str) -> None:
         try:
@@ -52,6 +54,8 @@ class CloudRunJobInvoker:
             )
             response.raise_for_status()
         except Exception:
+            if self.strict:
+                raise
             # The durable queue is authoritative. Scheduler reconciliation invokes the
             # same drain later, so an invocation-plane outage must not undo run creation.
             logging.getLogger(__name__).exception(

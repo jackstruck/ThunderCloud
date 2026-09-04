@@ -81,6 +81,32 @@ does not match GCS or if one content hash maps ambiguously to conflicting proven
 Acceptance gate: every usable manifest record has one classification, totals reconcile
 to the manifest and GCS inventory, and `blocked` items are reviewed explicitly.
 
+### Stage 0 completion record
+
+Stage 0 completed successfully on 2026-09-03 using the CPU-only Cloud Run Job
+`face-batch-backfill-inventory`. Execution
+`face-batch-backfill-inventory-c4sxj` finished at 2026-09-03T14:32:33Z and passed the
+acceptance gate. The full inventory was generated from cutoff timestamp
+2026-09-03T14:09:10.687025Z with these results:
+
+- 2,023 usable manifest records classified exactly once;
+- 1,875 GCS archive objects, with no GCS-only objects;
+- 1,869 `metadata_only`, 145 `duplicate`, and 9 `process` records;
+- 0 `complete`, 0 `gallery_only`, and 0 `blocked` records;
+- 0 manifest parse errors and reconciled manifest/GCS totals; and
+- 98 unresolved JustPaste URLs reported separately, with the three acceptance URLs
+  first in their preserved order.
+
+The frozen manifest SHA-256 is
+`1bfd9809344b9677e9fcbba2f3c19eb533b8bf9a90996e4fc876d591a77bc397`. The generated
+inventory SHA-256 is
+`0ffef0f4fcb803a7f87c2a3dca49ba4ee9314f2a0b230d4bd0da776d1b51b05d`.
+The CSEK-encrypted inventory and summary are retained under
+`gs://teak-banner-dome-bulk-videos/backfill-audit/results/`.
+
+No blocked entries require review, and no entry sampling is required before beginning
+Stage 1. Stage 1 must continue to use the frozen inventory as its bounded input.
+
 ## Stage 1 — implement the unattended historical backfill
 
 ### 1. Normalize source provenance
@@ -273,7 +299,7 @@ backfill.
 ## Recommended implementation order
 
 1. Build the read-only inventory/reconciliation command and review its output.
-2. Add the idempotent metadata repair mode and test it on a handful of sources.
+2. Add and verify the idempotent metadata repair mode against the frozen inventory.
 3. Enqueue and reconcile only missing video processing.
 4. Run the 25-subject gallery sample, then drain the full gallery backfill unattended.
 5. Refresh attribution and sign off the historical acceptance report.

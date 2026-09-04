@@ -13,6 +13,8 @@ class JsonFormatter(logging.Formatter):
             "work_item_id",
             "attempt",
             "error_code",
+            "error_type",
+            "error_message",
             "processed_by_task",
             "failed_by_task",
             "status",

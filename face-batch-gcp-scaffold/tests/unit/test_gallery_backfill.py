@@ -9,7 +9,6 @@ from worker.gallery_backfill import (
     RegeneratedTrack,
     associate_track,
 )
-from worker.probe_service import ReviewCrop
 
 
 def existing(embedding=None):
@@ -62,9 +61,11 @@ class Repository:
         self.track = track
         self.staged = []
         self.published = []
+        self.fallbacks = []
 
-    def candidates(self, limit):
+    def candidates(self, limit, model_version):
         assert limit == 10
+        assert model_version == "model-v1"
         return [self.track]
 
     def active_ids(self, subject_id):
@@ -76,13 +77,17 @@ class Repository:
     def publish(self, subject_id, ids):
         self.published.append((subject_id, ids))
 
+    def queue_fallback(self, existing, reason):
+        self.fallbacks.append((existing.source_id, reason))
+
 
 class Storage:
     def __init__(self, data):
         self.data = data
 
-    def download_source_generation(self, uri, generation, maximum):
-        return self.data
+    def download_source_file(self, uri, generation, maximum, destination):
+        destination.write_bytes(self.data)
+        return len(self.data), hashlib.sha256(self.data).hexdigest()
 
     def upload_gallery_face(self, subject_id, representative_id, data):
         assert data == b"\xff\xd8\xffcrop"
@@ -105,23 +110,22 @@ def test_backfill_publishes_only_unambiguous_regeneration(monkeypatch):
         track.model_version,
         track.quality,
     )
-    face = {
-        "local_face_id": 4,
-        "start_ms": 100,
-        "end_ms": 300,
-        "embedding": np.array([1.0, 0.0]),
-        "max_quality": 0.8,
-    }
     monkeypatch.setattr(
-        "worker.probe_service.video_faces",
-        lambda *_args: (
-            [face],
-            [ReviewCrop("track-000004/review-01.jpg", b"\xff\xd8\xffcrop")],
+        "worker.gallery_backfill.targeted_crops",
+        lambda *_args, **_kwargs: (
+            {track.track_id: regenerated(4, 200, 200, np.array([1.0, 0.0]))},
+            200,
+            1000,
         ),
     )
     repository = Repository(track)
     report = GalleryBackfill(
-        SimpleNamespace(max_video_bytes=100),
+        SimpleNamespace(
+            max_video_bytes=100,
+            detector_fps=8,
+            match_threshold=0.65,
+            embedding_model_version="model-v1",
+        ),
         repository,
         Storage(data),
         object(),

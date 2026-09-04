@@ -1,7 +1,7 @@
 from fractions import Fraction
 from types import SimpleNamespace
 
-from worker.video import frame_timestamp_ms
+from worker.video import decoded_frames, frame_timestamp_ms
 
 
 def test_frame_timestamp_prefers_explicit_time():
@@ -14,3 +14,19 @@ def test_frame_timestamp_uses_pts_then_fallback():
     stream = SimpleNamespace(time_base=Fraction(1, 1000))
     assert frame_timestamp_ms(SimpleNamespace(time=None, pts=250), stream, 0) == 250
     assert frame_timestamp_ms(SimpleNamespace(time=None, pts=None), stream, 375) == 375
+
+
+def test_decoded_frames_skips_invalid_packet(monkeypatch):
+    class InvalidDataError(Exception):
+        pass
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "av",
+        SimpleNamespace(error=SimpleNamespace(InvalidDataError=InvalidDataError)),
+    )
+    bad = SimpleNamespace(decode=lambda: (_ for _ in ()).throw(InvalidDataError()))
+    good = SimpleNamespace(decode=lambda: ["frame"])
+    container = SimpleNamespace(demux=lambda stream: [bad, good])
+
+    assert list(decoded_frames(container, object())) == ["frame"]
