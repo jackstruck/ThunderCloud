@@ -101,7 +101,8 @@ and 15 minutes.
 - `identity`: optional operator-authorized label associated with a subject.
 - `processing_rollout` and `processing_work_item`: durable Cloud Run orchestration.
 
-There are intentionally no probe tables.
+Local probes create no database records. Managed console runs use the separate
+`media_run` and operation/selection/candidate tables.
 
 ## Security boundaries
 
@@ -112,10 +113,51 @@ There are intentionally no probe tables.
 - Cloud SQL uses pgvector, CMEK, IAM authentication, and connector-managed TLS.
 - Cloud Run uses a keyless least-privilege runtime identity.
 - Local probing relies on developer ADC and read-only transactions.
-- Identity assignment, subject merge/split, and automatic probe decisions require
-  separate authorized workflows.
+- Operator subject merge and split-group corrections are available through
+  `face-gallery-correct`. Identity assignment remains a separate unfinished workflow.
 
 ## Operational commands
 
-Use `commands.md` for current local, enqueue, start, status, reconciliation, and probe
+Use `OPERATIONS.md` for current local, enqueue, start, status, reconciliation, and probe
 commands. Use `FUTURE_VIDEOS.md` when adding newly acquired source videos.
+
+## Managed console and gallery
+
+The IAP-protected `face-console` service accepts JustPaste/Luluvid links, guarded
+arbitrary public HTTPS media URLs, and direct JPEG/PNG/MP4 uploads. It stores durable
+run state in Cloud SQL, exposes the latest ten non-expired runs for the signed-in
+principal through `GET /api/runs/recent`, and supports recovery by run ID, cancellation,
+retry, face selection, results, and subject-gallery views.
+
+`face-ingest-drain` performs CPU acquisition and maintenance; `face-interactive-gpu`
+performs detection and matching. Their shared VPC, runtime identities, job invocation
+permissions, database, and scheduled reconciliation/maintenance are permanent.
+The historical inventory job and legacy Google Cloud Batch submission are retired
+from source configuration. The bounded gallery-repair implementation is retained for
+maintenance; a completed historical repeat-mode run must not be relaunched.
+
+The current configuration enables guarded public HTTPS fetching. Every DNS answer,
+redirect, and connection is validated; private/reserved destinations are rejected,
+and connections are pinned to validated addresses with media and size limits.
+
+`search_then_discard` deletes temporary source media after a terminal run.
+`retain_and_enroll` promotes the exact source generation into CSEK `training-media/`
+and preserves derived enrollment lineage. `enroll_only` retains derived enrollment
+without retaining the full source media. Candidate snapshots precede enrollment;
+matching clusters anonymous subjects, not real-world identities.
+
+Temporary source media and previews reside under `submissions-temporary/` with
+terminal-run cleanup and a seven-day lifecycle fail-safe. Operational run data expires
+after seven days. Durable representative faces use `subject-gallery/`; publication
+activates a complete generation transactionally, and maintenance deletes retired
+generations after their grace period. Source deletion tombstones retained media and
+queues exact-generation deletion without erasing derived lineage. Embeddings and
+provenance remain durable pending approved retention policy.
+
+## Accepted historical backfill
+
+The historical processing/gallery backfill was accepted as complete by the user on
+2026-09-06 without a separate reconciliation check. Historical counts and initial
+rollout digests are preserved under `docs/history/`; they are not current inventory.
+The proposed automatic local-first upload/enqueue receipt and pilot remain pending.
+The existing explicit acquisition and durable enqueue workflow remains supported.

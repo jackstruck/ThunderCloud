@@ -154,3 +154,5 @@ Face Probe and Planning: codex resume 01a063ae-b120-7323-8818-601721b8bae1
 Phase One: codex resume 01a06444-3cfd-7743-aca4-6975a19c4668
 Phase Two and Three (Up to enroll behavior): codex resume 01a06716-ec74-7ce2-b093-44a16b6e9bda 
 Backfill Stage 0: codex resume 01a06783-9a32-7471-9c41-14731348b4bb
+Backfill Stage 1 and Stable: codex resume 01a068e2-dbc0-70f2-bc6e-e1484a3af133
+Cleanup: codex resume 01a075c3-e7e8-7642-a4c0-64ffeee94164

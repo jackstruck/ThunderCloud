@@ -1,6 +1,5 @@
 locals {
   developer_project_roles = toset([
-    "roles/batch.jobsEditor",
     "roles/cloudsql.client",
     "roles/cloudsql.instanceUser",
     "roles/run.developer",
@@ -19,13 +18,12 @@ resource "google_project_iam_member" "developer_project_roles" {
 resource "google_service_account" "batch_worker" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-runtime"
-  display_name = "Face Batch worker runtime"
-  description  = "Keyless runtime identity for remote face-processing Batch jobs."
+  display_name = "Face processing runtime"
+  description  = "Keyless runtime identity for Cloud Run face-processing jobs."
 }
 
 locals {
   batch_worker_project_roles = toset([
-    "roles/batch.agentReporter",
     "roles/cloudsql.client",
     "roles/cloudsql.instanceUser",
     "roles/logging.logWriter",

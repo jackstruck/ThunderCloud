@@ -27,6 +27,26 @@ paths:
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/Error'}
         '429': {$ref: '#/components/responses/Error'}
+  /api/runs/recent:
+    get:
+      operationId: listRecentRuns
+      description: The signed-in principal's latest ten non-expired runs, newest first.
+      responses:
+        '200':
+          description: Recent runs belonging to the authenticated principal.
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs:
+                    type: array
+                    maxItems: 10
+                    items: {$ref: '#/components/schemas/Run'}
+        '429': {$ref: '#/components/responses/Error'}
   /api/runs/{run_id}:
     parameters: [{$ref: '#/components/parameters/RunId'}]
     get:

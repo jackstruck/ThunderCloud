@@ -55,12 +55,12 @@ output "cloud_sql_database" {
 }
 
 output "batch_worker_service_account" {
-  description = "Keyless service account attached to remote Batch worker VMs."
+  description = "Keyless service account attached to Cloud Run worker jobs."
   value       = google_service_account.batch_worker.email
 }
 
 output "batch_worker_database_user" {
-  description = "Cloud SQL PostgreSQL IAM username for the Batch worker."
+  description = "Cloud SQL PostgreSQL IAM username for the Cloud Run worker."
   value       = google_sql_user.batch_worker_iam.name
 }
 
@@ -80,10 +80,6 @@ output "cloud_run_job_name" {
 
 output "cloud_run_job_region" {
   value = google_cloud_run_v2_job.gpu_drain.location
-}
-
-output "backfill_inventory_job_name" {
-  value = google_cloud_run_v2_job.backfill_inventory.name
 }
 
 output "face_console_service_uri" {

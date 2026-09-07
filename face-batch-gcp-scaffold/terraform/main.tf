@@ -5,7 +5,6 @@ data "google_project" "current" {
 locals {
   required_apis = toset([
     "artifactregistry.googleapis.com",
-    "batch.googleapis.com",
     "cloudkms.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",

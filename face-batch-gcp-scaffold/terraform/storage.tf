@@ -78,6 +78,8 @@ resource "google_storage_bucket_iam_member" "developer_staging_user" {
   }
 }
 
+# IAM condition descriptions are identity fields; retain their historical wording
+# to avoid replacing grants used by the permanent Cloud Run jobs.
 resource "google_storage_bucket_iam_member" "batch_worker_staging_user" {
   bucket = google_storage_bucket.archive.name
   role   = "roles/storage.objectUser"
@@ -109,31 +111,4 @@ resource "google_storage_bucket_iam_member" "runtime_archive_lister" {
   bucket = google_storage_bucket.archive.name
   role   = "roles/storage.legacyBucketReader"
   member = google_service_account.batch_worker.member
-}
-
-# Temporary Stage 0 input snapshots and result artifacts. This prefix is deliberately
-# separate from immutable videos and processing staging so it can be retired after the
-# historical backfill acceptance window.
-resource "google_storage_bucket_iam_member" "developer_backfill_audit_user" {
-  bucket = google_storage_bucket.archive.name
-  role   = "roles/storage.objectUser"
-  member = "user:${var.developer_email}"
-
-  condition {
-    title       = "Manage historical backfill audit artifacts"
-    description = "Restrict developer audit artifact access to the backfill prefix."
-    expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/backfill-audit/')"
-  }
-}
-
-resource "google_storage_bucket_iam_member" "runtime_backfill_audit_user" {
-  bucket = google_storage_bucket.archive.name
-  role   = "roles/storage.objectUser"
-  member = google_service_account.batch_worker.member
-
-  condition {
-    title       = "Manage remote historical backfill audit artifacts"
-    description = "Restrict runtime audit artifact access to the backfill prefix."
-    expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/backfill-audit/')"
-  }
 }

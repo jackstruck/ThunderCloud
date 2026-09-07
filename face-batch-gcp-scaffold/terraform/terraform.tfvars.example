@@ -18,7 +18,6 @@ db_deletion_protection = false
 
 # Replace with the digest produced after building the queue-aware image.
 cloud_run_worker_image    = "us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/worker@sha256:REPLACE_WITH_64_HEX_DIGEST"
-backfill_inventory_image = "us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/inventory@sha256:REPLACE_WITH_64_HEX_DIGEST"
 
 # Phase 1 remains opt-in until the image, exact HTTPS origin, approved Google Group,
 # OAuth audience, and intended external-account login have been reviewed.

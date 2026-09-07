@@ -4,7 +4,7 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Primary region for KMS, GCS, Artifact Registry, Batch, VPC subnet, and Cloud SQL."
+  description = "Primary region for KMS, GCS, Artifact Registry, Cloud Run, VPC subnet, and Cloud SQL."
   type        = string
   default     = "us-central1"
 }
@@ -55,7 +55,7 @@ variable "staging_ttl_days" {
 }
 
 variable "subnet_cidr" {
-  description = "CIDR for the private Batch subnet."
+  description = "CIDR for the private Cloud Run subnet."
   type        = string
   default     = "10.42.0.0/24"
 }
@@ -103,19 +103,6 @@ variable "cloud_run_worker_image" {
       "${var.region}-docker.pkg.dev/${var.project_id}/",
     ) && can(regex("@sha256:[0-9a-f]{64}$", var.cloud_run_worker_image))
     error_message = "cloud_run_worker_image must be an immutable digest in the project's regional Artifact Registry."
-  }
-}
-
-variable "backfill_inventory_image" {
-  description = "Immutable CPU-only image for the temporary Stage 0 inventory job."
-  type        = string
-
-  validation {
-    condition = startswith(
-      var.backfill_inventory_image,
-      "${var.region}-docker.pkg.dev/${var.project_id}/",
-    ) && can(regex("@sha256:[0-9a-f]{64}$", var.backfill_inventory_image))
-    error_message = "backfill_inventory_image must be an immutable digest in the project's regional Artifact Registry."
   }
 }
 
@@ -230,4 +217,14 @@ variable "enable_arbitrary_host_fetch" {
   description = "Enable direct arbitrary HTTPS media after the connection-pinning SSRF matrix passes."
   type        = bool
   default     = false
+}
+
+variable "rollback_image_versions" {
+  description = "Additional sha256 image versions protected from registry cleanup for rollback."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = alltrue([for version in var.rollback_image_versions : can(regex("^sha256:[0-9a-f]{64}$", version))])
+    error_message = "Rollback versions must be complete sha256 digests."
+  }
 }
