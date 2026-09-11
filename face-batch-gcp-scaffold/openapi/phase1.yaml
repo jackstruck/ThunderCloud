@@ -706,9 +706,10 @@ components:
           properties: {start: {type: integer}, end: {type: integer}}
     Results:
       type: object
-      required: [run_id, groups]
+      required: [run_id, handling_policy, groups]
       properties:
         run_id: {type: string, format: uuid}
+        handling_policy: {type: string, enum: [search_then_discard, retain_and_enroll, enroll_only]}
         groups:
           type: array
           items:
@@ -722,6 +723,15 @@ components:
                   subject_id: {type: string, format: uuid}
                   decision: {type: string, enum: [matched, created]}
                   source_id: {type: string, format: uuid}
+                  representative_faces:
+                    type: array
+                    description: Active gallery images belonging to this run's enrolled group, following its current subject after corrections.
+                    items:
+                      type: object
+                      required: [representative_id, url]
+                      properties:
+                        representative_id: {type: string, format: uuid}
+                        url: {type: string}
               candidates:
                 type: array
                 items:

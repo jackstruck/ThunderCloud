@@ -1677,3 +1677,62 @@ def test_expiry_of_no_face_upload_and_url_preserves_required_attribution(db):
     )
     assert repository.expire_runs() == 0
     assert sql(db, "SELECT count(*) FROM run_cleanup_object")[0][0] == 2
+
+
+@pytest.mark.parametrize("policy", ["enroll_only", "retain_and_enroll"])
+def test_merge_preserves_every_source_gallery_and_run_enrollment(db, policy):
+    existing, *_ = enroll(db, 5)
+    incoming, run, _groups, *_ = enroll(db, 7, policy=policy)
+    service = SubjectManagement(db)
+    assert len(service.subject(incoming)["representative_faces"]) == 5
+    assert all(row["preview_url"] for row in service.examples(incoming)["examples"])
+    service.combine(
+        existing,
+        {
+            "operation_id": str(uuid.uuid4()),
+            "version": service.subject(existing)["version"],
+            "other_subject_id": incoming,
+            "target_version": service.subject(incoming)["version"],
+        },
+        "reviewer",
+    )
+    examples = service.examples(existing)["examples"]
+    assert len(examples) == 12
+    assert all(row["preview_url"] for row in examples)
+    assert len(service.subject(existing)["representative_faces"]) == 5
+    assert sql(db, "SELECT count(*) FROM gallery_cleanup_object")[0][0] == 0
+    results = RunRepository(db).results(run)
+    assert results["handling_policy"] == policy
+    assert len(results["groups"]) == 7
+    for group in results["groups"]:
+        assert group["enrollment"]["subject_id"] == existing
+        assert len(group["enrollment"]["representative_faces"]) == 1
+    assert bool(results["groups"][0]["candidates"]) == (policy == "retain_and_enroll")
+
+
+@pytest.mark.parametrize("policy", ["enroll_only", "retain_and_enroll"])
+def test_browser_enrollment_gallery_and_matching_status(db, browser_console, policy):
+    from playwright.sync_api import expect
+
+    page, origin = browser_console
+    enroll(db)
+    sid, run, *_ = enroll(db, 7, policy=policy)
+    page.goto(origin + "/runs/" + run)
+    expect(page.locator(".enrolled-subject")).to_have_count(1)
+    expect(page.locator(".enrolled-subject a")).to_have_attribute(
+        "href", "/subjects/" + sid
+    )
+    images = page.locator(".enrolled-subject img")
+    expect(images).to_have_count(7)
+    expect(images.first).to_be_visible()
+    page.wait_for_function(
+        "[...document.querySelectorAll('.enrolled-subject img')].every(i => i.complete && i.naturalWidth > 0)"
+    )
+    if policy == "enroll_only":
+        expect(page.locator(".matching-status")).to_contain_text(
+            "matching against existing subjects was not run"
+        )
+        expect(page.locator(".candidate")).to_have_count(0)
+    else:
+        expect(page.locator(".candidate")).to_have_count(7)
+        expect(page.locator(".matching-status")).to_have_count(0)

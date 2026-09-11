@@ -12,7 +12,7 @@ from .gallery_backfill import (
     RegeneratedTrack,
     _cosine,
 )
-from .subject_management import SubjectManagement, reconcile_gallery
+from .subject_management import SubjectManagement
 
 
 class SubjectGalleryRepository:
@@ -108,7 +108,7 @@ class SubjectGalleryRepository:
                 "SELECT subject_id FROM subject_example WHERE example_id=%s FOR UPDATE",
                 (existing.track_id,),
             )
-            (subject_id,) = cursor.fetchone()
+            (_subject_id,) = cursor.fetchone()
             cursor.execute(
                 """SELECT c.state FROM gallery_cleanup_object c
                    JOIN subject_representative_face r
@@ -142,7 +142,6 @@ class SubjectGalleryRepository:
                 "DELETE FROM gallery_cleanup_object WHERE object_name=%s AND object_generation=%s",
                 (published_name, published_generation),
             )
-            reconcile_gallery(cursor, [subject_id])
 
     def publish(self, subject_id, representative_ids):
         # Each crop is published atomically with its current example owner in stage().

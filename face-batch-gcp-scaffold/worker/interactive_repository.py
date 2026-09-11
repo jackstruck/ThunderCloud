@@ -10,7 +10,6 @@ from .run_repository import queue_selection, request_fingerprint
 from .subject_management import (
     enrollment_targets,
     recalculate_subjects,
-    reconcile_gallery,
 )
 
 
@@ -467,7 +466,6 @@ class InteractiveRepository:
                             "representative cleanup is already in progress"
                         )
                 recalculate_subjects(cursor, affected_subjects)
-                reconcile_gallery(cursor, affected_subjects)
                 cursor.execute(
                     """UPDATE media_run SET retained_source_id=%s,
                               enrollment_completed_at=now()

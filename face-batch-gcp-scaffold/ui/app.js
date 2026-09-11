@@ -41,9 +41,31 @@ async function results(){const request=state.runRequest;try{const data=(await ap
 const sourceLinks=urls=>{const wrap=document.createElement('div');wrap.className='source-links';(urls||[]).forEach((url,index)=>{const link=document.createElement('a');if(!/^https:\/\//i.test(url))return;link.href=url;link.target='_blank';link.rel='noopener noreferrer';link.textContent=`Source page ${index+1}`;wrap.append(link)});return wrap};
 function renderResults(){
  const root=document.querySelector('#candidate-groups');root.replaceChildren();
+ const enrollments=new Map();
+ state.results.groups.forEach(g=>{
+  if(!g.enrollment)return;
+  const e=g.enrollment;
+  if(!enrollments.has(e.subject_id))enrollments.set(e.subject_id,new Map());
+  (e.representative_faces||[]).forEach(f=>enrollments.get(e.subject_id).set(f.representative_id,f));
+ });
+ document.querySelector('#results h2').textContent=enrollments.size?'Enrollment and matching results':'Candidate matches';
+ enrollments.forEach((faces,subjectId)=>{
+  const section=document.createElement('section');section.className='enrolled-subject';
+  const h=document.createElement('h3');h.textContent='Enrolled subject';
+  const link=document.createElement('a');link.href=`/subjects/${subjectId}`;link.textContent=`View subject and potential matches · ${subjectId}`;
+  const gallery=document.createElement('div');gallery.className='representatives';
+  faces.forEach(f=>{const img=document.createElement('img');img.src=f.url;img.alt='Enrolled face from this run';img.loading='lazy';gallery.append(img);});
+  section.append(h,link,gallery);
+  if(!faces.size){const p=document.createElement('p');p.textContent='No gallery images are available for this enrollment.';section.append(p);}
+  root.append(section);
+ });
+ if(state.results.handling_policy==='enroll_only'){
+  const p=document.createElement('p');p.className='matching-status';p.textContent='Enroll Only: matching against existing subjects was not run. Open the enrolled subject to view potential matches.';root.append(p);
+ }
  state.results.groups.forEach((g,i)=>{
-  const h=document.createElement('h3');h.textContent=`Selected face group ${i+1}`;root.append(h);
-  if(g.enrollment){const p=document.createElement('p');p.textContent=`Enrolled: ${g.enrollment.decision} · `;const a=document.createElement('a');a.href=`/subjects/${g.enrollment.subject_id}`;a.textContent=g.enrollment.subject_id;p.append(a);root.append(p);}
+  if(state.results.handling_policy==='enroll_only'&&!g.candidates.length)return;
+  const h=document.createElement('h3');h.textContent=`Matches for selected face group ${i+1}`;root.append(h);
+  if(!g.candidates.length){const p=document.createElement('p');p.textContent='No matching candidates were found.';root.append(p);}
   g.candidates.forEach(c=>{
    const a=document.createElement('article');a.className='candidate';const copy=document.createElement('div');copy.className='candidate-copy';
    const name=document.createElement('strong');name.textContent=c.display_name||'Unnamed subject';

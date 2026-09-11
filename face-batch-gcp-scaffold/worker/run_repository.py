@@ -579,6 +579,7 @@ class RunRepository:
                     )
             return {
                 "run_id": run_id,
+                "handling_policy": run["handling_policy"],
                 "groups": [
                     {
                         "group_id": group_id,
@@ -607,15 +608,28 @@ class RunRepository:
             (run_id, group_id),
         )
         row = cursor.fetchone()
-        return (
-            None
-            if row is None
-            else {
-                "subject_id": str(row[0]),
-                "decision": str(row[1]),
-                "source_id": str(row[2]),
-            }
+        if row is None:
+            return None
+        cursor.execute(
+            """SELECT r.representative_id
+               FROM subject_representative_face r
+               JOIN subject_example e USING(example_id)
+               WHERE e.submission_group_id=%s AND e.subject_id=%s AND r.active
+               ORDER BY r.quality_score DESC NULLS LAST,r.representative_id""",
+            (group_id, row[0]),
         )
+        return {
+            "subject_id": str(row[0]),
+            "decision": str(row[1]),
+            "source_id": str(row[2]),
+            "representative_faces": [
+                {
+                    "representative_id": str(face[0]),
+                    "url": f"/api/gallery/faces/{face[0]}",
+                }
+                for face in cursor.fetchall()
+            ],
+        }
 
     def tombstone_source(self, source_id: str, principal: str) -> dict[str, Any]:
         connection = self.database.connect()

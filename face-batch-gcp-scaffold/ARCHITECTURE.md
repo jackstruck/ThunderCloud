@@ -54,8 +54,10 @@ retains derived enrollment without retaining full temporary source media.
 Enrollment and search remain separate decisions; retain-and-enroll can record search
 results while creating new subjects.
 
-Enrollment publishes representative JPEGs linked to examples, with up to five active
-representatives per subject. Publication is transactional; search-only runs never
+Enrollment publishes representative JPEGs linked to examples and preserves them
+through grouping, moves, and merges. Subject and candidate summaries display up to
+five images; that display limit does not retire source images. Run results show
+the gallery images for their enrolled examples. Publication is transactional; search-only runs never
 publish permanent gallery images. Temporary media and selection previews use
 `submissions-temporary/`, terminal cleanup, and a seven-day lifecycle fail-safe.
 Operational runs expire after seven days. Permanent gallery images use

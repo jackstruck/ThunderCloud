@@ -103,25 +103,6 @@ def recalculate_subjects(cursor, subject_ids):
     )
 
 
-def reconcile_gallery(cursor, subject_ids):
-    ids = sorted(set(map(str, subject_ids)))
-    cursor.execute(
-        """WITH ranked AS (
-             SELECT r.representative_id,row_number() OVER (PARTITION BY e.subject_id
-               ORDER BY r.quality_score DESC NULLS LAST,r.created_at DESC,r.representative_id) AS rank
-             FROM subject_representative_face r JOIN subject_example e USING(example_id)
-             WHERE e.subject_id=ANY(%s::uuid[]) AND r.active
-           ), retired AS (
-             UPDATE subject_representative_face r SET active=false,retired_at=now()
-             FROM ranked WHERE r.representative_id=ranked.representative_id AND ranked.rank>5
-             RETURNING r.representative_id,r.object_name,r.object_generation
-           ) INSERT INTO gallery_cleanup_object(representative_id,object_name,object_generation)
-           SELECT representative_id,object_name,object_generation FROM retired
-           ON CONFLICT (object_name,object_generation) DO NOTHING""",
-        (ids,),
-    )
-
-
 class SubjectManagement:
     def __init__(self, database):
         self.database = database
@@ -811,7 +792,6 @@ class SubjectManagement:
                     (destination, source),
                 )
             recalculate_subjects(cursor, ids)
-            reconcile_gallery(cursor, ids)
             result = {
                 "subject": self._detail(cursor, sid),
                 "destination": self._detail(cursor, destination),
