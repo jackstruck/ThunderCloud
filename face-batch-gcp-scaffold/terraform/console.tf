@@ -85,6 +85,18 @@ resource "google_storage_bucket_iam_member" "console_temporary_user" {
   }
 }
 
+resource "google_storage_bucket_iam_member" "console_source_reader" {
+  count  = local.phase1_enabled ? 1 : 0
+  bucket = google_storage_bucket.archive.name
+  role   = "roles/storage.objectViewer"
+  member = google_service_account.console[0].member
+  condition {
+    title       = "Read operator-submitted archive sources"
+    description = "Allow CPU acquisition to read exact objects within the archive prefix."
+    expression  = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${var.source_prefix}')"
+  }
+}
+
 resource "google_storage_bucket_iam_member" "console_gallery_viewer" {
   count  = local.phase1_enabled ? 1 : 0
   bucket = google_storage_bucket.archive.name
@@ -92,6 +104,26 @@ resource "google_storage_bucket_iam_member" "console_gallery_viewer" {
   member = google_service_account.console[0].member
   condition {
     title      = "Read representative gallery crops"
+    expression = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${local.gallery_prefix}')"
+  }
+}
+
+resource "google_project_iam_custom_role" "gallery_cleanup" {
+  count       = local.phase1_enabled ? 1 : 0
+  project     = var.project_id
+  role_id     = "faceGalleryCleanup"
+  title       = "Face gallery generation cleanup"
+  description = "Delete retired gallery object generations."
+  permissions = ["storage.objects.delete"]
+}
+
+resource "google_storage_bucket_iam_member" "console_gallery_cleanup" {
+  count  = local.phase1_enabled ? 1 : 0
+  bucket = google_storage_bucket.archive.name
+  role   = google_project_iam_custom_role.gallery_cleanup[0].name
+  member = google_service_account.console[0].member
+  condition {
+    title      = "Delete retired gallery generations"
     expression = "resource.name.startsWith('projects/_/buckets/${var.source_bucket_name}/objects/${local.gallery_prefix}')"
   }
 }
@@ -217,6 +249,10 @@ resource "google_cloud_run_v2_service" "console" {
         value = tostring(var.enable_arbitrary_host_fetch)
       }
       env {
+        name  = "FACE_SUBJECT_MANAGEMENT_ENABLED"
+        value = tostring(var.subject_management_enabled)
+      }
+      env {
         name  = "FACE_RETAINED_ENROLLMENT_ENABLED"
         value = tostring(var.enable_retained_enrollment)
       }
@@ -234,8 +270,10 @@ resource "google_cloud_run_v2_service" "console" {
     google_project_iam_member.console_roles,
     google_secret_manager_secret_iam_member.console_csek_accessor,
     google_storage_bucket_iam_member.console_temporary_user,
+    google_storage_bucket_iam_member.console_source_reader,
     google_storage_bucket_iam_member.console_gallery_viewer,
     google_storage_bucket_iam_member.console_training_user,
+    google_storage_bucket_iam_member.console_gallery_cleanup,
   ]
 }
 
@@ -302,6 +340,10 @@ resource "google_cloud_run_v2_job" "ingest_drain" {
           value = var.source_bucket_name
         }
         env {
+          name  = "FACE_SOURCE_PREFIX"
+          value = var.source_prefix
+        }
+        env {
           name  = "FACE_CSEK_SECRET"
           value = google_secret_manager_secret.gcs_csek.secret_id
         }
@@ -327,7 +369,8 @@ resource "google_cloud_run_v2_job" "ingest_drain" {
         }
       }
       vpc_access {
-        egress = "ALL_TRAFFIC"
+        # Keep Cloud SQL private while fetching public media without Cloud NAT.
+        egress = "PRIVATE_RANGES_ONLY"
         network_interfaces {
           network    = google_compute_network.main.name
           subnetwork = google_compute_subnetwork.batch.name
@@ -340,7 +383,9 @@ resource "google_cloud_run_v2_job" "ingest_drain" {
     google_project_iam_member.console_roles,
     google_secret_manager_secret_iam_member.console_csek_accessor,
     google_storage_bucket_iam_member.console_temporary_user,
+    google_storage_bucket_iam_member.console_source_reader,
     google_storage_bucket_iam_member.console_training_user,
+    google_storage_bucket_iam_member.console_gallery_cleanup,
   ]
 }
 
@@ -416,16 +461,8 @@ resource "google_cloud_run_v2_job" "interactive_gpu" {
           value = google_sql_database.app.name
         }
         env {
-          name  = "FACE_MATCHING_ENABLED"
-          value = "true"
-        }
-        env {
-          name  = "FACE_MATCH_THRESHOLD"
-          value = tostring(var.match_threshold)
-        }
-        env {
-          name  = "FACE_THRESHOLD_VERSION"
-          value = var.threshold_version
+          name  = "FACE_GALLERY_REPAIR_MIN_SIMILARITY"
+          value = tostring(var.gallery_repair_min_similarity)
         }
         env {
           name  = "FACE_REQUIRE_CUDA"

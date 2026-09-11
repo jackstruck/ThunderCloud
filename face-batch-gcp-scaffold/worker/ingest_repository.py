@@ -11,6 +11,13 @@ class FetchWork:
     source_url: str
     attempt_count: int
     lease_owner: str
+    source_kind: str = "url"
+    archive_bucket: str | None = None
+    archive_object_name: str | None = None
+    archive_generation: int | None = None
+    archive_sha256: str | None = None
+    content_type: str | None = None
+    expected_bytes: int | None = None
 
 
 class IngestRepository:
@@ -25,11 +32,14 @@ class IngestRepository:
         try:
             cursor.execute(
                 """WITH candidate AS (
-                     SELECT operation_id FROM run_operation
-                     WHERE kind = 'fetch'
-                       AND (state = 'queued' OR (state = 'leased' AND lease_expires_at < now()))
-                     ORDER BY created_at, operation_id
-                     FOR UPDATE SKIP LOCKED LIMIT 1
+                     SELECT operation.operation_id FROM run_operation operation
+                     JOIN media_run run ON run.run_id = operation.run_id
+                     WHERE operation.kind = 'fetch'
+                       AND (operation.state = 'queued' OR
+                            (operation.state = 'leased' AND operation.lease_expires_at < now()))
+                       AND run.state = 'fetching' AND NOT run.cancel_requested
+                     ORDER BY operation.created_at, operation.operation_id
+                     FOR UPDATE OF operation SKIP LOCKED LIMIT 1
                    )
                    UPDATE run_operation operation
                    SET state = 'leased', lease_owner = %s,
@@ -40,14 +50,23 @@ class IngestRepository:
                      AND run.run_id = operation.run_id
                      AND run.state = 'fetching' AND NOT run.cancel_requested
                    RETURNING operation.operation_id, operation.run_id,
-                             run.source_page_url, operation.attempt_count""",
+                             run.source_page_url, operation.attempt_count, run.source_kind,
+                             run.archive_bucket,run.archive_object_name,run.archive_object_generation,
+                             run.archive_sha256,run.content_type,run.expected_bytes""",
                 (owner, self.lease_seconds),
             )
             row = cursor.fetchone()
             connection.commit()
             if not row:
                 return None
-            return FetchWork(str(row[0]), str(row[1]), str(row[2]), int(row[3]), owner)
+            return FetchWork(
+                str(row[0]),
+                str(row[1]),
+                str(row[2] or ""),
+                int(row[3]),
+                owner,
+                *row[4:],
+            )
         except Exception:
             connection.rollback()
             raise

@@ -8,16 +8,17 @@ import uuid
 
 import cv2
 import numpy as np
+from google.api_core.exceptions import GoogleAPIError
 
 from .config import Settings
 from .db import Database
 from .detector import ScrfdDetector
 from .embedder import OnnxFaceEmbedder
-from .gallery_backfill import BackfillRepository, GalleryBackfill
 from .interactive_repository import InteractiveRepository
 from .job_invoker import CloudRunJobInvoker
 from .probe_service import LocalMedia, image_faces, video_faces
 from .storage import StorageRepository, load_configured_csek
+from .subject_backfill import SubjectGalleryBackfill, SubjectGalleryRepository
 from .telemetry import configure_logging
 
 
@@ -121,6 +122,15 @@ class InteractiveProcessor:
                 preview_name, preview_generation = self.storage.upload_preview(
                     work.run_id, group_id, _review_preview(review_crops)
                 )
+                representative_name, representative_generation = (
+                    (preview_name, preview_generation)
+                    if len(review_crops) == 1
+                    else self.storage.upload_preview(
+                        work.run_id,
+                        str(uuid.uuid5(uuid.UUID(group_id), "representative")),
+                        review_crops[0].content,
+                    )
+                )
                 groups.append(
                     {
                         "group_id": group_id,
@@ -136,6 +146,8 @@ class InteractiveProcessor:
                         },
                         "preview_object_name": preview_name,
                         "preview_generation": preview_generation,
+                        "representative_object_name": representative_name,
+                        "representative_generation": representative_generation,
                         "embedding": face["embedding"],
                     },
                 )
@@ -160,17 +172,16 @@ class InteractiveProcessor:
         owner = claimed.lease_owner if hasattr(claimed, "lease_owner") else claimed[0]
         groups = claimed.groups if hasattr(claimed, "groups") else claimed[1]
         try:
-            rankings = self.repository.rank(
-                groups, self.settings.embedding_model_version, self.settings.top_k
+            policy = getattr(claimed, "handling_policy", "search_then_discard")
+            rankings = (
+                self.repository.rank(
+                    groups, self.settings.embedding_model_version, self.settings.top_k
+                )
+                if policy in {"search_then_discard", "retain_and_enroll"}
+                else [[] for _ in groups]
             )
             enrollment_source = None
-            policy = getattr(claimed, "handling_policy", "search_then_discard")
             if policy in {"retain_and_enroll", "enroll_only"}:
-                if (
-                    not self.settings.matching_enabled
-                    or self.settings.threshold_version == "unvalidated-v1"
-                ):
-                    raise RuntimeError("enrollment gate is not configured")
                 if policy == "retain_and_enroll":
                     enrollment_source = self.repository.retained_source(claimed.sha256)
                 if enrollment_source is None:
@@ -197,20 +208,31 @@ class InteractiveProcessor:
                 groups,
                 rankings,
                 enrollment_source=enrollment_source,
-                threshold=self.settings.match_threshold,
-                threshold_version=self.settings.threshold_version,
+                source_bucket=self.storage.bucket_name,
                 model_version=self.settings.embedding_model_version,
+                publish_representative=self._publish_representative,
             )
-        except RuntimeError:
+        except (RuntimeError, ValueError, GoogleAPIError, OSError):
             self.repository.fail(run_id, "matching", "matching_failed", True)
             return False
+
+    def _publish_representative(self, subject_id, representative_id, group):
+        if (
+            not group.representative_object_name
+            or group.representative_generation is None
+        ):
+            raise RuntimeError("enrolled group has no representative crop")
+        data = self.storage.download_private_jpeg(
+            group.representative_object_name, group.representative_generation
+        )
+        return self.storage.upload_gallery_face(subject_id, representative_id, data)
 
 
 def main() -> None:
     configure_logging()
     mode = os.getenv("FACE_INTERACTIVE_MODE", "detect")
-    if mode not in {"detect", "match", "backfill"}:
-        raise ValueError("FACE_INTERACTIVE_MODE must be detect, match, or backfill")
+    if mode not in {"detect", "match", "subject-gallery-backfill"}:
+        raise ValueError("Unknown FACE_INTERACTIVE_MODE")
     run_id = os.getenv("FACE_RUN_ID")
     if mode in {"detect", "match"}:
         if run_id is None:
@@ -235,7 +257,7 @@ def main() -> None:
         csek,
     )
     try:
-        if mode == "backfill":
+        if mode == "subject-gallery-backfill":
             detector = ScrfdDetector(settings.detector_model)
             embedder = OnnxFaceEmbedder(
                 settings.embedding_model, settings.embedding_color_order
@@ -244,9 +266,9 @@ def main() -> None:
                 for name, model in (("detector", detector), ("embedder", embedder)):
                     if model.session.get_providers()[0] != "CUDAExecutionProvider":
                         raise RuntimeError(f"{name} did not initialize on CUDA")
-            backfill = GalleryBackfill(
+            backfill = SubjectGalleryBackfill(
                 settings,
-                BackfillRepository(database),
+                SubjectGalleryRepository(database, settings.bucket),
                 storage,
                 detector,
                 embedder,
@@ -276,7 +298,7 @@ def main() -> None:
                         os.getenv("FACE_REGION", "us-central1"),
                         os.getenv("FACE_INTERACTIVE_JOB", "face-interactive-gpu"),
                         env={
-                            "FACE_INTERACTIVE_MODE": "backfill",
+                            "FACE_INTERACTIVE_MODE": mode,
                             "FACE_BACKFILL_LIMIT": str(limit),
                             "FACE_BACKFILL_REPEAT": "true",
                             "FACE_BACKFILL_REPEAT_SECONDS": str(repeat_seconds),
@@ -290,6 +312,8 @@ def main() -> None:
             )
             if mode == "detect":
                 completed = processor.detect(run_id)
+                if completed:
+                    processor.match(run_id)
             else:
                 completed = processor.match(run_id)
             if completed:

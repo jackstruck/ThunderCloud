@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: ThunderCloud Face Console
-  version: 0.2.0
-  description: Phase 2 search and retained-enrollment API. IAP authentication is required for every operation.
+  version: 0.4.0
+  description: Search, enrollment, and subject management API. IAP authentication is required for every operation.
 servers:
   - url: /
 security:
@@ -136,6 +136,7 @@ paths:
     parameters: [{$ref: '#/components/parameters/RunId'}]
     put:
       operationId: selectFaceGroups
+      description: Enrollment creates one new subject per explicit group and one per ungrouped selected track. Existing-subject destinations are rejected.
       parameters:
         - name: If-Match
           in: header
@@ -155,6 +156,9 @@ paths:
                   minItems: 1
                   uniqueItems: true
                   items: {type: string, format: uuid}
+                assignments:
+                  type: array
+                  items: {$ref: '#/components/schemas/EnrollmentAssignment'}
       responses:
         '202':
           description: Selection locked and matching queued.
@@ -164,6 +168,7 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
         '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /api/runs/{run_id}/face-groups/{group_id}/preview:
     parameters:
       - $ref: '#/components/parameters/RunId'
@@ -250,6 +255,362 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Subject'}
         '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: editSubject
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subject'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditSubject'
+  /api/subjects:
+    get:
+      operationId: listSubjects
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subjects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subject'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      parameters:
+      - name: q
+        in: query
+        description: Exact subject UUID or case-insensitive display-name text. Merged UUIDs resolve to the
+          surviving subject.
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+      - name: multiple_sources
+        in: query
+        schema: {type: boolean, default: false}
+      - name: sort
+        in: query
+        schema: {type: string, enum: [id, sources], default: id}
+  /api/features:
+    get:
+      operationId: getFeatures
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subject_management:
+                    type: boolean
+                  enrollment_grouping:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+  /api/subjects/{subject_id}/examples:
+    parameters:
+    - name: subject_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: listSubjectExamples
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  examples:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SubjectExample'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+                    format: uuid
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      parameters:
+      - name: cursor
+        in: query
+        schema:
+          type: string
+          format: uuid
+      - name: limit
+        in: query
+        schema:
+          type: integer
+      - name: source_id
+        in: query
+        schema: {type: string, format: uuid}
+  /api/subjects/{subject_id}/sources:
+    parameters:
+      - name: subject_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: listSubjectSources
+      responses:
+        '200':
+          description: Source counts and current subject version for manual correction review.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subject_id, version, sources]
+                properties:
+                  subject_id: {type: string, format: uuid}
+                  version: {type: integer}
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        source_id: {type: string, format: uuid}
+                        example_count: {type: integer}
+                        page_url: {type: [string, 'null']}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/subjects/{subject_id}/combine:
+    parameters:
+    - name: subject_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    post:
+      operationId: combineSubjects
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubjectCorrection'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CombineSubjects'
+  /api/subjects/{subject_id}/move-examples:
+    parameters:
+    - name: subject_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    post:
+      operationId: moveSubjectExamples
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubjectCorrection'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveExamples'
+  /api/subjects/{subject_id}/potential-matches:
+    parameters:
+      - {name: subject_id, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: findPotentialMatches
+      description: Read-only current comparison. Excludes self, merged, empty and incompatible subjects, and applies versioned dismissals before the ten-result limit. Scores are similarity, not identity probability.
+      parameters:
+        - {name: dismissed, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: Current subject version and candidates ordered by descending similarity then UUID.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subject_id, version, dismissed, candidates]
+                properties:
+                  subject_id: {type: string, format: uuid}
+                  version: {type: integer, minimum: 1}
+                  dismissed: {type: boolean}
+                  candidates:
+                    type: array
+                    maxItems: 10
+                    items:
+                      allOf:
+                        - {$ref: '#/components/schemas/Subject'}
+                        - type: object
+                          required: [version, similarity]
+                          properties:
+                            similarity: {type: number}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/subjects/{subject_id}/potential-matches/{candidate_id}/dismissal:
+    parameters:
+      - {name: subject_id, in: path, required: true, schema: {type: string, format: uuid}}
+      - {name: candidate_id, in: path, required: true, schema: {type: string, format: uuid}}
+    put:
+      operationId: dismissPotentialMatch
+      description: Dismiss an unordered pair at the supplied current versions. Shared review state records the actor and timestamp.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SuggestionReview'}
+      responses:
+        '200':
+          description: Pair review state; no membership or subject versions are changed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subject_id, candidate_id, version, target_version, dismissed]
+                properties:
+                  subject_id: {type: string, format: uuid}
+                  candidate_id: {type: string, format: uuid}
+                  version: {type: integer, minimum: 1}
+                  target_version: {type: integer, minimum: 1}
+                  dismissed: {type: boolean}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: restorePotentialMatch
+      description: Explicitly restore an unordered pair. An identical retry is idempotent; stale subject versions are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SuggestionReview'}
+      responses:
+        '200':
+          description: Pair review state; no membership or subject versions are changed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subject_id, candidate_id, version, target_version, dismissed]
+                properties:
+                  subject_id: {type: string, format: uuid}
+                  candidate_id: {type: string, format: uuid}
+                  version: {type: integer, minimum: 1}
+                  target_version: {type: integer, minimum: 1}
+                  dismissed: {type: boolean}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     iap: {type: openIdConnect, openIdConnectUrl: 'https://cloud.google.com/iap'}
@@ -278,6 +639,14 @@ components:
       description: Unknown run.
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
   schemas:
+    SuggestionReview:
+      type: object
+      additionalProperties: false
+      required: [operation_id, version, target_version]
+      properties:
+        operation_id: {type: string, format: uuid}
+        version: {type: integer, minimum: 1}
+        target_version: {type: integer, minimum: 1}
     CreateRunRequest:
       type: object
       additionalProperties: false
@@ -357,10 +726,15 @@ components:
                 type: array
                 items:
                   type: object
-                  required: [subject_id, rank, similarity, source_count, observation_count, page_urls, representative_faces]
+                  required: [subject_id, rank, similarity, source_count, observation_count, page_urls, representative_faces, compared_subject_version, subject_version_status]
                   properties:
                     subject_id: {type: string, format: uuid}
                     display_name: {type: [string, 'null']}
+                    compared_subject_version: {type: [integer, 'null'], minimum: 1}
+                    subject_version_status:
+                      type: string
+                      enum: [unchanged, changed, unavailable]
+                      description: Existing snapshots retain their IDs and scores. Changes use recorded versions or later correction evidence; missing historical evidence is unavailable.
                     rank: {type: integer, minimum: 1}
                     similarity: {type: number}
                     source_count: {type: integer, minimum: 0}
@@ -382,24 +756,245 @@ components:
         source_timestamp_ms: {type: [integer, 'null']}
     Subject:
       type: object
-      required: [subject_id, model_version, sample_count, source_count, observation_count, page_urls, representative_faces]
+      required:
+      - subject_id
+      - model_version
+      - sample_count
+      - source_count
+      - observation_count
+      - page_urls
+      - representative_faces
       properties:
-        subject_id: {type: string, format: uuid}
-        display_name: {type: [string, 'null']}
-        model_version: {type: string}
-        sample_count: {type: integer, minimum: 0}
-        source_count: {type: integer, minimum: 0}
-        observation_count: {type: integer, minimum: 0}
+        subject_id:
+          type: string
+          format: uuid
+        display_name:
+          type:
+          - string
+          - 'null'
+        model_version:
+          type: string
+        sample_count:
+          type: integer
+          minimum: 0
+        source_count:
+          type: integer
+          minimum: 0
+        observation_count:
+          type: integer
+          minimum: 0
         page_urls:
           type: array
-          items: {type: string, format: uri}
+          items:
+            type: string
+            format: uri
         representative_faces:
           type: array
-          maxItems: 20
-          items: {$ref: '#/components/schemas/RepresentativeFace'}
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/RepresentativeFace'
+        identity_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        external_identity_ref:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+        version:
+          type: integer
+          minimum: 1
+        identity_version:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+        example_count:
+          type: integer
+          minimum: 0
+        requested_subject_id:
+          type: string
+          format: uuid
+        resolved_from:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        shared_identity_subject_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
     Error:
       type: object
       required: [code, message]
       properties:
         code: {type: string}
         message: {type: string}
+    EnrollmentAssignment:
+      type: object
+      additionalProperties: false
+      required:
+      - assignment_id
+      - group_ids
+      properties:
+        assignment_id:
+          type: string
+          format: uuid
+        group_ids:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    EditSubject:
+      type: object
+      additionalProperties: false
+      required:
+      - operation_id
+      - version
+      - identity_version
+      - display_name
+      - external_identity_ref
+      properties:
+        operation_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        identity_version:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+        display_name:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+        external_identity_ref:
+          type:
+          - string
+          - 'null'
+          maxLength: 200
+    CombineSubjects:
+      type: object
+      additionalProperties: false
+      required:
+      - operation_id
+      - version
+      - other_subject_id
+      - target_version
+      properties:
+        operation_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        other_subject_id:
+          type: string
+          format: uuid
+        target_version:
+          type: integer
+          minimum: 1
+    MoveExamples:
+      type: object
+      additionalProperties: false
+      required:
+      - operation_id
+      - version
+      - example_ids
+      - target_subject_id
+      - target_version
+      properties:
+        operation_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        example_ids:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        target_subject_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        target_version:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+    SubjectCorrection:
+      type: object
+      required:
+      - subject
+      - destination
+      - moved_example_ids
+      properties:
+        subject:
+          $ref: '#/components/schemas/Subject'
+        destination:
+          $ref: '#/components/schemas/Subject'
+        moved_example_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+    SubjectExample:
+      type: object
+      properties:
+        example_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        subject_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        source_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        run_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        processing_job_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        model_version:
+          type: string
+        start_ms:
+          type:
+          - integer
+          - 'null'
+        end_ms:
+          type:
+          - integer
+          - 'null'
+        preview_url:
+          type:
+          - string
+          - 'null'
+        page_url:
+          type:
+          - string
+          - 'null'

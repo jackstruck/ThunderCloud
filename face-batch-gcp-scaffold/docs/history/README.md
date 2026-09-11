@@ -3,8 +3,9 @@
 Historical processing and gallery backfill were accepted as complete by the user on
 2026-09-06. No new corpus reconciliation was requested or performed.
 
-The design plans, Phase 1 review, selection files, and pre-teardown commands in this
-directory are historical evidence, not instructions to launch another backfill.
+The design plans, Phase 1 review, and selection files in this directory are
+historical evidence, not instructions to launch another backfill. Superseded
+operating guides and pre-teardown command copies have been removed.
 Their counts, image digests, pending-work statements, and relative paths describe the
 original revisions. Current guidance lives in ../../README.md, ../../ARCHITECTURE.md,
 ../../OPERATIONS.md, and ../../ROADMAP.md.

@@ -7,21 +7,6 @@ import pytest
 from worker.db import Database
 
 
-class EmptyCursor:
-    def execute(self, statement, parameters):
-        self.statement = statement
-        self.parameters = parameters
-
-    def fetchone(self):
-        return None
-
-
-def test_match_can_return_unknown():
-    match = Database._match(EmptyCursor(), [1, 0], top_k=5, threshold=0.6)
-    assert match.decision == "unknown"
-    assert match.subject_id is None
-
-
 def test_database_selects_private_connector_path():
     database = Database("project:region:instance", "user", "db", "PRIVATE")
     connector_class = Mock()
@@ -60,7 +45,7 @@ class RankingCursor:
     def execute(self, statement, parameters):
         self.statements.append((statement, parameters))
         self.results = (
-            [("b-subject", 0.8, "label-b"), ("a-subject", 0.8, None)]
+            [("b-subject", 0.8, "label-b", 4), ("a-subject", 0.8, None, 9)]
             if "FROM subject" in statement
             else []
         )
@@ -78,3 +63,4 @@ def test_rank_subjects_filters_version_and_has_deterministic_tie_break():
     assert parameters[1] == "adaface-v1"
     assert [candidate.subject_id for candidate in ranked] == ["b-subject", "a-subject"]
     assert ranked[0].display_name == "label-b"
+    assert [candidate.compared_subject_version for candidate in ranked] == [4, 9]

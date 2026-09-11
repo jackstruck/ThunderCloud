@@ -26,7 +26,6 @@ class Settings:
     cloud_sql_ip_type: str = "PUBLIC"
     detector_model: Path = Path("models/scrfd.onnx")
     embedding_model: Path = Path("models/adaface.onnx")
-    face_output_dir: Path | None = None
     embedding_color_order: str = "RGB"
     detector_fps: float = 8.0
     max_video_bytes: int = 10_737_418_240
@@ -36,10 +35,8 @@ class Settings:
     max_probe_video_duration_seconds: float = 900.0
     best_n: int = 5
     top_k: int = 5
-    match_threshold: float = 0.55
-    matching_enabled: bool = False
+    gallery_repair_min_similarity: float = 0.55
     require_cuda: bool = False
-    threshold_version: str = "unvalidated-v1"
     detector_version: str = "scrfd-onnx"
     embedding_model_version: str = "adaface-onnx"
     worker_version: str = "0.2.0"
@@ -67,9 +64,6 @@ class Settings:
             embedding_model=Path(
                 os.getenv("FACE_EMBEDDING_MODEL", "models/adaface.onnx")
             ),
-            face_output_dir=(
-                Path(value) if (value := os.getenv("FACE_OUTPUT_DIR")) else None
-            ),
             embedding_color_order=os.getenv(
                 "FACE_EMBEDDING_COLOR_ORDER", "RGB"
             ).upper(),
@@ -89,12 +83,11 @@ class Settings:
             ),
             best_n=int(os.getenv("FACE_BEST_N", "5")),
             top_k=int(os.getenv("FACE_TOP_K", "5")),
-            match_threshold=float(os.getenv("FACE_MATCH_THRESHOLD", "0.55")),
-            matching_enabled=os.getenv("FACE_MATCHING_ENABLED", "false").lower()
-            in {"1", "true", "yes"},
+            gallery_repair_min_similarity=float(
+                os.getenv("FACE_GALLERY_REPAIR_MIN_SIMILARITY", "0.55")
+            ),
             require_cuda=os.getenv("FACE_REQUIRE_CUDA", "false").lower()
             in {"1", "true", "yes"},
-            threshold_version=os.getenv("FACE_THRESHOLD_VERSION", "unvalidated-v1"),
             detector_version=os.getenv("FACE_DETECTOR_VERSION", "scrfd-onnx"),
             embedding_model_version=os.getenv(
                 "FACE_EMBEDDING_MODEL_VERSION", "adaface-onnx"
@@ -130,8 +123,10 @@ class Settings:
             )
         if self.max_probe_video_duration_seconds <= 0:
             raise ValueError("probe video duration limit must be positive")
-        if not 0 <= self.match_threshold <= 1:
-            raise ValueError("match threshold must be between 0 and 1")
+        if not 0 <= self.gallery_repair_min_similarity <= 1:
+            raise ValueError(
+                "gallery repair minimum similarity must be between 0 and 1"
+            )
         if self.embedding_color_order not in {"RGB", "BGR"}:
             raise ValueError("embedding color order must be RGB or BGR")
         if self.cloud_sql_ip_type not in {"PUBLIC", "PRIVATE"}:

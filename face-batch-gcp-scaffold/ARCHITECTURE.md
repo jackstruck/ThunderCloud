@@ -1,74 +1,90 @@
-# Current architecture
+# Platform architecture
 
-This is the canonical description of the running face-video system. Implementation
-plans describe how components were built; this document describes what operators and
-developers should use now.
+This describes the consolidated release deployed on 2026-09-10, using schema 024.
+See [cutover results and acceptance status](docs/platform-cutover-review.md).
 
-## System flow
+## Inputs and processing
 
-```text
-Local acquisition and manifest tooling
-  |
-  | download selected source videos
-  | calculate SHA-256 and record immutable object metadata
-  | upload with the customer-supplied encryption key (CSEK)
-  v
-GCS archive: gs://teak-banner-dome-bulk-videos/videos/
-  |
-  | selected records are added to the durable Cloud SQL work queue
-  v
-Cloud Run GPU Job: face-batch-gpu-drain
-  |
-  | make a generation-pinned CSEK staging copy under face-staging/
-  | SCRFD detection → ByteTrack → quality selection
-  | AdaFace embedding → best-N track aggregation → subject matching
-  v
-Cloud SQL PostgreSQL + pgvector
-  | subjects, optional identities, tracks, source provenance, jobs, rollouts
-  |
-  +<── ephemeral read-only search from the local face-probe command
-```
+Browser uploads, supported links, and operator archive receipts enter the same
+`media_run` and durable operation framework. Bulk submission creates multiple ordinary
+runs with explicit handling and selection policies. Receipt request keys make a
+retried operator handoff idempotent.
 
-Google Cloud Batch is not part of the active architecture. It was evaluated before
-Cloud Run, but reliable GPU reservation and startup capacity were problematic. Cloud
-Run GPU Jobs were adopted instead.
+The IAP-protected `face-console` service handles browser requests. The
+`face-ingest-drain` CPU job acquires media; `face-interactive-gpu` performs detection,
+tracking, quality selection, embedding, and the requested search or enrollment.
+Leases, retries, cancellation, and scheduled reconciliation belong to the shared
+run framework. There is no separate archive writer or rollout/work-item queue in
+this release.
 
-## 1. Local acquisition and archive upload
+SCRFD detection, ByteTrack tracking, and fixed AdaFace embeddings produce face
+tracks and aggregate embeddings. These are inference operations, not model training.
+Search compares compatible subjects and records similarity-ranked snapshots.
+Enrollment creates new subjects from manually selected groups or, for unattended
+`all_tracks` selection, one subject per detected track. Stable assignment IDs and
+unique example origins prevent duplicate enrollment after retries. Similarity does
+not decide enrollment ownership; explicit corrections move examples or merge subjects.
 
-The acquisition workflow lives in the sibling `bulk-download/` project. It resolves
-selected video links, downloads content locally, calculates SHA-256, and uploads the
-immutable source object beneath the archive's `videos/` prefix using the CSEK. The
-append-only manifest records the source URI, digest, byte length, content type, object
-generation, source reference, and status.
+## Ownership and evidence
 
-Source objects are durable inputs. Processing must never overwrite or delete them.
+`subject_example` is the sole authority for current subject membership. Each example
+retains its source, embedding, normalized model version, timing, quality, and immutable
+origin in a historical `face_track` or an enrolled `submission_face_group`.
+Processing jobs and original model-verification evidence remain retained records.
+Runtime membership and model resolution use the normalized example directly.
 
-## 2. Cloud Run video processing
+`subject` holds derived counts and canonical embeddings, optional identity labels,
+row versions, and merge redirects. Representations normalize each contributing
+example, sum the vectors, then normalize the aggregate. Galleries link to examples
+and exact object generations. Corrections change example ownership and recalculate
+affected subjects transactionally. Browsing, edits, moves, merges, and the correction
+CLI share the subject-management service, version checks, and idempotent correction
+history.
 
-`face-ingest` resolves explicitly selected manifest records and writes a rollout plus
-work items to Cloud SQL. `face-cloud-run start` launches the Cloud Run GPU Job. A warm
-task leases queued work items one at a time and renews each lease while processing.
+## Sources, galleries, and retention
 
-For each video, the worker:
+Sources distinguish `managed`, `archive`, and `none` storage. Stored media uses explicit
+bucket, object name, and generation; external page attribution is a separate field.
+Archive adapters verify the pinned generation, digest, and size. Original archive
+objects are never deleted by processing or source cleanup.
 
-1. verifies the immutable source generation and CSEK metadata;
-2. creates a generation-pinned CSEK copy beneath `face-staging/`;
-3. samples frames and runs SCRFD face detection;
-4. associates detections with ByteTrack;
-5. retains the best-quality observations;
-6. creates normalized AdaFace embeddings and a track aggregate;
-7. compares the aggregate with compatible existing subjects;
-8. atomically commits source, job, track, subject, and provenance data; and
-9. deletes only the exact staging generation after a successful commit.
+`search_then_discard` removes temporary media after a terminal run. `enroll_only`
+retains derived enrollment without retaining full temporary source media.
+`retain_and_enroll` retains managed source media under encrypted `training-media/`.
+Enrollment and search remain separate decisions; retain-and-enroll can record search
+results while creating new subjects.
 
-The pretrained SCRFD and AdaFace models are fixed inference models. Processing creates
-embeddings and subject clusters; it does not train new neural-network weights.
+Enrollment publishes representative JPEGs linked to examples, with up to five active
+representatives per subject. Publication is transactional; search-only runs never
+publish permanent gallery images. Temporary media and selection previews use
+`submissions-temporary/`, terminal cleanup, and a seven-day lifecycle fail-safe.
+Operational runs expire after seven days. Permanent gallery images use
+`subject-gallery/`; retired generations are deleted after their grace period.
+Managed-source deletion records a tombstone and queues the exact bucket/object/generation
+without removing derived lineage. Embeddings and provenance remain durable pending
+an approved retention policy.
 
-Cloud Run obtains the CSEK from Secret Manager directly into memory and connects to
-Cloud SQL using automatic IAM database authentication over Direct VPC egress. The
-durable queue supports retries, lease recovery, reconciliation, and unattended runs.
+## Results and subject review
 
-## 3. Ephemeral local face search
+Saved candidates remain read-only snapshots with their recorded IDs and scores. New
+results record the compared subject version. The UI indicates a subsequent subject
+change when versions or correction history establish one; otherwise older results
+can report that the prior version is unavailable. Merge navigation resolves to the
+survivor without assigning historical split scores to arbitrary new subjects.
+
+Subject details retrieve potential matches on demand. The service excludes self,
+merged or empty subjects, incompatible models, and current dismissals before limiting
+the ordered result to ten candidates, with UUID tie-breaking. Gallery and count
+reads are batched. Similarity is not an identity probability. Viewing suggestions
+changes no membership; merges reuse the explicit preview and survivor confirmation.
+Dismissals are shared, canonical unordered pairs bound to both subject versions,
+with actor and time. Restoration is explicit and idempotent. A version change makes
+the pair eligible again.
+
+The overview supports UUID/name lookup, source filtering and sorting. **Check a run**
+contains manual run lookup and the authenticated principal's recent unexpired runs.
+
+## Ephemeral local face search
 
 `face-probe` accepts one local JPEG/PNG image, one local MP4, or a directory of
 previously detected face crops. Detection, tracking, quality selection, and embedding
@@ -92,72 +108,29 @@ mode `0700`; files use `0600`.
 Limits are JPEG/PNG up to 25 MiB and 50 million decoded pixels, or MP4 up to 250 MiB
 and 15 minutes.
 
-## Data model
+## Security and deployment
 
-- `source_asset`: immutable source URI, digest, and metadata.
-- `processing_job`: one processing attempt and its version/status snapshots.
-- `face_track`: track timing, quality, embedding, subject, and decision provenance.
-- `subject`: anonymous biometric cluster and canonical embedding.
-- `identity`: optional operator-authorized label associated with a subject.
-- `processing_rollout` and `processing_work_item`: durable Cloud Run orchestration.
+Browser access uses IAP and established origin, mutation, and rate protections.
+Public HTTPS acquisition validates DNS answers, redirects, and connections, rejects
+private/reserved destinations, and pins connections to validated addresses.
 
-Local probes create no database records. Managed console runs use the separate
-`media_run` and operation/selection/candidate tables.
+Archive, staging, retained sources, and galleries use the configured encryption
+controls. CSEK material comes from Secret Manager into memory and is excluded from
+logs, database rows, command arguments, and Terraform state. Storage has uniform
+bucket access and Public Access Prevention. Cloud SQL uses CMEK, IAM authentication,
+connector-managed TLS, and private networking. Runtime service identities and job
+invocation permissions remain scoped to their tasks.
 
-## Security boundaries
+The ordered migration runner uses checksummed versions, an advisory lock, verified
+baseline adoption, and the same migrations for fresh setup and upgrades. Migration
+022 requires exact archive generations; absent provenance must be resolved before
+cutover. The maintenance workflow rehearses on an isolated backup copy and compares
+schema, grants, data preservation, and recovery. Migration audit copies of retired
+fields and tables are not created. Protected backups, verification receipts, and
+existing correction history retain their separate purposes.
 
-- Source and staging objects use the CSEK; the key is never logged or stored in
-  Terraform state, database rows, or command arguments.
-- GCS Public Access Prevention and uniform bucket-level access are enabled.
-- The staging lifecycle rule applies only to `face-staging/`.
-- Cloud SQL uses pgvector, CMEK, IAM authentication, and connector-managed TLS.
-- Cloud Run uses a keyless least-privilege runtime identity.
-- Local probing relies on developer ADC and read-only transactions.
-- Operator subject merge and split-group corrections are available through
-  `face-gallery-correct`. Identity assignment remains a separate unfinished workflow.
-
-## Operational commands
-
-Use `OPERATIONS.md` for current local, enqueue, start, status, reconciliation, and probe
-commands. Use `FUTURE_VIDEOS.md` when adding newly acquired source videos.
-
-## Managed console and gallery
-
-The IAP-protected `face-console` service accepts JustPaste/Luluvid links, guarded
-arbitrary public HTTPS media URLs, and direct JPEG/PNG/MP4 uploads. It stores durable
-run state in Cloud SQL, exposes the latest ten non-expired runs for the signed-in
-principal through `GET /api/runs/recent`, and supports recovery by run ID, cancellation,
-retry, face selection, results, and subject-gallery views.
-
-`face-ingest-drain` performs CPU acquisition and maintenance; `face-interactive-gpu`
-performs detection and matching. Their shared VPC, runtime identities, job invocation
-permissions, database, and scheduled reconciliation/maintenance are permanent.
-The historical inventory job and legacy Google Cloud Batch submission are retired
-from source configuration. The bounded gallery-repair implementation is retained for
-maintenance; a completed historical repeat-mode run must not be relaunched.
-
-The current configuration enables guarded public HTTPS fetching. Every DNS answer,
-redirect, and connection is validated; private/reserved destinations are rejected,
-and connections are pinned to validated addresses with media and size limits.
-
-`search_then_discard` deletes temporary source media after a terminal run.
-`retain_and_enroll` promotes the exact source generation into CSEK `training-media/`
-and preserves derived enrollment lineage. `enroll_only` retains derived enrollment
-without retaining the full source media. Candidate snapshots precede enrollment;
-matching clusters anonymous subjects, not real-world identities.
-
-Temporary source media and previews reside under `submissions-temporary/` with
-terminal-run cleanup and a seven-day lifecycle fail-safe. Operational run data expires
-after seven days. Durable representative faces use `subject-gallery/`; publication
-activates a complete generation transactionally, and maintenance deletes retired
-generations after their grace period. Source deletion tombstones retained media and
-queues exact-generation deletion without erasing derived lineage. Embeddings and
-provenance remain durable pending approved retention policy.
-
-## Accepted historical backfill
-
-The historical processing/gallery backfill was accepted as complete by the user on
-2026-09-06 without a separate reconciliation check. Historical counts and initial
-rollout digests are preserved under `docs/history/`; they are not current inventory.
-The proposed automatic local-first upload/enqueue receipt and pilot remain pending.
-The existing explicit acquisition and durable enqueue workflow remains supported.
+Deployment requires pausing submissions, handling outstanding work, migrating and
+deploying the final components together, and verifying access and processing before
+reopening. Recovery restores matching application images and the pre-cutover data.
+See [operations](OPERATIONS.md), [contracts](docs/platform-contracts.md), and
+[maintenance procedures](docs/history/2026-09-09-platform-maintenance.md).

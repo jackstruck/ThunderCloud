@@ -122,29 +122,6 @@ variable "interactive_gpu_image" {
   }
 }
 
-variable "cloud_run_task_count" {
-  description = "Default tasks per execution. Execution-time overrides are used for controlled runs."
-  type        = number
-  default     = 1
-
-  validation {
-    condition     = var.cloud_run_task_count >= 1 && var.cloud_run_task_count <= 10000
-    error_message = "cloud_run_task_count must be between 1 and 10000."
-  }
-}
-
-variable "match_threshold" {
-  description = "Mandatory subject matching similarity threshold."
-  type        = number
-  default     = 0.55
-}
-
-variable "threshold_version" {
-  description = "Version label for the mandatory remote matching threshold."
-  type        = string
-  default     = "controlled-eval-0p55-v1"
-}
-
 variable "monitoring_notification_channels" {
   description = "Existing Cloud Monitoring notification-channel resource names. Incidents remain visible without a channel."
   type        = list(string)
@@ -226,5 +203,21 @@ variable "rollback_image_versions" {
   validation {
     condition     = alltrue([for version in var.rollback_image_versions : can(regex("^sha256:[0-9a-f]{64}$", version))])
     error_message = "Rollback versions must be complete sha256 digests."
+  }
+}
+
+variable "subject_management_enabled" {
+  type        = bool
+  default     = false
+  description = "Enable subject management after example backfill and writer readiness checks."
+}
+
+variable "gallery_repair_min_similarity" {
+  description = "Minimum comparison similarity used only to repair gallery images from retained sources."
+  type        = number
+  default     = 0.55
+  validation {
+    condition     = var.gallery_repair_min_similarity >= 0 && var.gallery_repair_min_similarity <= 1
+    error_message = "Gallery repair similarity must be between zero and one."
   }
 }

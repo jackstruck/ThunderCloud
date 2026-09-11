@@ -50,6 +50,23 @@ _RUN_COLUMNS = """run_id, state, handling_policy, outcome, retryable, error_code
                   created_at, updated_at, expires_at"""
 
 
+def queue_selection(cursor, run_id, group_ids, assignments):
+    """Shared transactional handoff from manual or unattended selection."""
+    from .subject_management import save_assignments
+
+    save_assignments(cursor, run_id, group_ids, assignments)
+    cursor.execute(
+        "UPDATE submission_face_group SET selected = group_id = ANY(%s::uuid[]) WHERE run_id = %s",
+        (group_ids, run_id),
+    )
+    cursor.execute(
+        """INSERT INTO run_operation (run_id, kind, state)
+           VALUES (%s, 'match', 'queued')
+           ON CONFLICT (run_id, kind) DO NOTHING""",
+        (run_id,),
+    )
+
+
 class RunRepository:
     """Cloud SQL persistence for the Phase 1 API.
 
@@ -70,7 +87,9 @@ class RunRepository:
         fingerprint = request_fingerprint(payload)
         source = payload["source"]
         state = (
-            RunState.FETCHING if source["kind"] == "url" else RunState.AWAITING_MEDIA
+            RunState.FETCHING
+            if source["kind"] in {"url", "archive"}
+            else RunState.AWAITING_MEDIA
         )
         connection = self.database.connect()
         cursor = connection.cursor()
@@ -109,8 +128,9 @@ class RunRepository:
                 f"""INSERT INTO media_run
                     (run_id, submitter_principal, idempotency_key,
                      request_fingerprint, handling_policy, source_kind,
-                     source_page_url, content_type, expected_bytes, state)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     source_page_url, content_type, expected_bytes, state, selection_policy,
+                     archive_bucket, archive_object_name, archive_object_generation, archive_sha256)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING {_RUN_COLUMNS}""",
                 (
                     str(run_id),
@@ -119,10 +139,15 @@ class RunRepository:
                     fingerprint,
                     payload["handling_policy"],
                     source["kind"],
-                    source.get("url"),
+                    source.get("url") or source.get("page_url"),
                     source.get("content_type"),
                     source.get("bytes"),
                     state.value,
+                    payload.get("selection_policy", "manual"),
+                    source.get("bucket"),
+                    source.get("object_name"),
+                    source.get("generation"),
+                    source.get("sha256"),
                 ),
             )
             record = serialize_run(cursor.fetchone())
@@ -312,10 +337,28 @@ class RunRepository:
             cursor.close()
             connection.close()
 
-    def select(self, run_id: str, group_ids: list[str], version: int) -> dict[str, Any]:
+    def select(
+        self, run_id: str, group_ids: list[str], version: int, assignments=None
+    ) -> dict[str, Any]:
         connection = self.database.connect()
         cursor = connection.cursor()
         try:
+            assignments = assignments or []
+            fingerprint = request_fingerprint(
+                {"group_ids": sorted(group_ids), "assignments": assignments}
+            )
+            cursor.execute(
+                "SELECT state,selection_fingerprint FROM media_run WHERE run_id=%s FOR UPDATE",
+                (run_id,),
+            )
+            prior = cursor.fetchone()
+            if (
+                prior
+                and prior[1] == fingerprint
+                and prior[0] != "awaiting_face_selection"
+            ):
+                connection.rollback()
+                return self.get(run_id)
             cursor.execute(
                 """SELECT group_id FROM submission_face_group
                    WHERE run_id = %s AND group_id = ANY(%s::uuid[])""",
@@ -325,28 +368,19 @@ class RunRepository:
             if found != set(group_ids):
                 raise RunConflictError("selection contains an unknown face group")
             cursor.execute(
-                """UPDATE media_run SET state = 'matching', row_version = row_version + 1,
+                """UPDATE media_run SET state = 'matching', selection_fingerprint=%s, row_version = row_version + 1,
                           updated_at = now()
                    WHERE run_id = %s AND state = 'awaiting_face_selection'
                      AND row_version = %s
                    RETURNING run_id""",
-                (run_id, version),
+                (fingerprint, run_id, version),
             )
             if not cursor.fetchone():
                 cursor.execute("SELECT 1 FROM media_run WHERE run_id = %s", (run_id,))
                 if not cursor.fetchone():
                     raise RunNotFoundError(run_id)
                 raise RunConflictError("selection is stale or no longer editable")
-            cursor.execute(
-                "UPDATE submission_face_group SET selected = group_id = ANY(%s::uuid[]) WHERE run_id = %s",
-                (group_ids, run_id),
-            )
-            cursor.execute(
-                """INSERT INTO run_operation (run_id, kind, state)
-                   VALUES (%s, 'match', 'queued')
-                   ON CONFLICT (run_id, kind) DO NOTHING""",
-                (run_id,),
-            )
+            queue_selection(cursor, run_id, group_ids, assignments)
             connection.commit()
             return self.get(run_id)
         except Exception:
@@ -388,6 +422,14 @@ class RunRepository:
                    WHERE run_id = %s""",
                 (cooperative, cooperative, run_id),
             )
+            cursor.execute(
+                """UPDATE run_operation SET state = 'failed',
+                          last_error_code = 'run_cancelled', lease_owner = NULL,
+                          lease_expires_at = NULL, updated_at = now()
+                   WHERE run_id = %s AND state = 'queued'
+                     AND kind IN ('fetch', 'detect', 'match', 'promotion')""",
+                (run_id,),
+            )
             if not cooperative:
                 cursor.execute(
                     """INSERT INTO run_cleanup_object
@@ -398,8 +440,13 @@ class RunRepository:
                        UNION ALL
                        SELECT run_id, preview_object_name, preview_generation
                        FROM submission_face_group WHERE run_id = %s
+                       UNION ALL
+                       SELECT run_id, representative_object_name, representative_generation
+                       FROM submission_face_group WHERE run_id = %s
+                         AND representative_object_name IS NOT NULL
+                         AND representative_generation IS NOT NULL
                        ON CONFLICT (object_name, object_generation) DO NOTHING""",
-                    (run_id, run_id),
+                    (run_id, run_id, run_id),
                 )
             connection.commit()
             return self.get(run_id)
@@ -456,20 +503,42 @@ class RunRepository:
         connection = self.database.connect()
         cursor = connection.cursor()
         try:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             cursor.execute(
                 """SELECT face.group_id, rc.subject_id, rc.rank, rc.similarity,
                           rc.display_name_snapshot, rc.source_count,
                           rc.observation_count, gallery.representative_id,
                           gallery.quality_score, gallery.source_timestamp_ms
-                          , enrollment.subject_id, enrollment.decision,
-                          enrollment.source_id, rc.page_urls
+                          , rc.page_urls, rc.compared_subject_version,
+                          CASE
+                            WHEN rc.compared_subject_version IS NOT NULL THEN
+                              CASE WHEN current_subject.row_version=rc.compared_subject_version
+                                   AND current_subject.merged_into_subject_id IS NULL
+                                   THEN 'unchanged' ELSE 'changed' END
+                            WHEN EXISTS (
+                              SELECT 1 FROM subject_change_event event
+                              WHERE event.created_at > rc.created_at
+                                AND event.action IN ('edit','combine','move')
+                                AND (event.details->>'subject_id'=rc.subject_id::text
+                                  OR event.details->>'from_subject_id'=rc.subject_id::text
+                                  OR event.details->>'to_subject_id'=rc.subject_id::text
+                                  OR event.details->'subject'->>'subject_id'=rc.subject_id::text
+                                  OR event.details->'other'->>'subject_id'=rc.subject_id::text
+                                  OR event.details->'before_and_partitions'->>'subject_id'=rc.subject_id::text
+                                  OR event.details->'shared_identity_subject_ids' ? rc.subject_id::text)
+                            ) THEN 'changed'
+                            ELSE 'unavailable'
+                          END AS subject_version_status
                    FROM submission_face_group face
                    LEFT JOIN run_candidate rc
                      ON rc.run_id = face.run_id AND rc.group_id = face.group_id
-                   LEFT JOIN subject_representative_face gallery
-                     ON gallery.subject_id = rc.subject_id AND gallery.active
-                   LEFT JOIN submission_enrollment enrollment
-                     ON enrollment.group_id = face.group_id
+                   LEFT JOIN subject current_subject ON current_subject.subject_id=rc.subject_id
+                   LEFT JOIN LATERAL (
+                     SELECT r.* FROM subject_representative_face r
+                     JOIN subject_example e USING(example_id)
+                     WHERE e.subject_id=rc.subject_id AND r.active
+                     ORDER BY r.quality_score DESC NULLS LAST,r.representative_id LIMIT 5
+                   ) gallery ON true
                    WHERE face.run_id = %s AND face.selected
                    ORDER BY rc.group_id, rc.rank, gallery.quality_score DESC NULLS LAST,
                             gallery.representative_id""",
@@ -491,7 +560,9 @@ class RunRepository:
                         "similarity": float(row[3]),
                         "source_count": int(row[5]),
                         "observation_count": int(row[6]),
-                        "page_urls": list(row[13] or []),
+                        "page_urls": list(row[10] or []),
+                        "compared_subject_version": row[11],
+                        "subject_version_status": row[12],
                         "representative_faces": [],
                     },
                 )
@@ -529,8 +600,10 @@ class RunRepository:
     @staticmethod
     def _enrollment_for_group(cursor, run_id: str, group_id: str):
         cursor.execute(
-            """SELECT subject_id, decision, source_id FROM submission_enrollment
-               WHERE run_id=%s AND group_id=%s""",
+            """SELECT example.subject_id, enrollment.enrollment_decision, example.source_id
+               FROM submission_face_group enrollment
+               JOIN subject_example example ON example.submission_group_id=enrollment.group_id
+               WHERE enrollment.run_id=%s AND enrollment.group_id=%s AND enrollment.enrolled_at IS NOT NULL""",
             (run_id, group_id),
         )
         row = cursor.fetchone()
@@ -551,8 +624,8 @@ class RunRepository:
             cursor.execute(
                 """UPDATE source_asset SET deleted_at = COALESCE(deleted_at, now()),
                           deletion_principal = COALESCE(deletion_principal, %s)
-                   WHERE source_id = %s AND object_name IS NOT NULL
-                   RETURNING source_id, object_name, object_generation, deleted_at""",
+                   WHERE source_id = %s AND storage_kind='managed'
+                   RETURNING source_id, object_name, object_generation, deleted_at, object_bucket""",
                 (principal, source_id),
             )
             row = cursor.fetchone()
@@ -560,11 +633,11 @@ class RunRepository:
                 raise RunNotFoundError(source_id)
             cursor.execute(
                 """INSERT INTO run_cleanup_object
-                     (run_id, object_name, object_generation)
-                   SELECT run_id, %s, %s FROM media_run
+                     (run_id, object_name, object_generation, object_bucket)
+                   SELECT run_id, %s, %s, %s FROM media_run
                    WHERE retained_source_id = %s ORDER BY created_at LIMIT 1
                    ON CONFLICT (object_name, object_generation) DO NOTHING""",
-                (row[1], row[2], source_id),
+                (row[1], row[2], row[4], source_id),
             )
             connection.commit()
             return {"source_id": str(row[0]), "deleted_at": row[3]}

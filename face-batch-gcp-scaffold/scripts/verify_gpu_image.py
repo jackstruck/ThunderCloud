@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-
 MODELS = {
     Path("/opt/models/scrfd.onnx"): "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
     Path("/opt/models/adaface.onnx"): "6b6a35772fb636cdd4fa86520c1a259d0c41472a76f70f802b351837a00d9870",

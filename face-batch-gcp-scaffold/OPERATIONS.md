@@ -1,29 +1,21 @@
 # Operations
 
-This project processes explicitly selected CSEK-encrypted videos with the
-same containerized worker locally or as an unattended Cloud Run GPU Job, while storing
-durable embeddings, queue state, and provenance in Cloud SQL PostgreSQL/pgvector. See
-`ARCHITECTURE.md` for the canonical system architecture and
-`ROADMAP.md` for remaining work; `OPERATIONS.md` contains operational commands.
-Historical backfill is complete. See `../cleanup_opportunities.md` for cleanup status.
-See `FUTURE_VIDEOS.md` for safely uploading, recording, enqueueing, launching, and
-reconciling videos added after the initial corpus.
+The consolidated framework is deployed on schema 024. See [architecture](ARCHITECTURE.md),
+[current contracts](docs/platform-contracts.md), and [cutover results](docs/platform-cutover-review.md).
+Live acceptance and browser review status are recorded in the cutover results.
 
 ## Current topology
 
-- Project: `teak-banner-dome`
-- Bucket: `gs://teak-banner-dome-bulk-videos`
-- Immutable inputs: `videos/`
-- Ephemeral CSEK staging: `face-staging/`
-- Regional resources: `us-central1`
-- Worker: local process/container or Cloud Run Job using the same processing modules
-- Local review output: retained face crops under `data/<job-id>/`
-- Database: Cloud SQL PostgreSQL 17, public connector path with no authorized networks, automatic IAM database authentication
+- Project `teak-banner-dome`, regional services in `us-central1`.
+- Archive `gs://teak-banner-dome-bulk-videos/videos/`; original objects are immutable.
+- IAP console `face-console`; CPU acquisition/cleanup `face-ingest-drain`; CUDA processing `face-interactive-gpu`.
+- Cloud SQL PostgreSQL 17/pgvector, database `face_index`, schema 024, IAM authentication and connector TLS.
+- Temporary submissions `submissions-temporary/`, permanent galleries `subject-gallery/`, retained sources `training-media/`.
 
-The application validates prefixes again in code. It only deletes an object under
-`face-staging/`, and only after a successful or previously successful idempotent
-database transaction. Cloud Run obtains the CSEK from Secret Manager directly into
-memory and reaches Cloud SQL over Direct VPC egress and private IP.
+Cloud jobs use private Cloud SQL connectivity. Developer tools use the existing
+public connector path with no authorized IP networks. CSEK material is read from
+Secret Manager into memory. CPU acquisition has read access only to the archive
+prefix; cleanup deletes only eligible exact generations in the managed prefixes.
 
 ## Prerequisites
 
@@ -49,11 +41,11 @@ CPU execution is supported for functional validation. For NVIDIA execution, inst
 
 ## Provision cloud resources
 
-Review the import and plan carefully because Terraform adopts the existing archive bucket to add only the prefix-scoped lifecycle and IAM configuration:
+Use the existing Terraform state and configuration. For a new installation only, initialize values from the example; never overwrite an existing `terraform.tfvars`:
 
 ```bash
 cd terraform
-cp terraform.tfvars.example terraform.tfvars
+# On a new installation only: cp terraform.tfvars.example terraform.tfvars
 # Set developer_email and review every value.
 terraform init
 terraform plan -out face-batch.tfplan
@@ -61,12 +53,13 @@ terraform show face-batch.tfplan
 terraform apply face-batch.tfplan
 ```
 
-Do not apply a plan that deletes the bucket, changes its location/encryption, or modifies unrelated lifecycle rules. The bucket resource has `prevent_destroy`, and the staging deletion rule matches only `face-staging/`.
+Do not apply a plan that deletes the bucket, changes its location/encryption, or modifies unrelated lifecycle rules. The bucket resource has `prevent_destroy`, and lifecycle rules cover only their explicit ephemeral prefixes.
 
 ## Bootstrap Cloud SQL
 
-Apply the additive schema and least-privilege grants with the connector-based migration
-utility. It reads the administrator password from Secret Manager without printing or
+Apply the ordered schema and shared least-privilege grants with the connector-based migration
+utility. Existing databases without a ledger require verified reference adoption; see
+[maintenance procedures](maintenance/README.md). It reads the administrator password from Secret Manager without printing or
 persisting it:
 
 ```bash
@@ -77,42 +70,13 @@ python scripts/apply_db_migrations.py \
 
 The worker uses the developer IAM database user after bootstrap; it does not use a static database password.
 
-Cross-video subject matching is required (`FACE_MATCHING_ENABLED=true`) for canary and bulk processing. A representative validation set, calibrated threshold, and non-placeholder threshold version are required before that rollout. Subject clustering does not itself authorize association with a real-world identity.
+## Local operator commands
 
-## Run locally
-
-Select one exact object:
-
-```bash
-scripts/run_local.sh submit-object \
-  gs://teak-banner-dome-bulk-videos/videos/OBJECT.mp4 \
-  --sha256 HEX_DIGEST_IF_KNOWN
-```
-
-`run_local.sh` is convenient for editable development. To execute the packaged worker image instead, first build it and then use the container launcher:
-
-```bash
-docker build -t thundercloud-face-batch:local .
-scripts/run_local_container.sh submit-object \
-  gs://teak-banner-dome-bulk-videos/videos/OBJECT.mp4
-```
-
-The container launcher mounts only the CSEK file and developer ADC file as read-only secret files, plus read-only manifest/selection paths. It does not place either credential in the image or command line.
-
-Or create a selection file containing one UID or exact object URI per line and use the existing append-only manifest:
-
-```bash
-scripts/run_local.sh submit-manifest \
-  --manifest ../bulk-download/data/manifest.jsonl \
-  --select-file selected-uids.txt
-```
-
-The CLI resolves usable manifest records, copies each selected object to a unique CSEK staging name, launches the worker, commits all track results atomically, and deletes the staging copy. A failed pre-commit run deliberately leaves staging for lifecycle cleanup/retry.
-
-When `FACE_OUTPUT_DIR` is set, each job also writes its retained best face crops to a
-job-specific directory. Each directory contains a JSON manifest with track, timestamp,
-quality, and source provenance. These local biometric artifacts are mode `0600` and are
-not uploaded to GCS.
+`scripts/run_local.sh` delegates to `face-submit`; it accepts the same `prepare`
+and `submit` arguments shown below. The optional container wrapper uses the same
+receipt CLI and developer ADC. Keep receipts in `private-receipts/` (or the explicit
+`FACE_RECEIPT_DIR`) so the wrapper can write them durably. It submits work to the
+managed jobs; it does not run a separate archive enrollment writer.
 
 ## Ephemeral local probes
 
@@ -143,41 +107,56 @@ ranked its enrolled subject first (similarities `0.9776067747` and `0.9114904947
 
 ## Tests
 
-```bash
-python -m pytest
-python -m compileall worker tests
-PYTHON_BIN=.venv/bin/python scripts/test_db_integration.sh
-```
-
-Cloud integration tests are skipped unless explicitly enabled and configured. The CSEK is never read by unit tests.
-
-## Run with Cloud Run
-
-Cloud Run is an orchestration adapter around the same one-video processor. Enqueueing
-creates durable rollout/work-item rows but does not start compute. Remote rollout
-arguments require the exact image and all behavior-affecting versions explicitly:
+Run focused unit checks in the existing development environment:
 
 ```bash
-face-ingest enqueue-manifest \
-  --manifest ../bulk-download/data/manifest.jsonl \
-  --select-file selected-uids.txt \
-  --name controlled-cloud-run \
-  --request-key controlled-cloud-run-v1 \
-  --image-digest IMAGE_DIGEST \
-  --creator-principal YOUR_DEVELOPER_ACCOUNT \
-  --worker-version 0.2.0-cloud-run-r4 \
-  --detector-version scrfd-10g-5838f7fe \
-  --embedding-model-version adaface-ir18-6b6a3577 \
-  --threshold-version controlled-eval-0p55-v1
-
-face-cloud-run status --rollout-id ROLLOUT_ID
-face-cloud-run start --rollout-id ROLLOUT_ID --tasks 1 --parallelism 1
-face-cloud-run reconcile --rollout-id ROLLOUT_ID
+.test-venv/bin/python -m pytest tests/unit -q
+.test-venv/bin/python -m ruff check worker tests scripts maintenance
+node --check ui/app.js
+node --check ui/subjects.js
 ```
 
-The start command returns after Google accepts the execution. The job continues without
-the local terminal. Parallelism is deliberately locked to one until subject-creation
-concurrency and the small Cloud SQL tier have been validated.
+Use the containerized `validate` command in [maintenance procedures](maintenance/README.md)
+for the PostgreSQL and browser suite. Its fixtures require a disposable database.
+`scripts/test_db_integration.sh` delegates to this workflow and requires the four
+`FACE_MAINTENANCE_*` settings named in that script. Skipped integration/browser
+checks do not establish acceptance. The release's completed validation is recorded
+in the cutover review.
+
+## Submit archive objects through the common run framework
+
+These commands submit to the deployed common framework.
+
+After the acquisition tooling uploads an object, use its exact manifest generation,
+digest, size, and content type to prepare a private durable receipt:
+
+```bash
+face-submit prepare \
+  --receipt private-receipts/source.json \
+  --principal YOUR_DEVELOPER_ACCOUNT \
+  --bucket teak-banner-dome-bulk-videos \
+  --object-name videos/OBJECT_NAME.mp4 \
+  --generation GENERATION \
+  --sha256 SHA256 \
+  --bytes BYTE_COUNT \
+  --content-type video/mp4 \
+  --handling-policy enroll_only \
+  --selection-policy all_tracks
+
+face-submit submit --receipt private-receipts/source.json
+```
+
+Set `--page-url` when external attribution is available. Choose handling explicitly:
+`search_then_discard`, `enroll_only`, or `retain_and_enroll`. Choose `manual` for
+interactive selection or `all_tracks` for unattended processing; unattended enrollment
+creates one new subject per detected track. Original archive objects are preserved
+under every policy.
+
+If submission loses its acknowledgement, submit the same receipt again. Its stable
+request key resolves to the same run. Do not recreate the receipt. For a selected
+bulk submission, repeat `--receipt`; the default active-run limit is three. Track the
+returned run IDs through **Check a run**. CPU acquisition and GPU processing use the
+shared `face-ingest-drain` and `face-interactive-gpu` jobs and durable run operations.
 
 ## Managed console
 
@@ -208,9 +187,8 @@ docker build -t GPU_IMAGE_TAG .
 ```
 
 Set `enable_phase1_console`, `console_image`, `console_origin`, and
-`approved_iap_member` only after reviewing the plan. Set `interactive_gpu_image` when
-the Phase 1 GPU worker must advance independently of the permanent queue worker; otherwise it
-inherits `cloud_run_worker_image`. Use an explicit `group:` IAM principal for team
+`approved_iap_member` only after reviewing the plan. Pin `interactive_gpu_image` to the released GPU image. `cloud_run_worker_image` is
+only a configuration fallback; there is no permanent archive queue worker. Use an explicit `group:` IAM principal for team
 launch; an explicit `user:` principal may be used for a temporary single-account
 acceptance deployment. Guarded arbitrary public HTTPS fetching is enabled in the current Terraform
 configuration. Each redirect and resolved address must pass the transport safeguards. Terraform enables direct
@@ -218,12 +196,16 @@ Cloud Run IAP and grants access only to the configured principal.
 
 ## Retained enrollment
 
-Retained enrollment is enabled in the current Terraform configuration. New deployments
-require the additive migrations and an approved threshold and version. Selected groups snapshot their
-pre-enrollment candidates, copy the exact temporary generation to CSEK-encrypted
-`training-media/`, and contribute once to a model-compatible subject. The source can
-later be tombstoned through `DELETE /api/sources/{source_id}` without removing its
-derived enrollment lineage.
+Both enrollment policies publish representative gallery images, with up to five
+active images per subject. Apply the complete ordered migrations and shared grants;
+never initialize a current deployment from one historical migration alone.
+
+`enroll_only` creates new subjects and removes temporary media. `retain_and_enroll`
+records pre-enrollment candidates, creates new subjects, and retains the exact source
+under CSEK-encrypted `training-media/`. Similarity never assigns enrollment to an
+existing subject. Managed sources may later be tombstoned through
+`DELETE /api/sources/{source_id}` without removing derived lineage. Historical gallery
+repair is a separate deliberate maintenance operation.
 
 Operators can repair clustering without direct SQL:
 
@@ -234,10 +216,9 @@ face-gallery-correct split-group ENROLLED_GROUP_UUID
 
 ## Acquisition handoff
 
-The existing `bulk-download` resolver/download/upload tooling and explicit
-`face-ingest` enqueue remain supported. The proposed automatic local-first handoff
-with an `uploaded_not_enqueued` receipt and the bounded pilot are not yet complete.
-See `ROADMAP.md`; do not use the retired inventory launchers for newly added URLs.
+The sibling `bulk-download` tooling resolves, downloads, and uploads archive objects.
+Prepare and submit receipts using the common run commands above. Keep the upload
+manifest and receipt until the handoff is confirmed. The receipt contains a null run ID before submission and the acknowledged run ID afterward.
 
 ## Maintenance and recovery
 
@@ -251,3 +232,18 @@ state, CSEK material, and archive/gallery objects.
 Historical commands and selections are archived in `docs/history/`. Never replay the
 completed corpus selection as a new rollout. `FUTURE_VIDEOS.md` contains the detailed
 immutable upload and explicit enqueue procedure.
+
+## Delivery evidence
+
+- [2026-09-10 cutover result](docs/history/2026-09-10-platform-cutover.md).
+
+- [Production cutover and recovery](docs/platform-cutover-review.md).
+- [Maintenance commands and scoped cleanup](maintenance/README.md).
+- [Potential matches validation](docs/history/2026-09-09-potential-matches.md).
+- [Desktop/mobile UI validation](docs/history/2026-09-09-platform-ui.md).
+- [Retired runtime and matching gates](docs/history/2026-09-09-runtime-consolidation.md).
+
+The completed 2026-09-09 source separation preserved all 43,670 examples and 8,682
+active gallery images. Its protected recovery records remain under `.local/source-split`.
+Temporary cutover resources and retained cutover recovery storage were removed
+on 2026-09-10 at the user’s request, as described in the cutover review.

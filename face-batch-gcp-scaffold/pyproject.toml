@@ -27,8 +27,7 @@ dev = ["pytest>=8,<10", "pytest-cov>=6,<8", "ruff>=0.16,<1"]
 
 [project.scripts]
 face-worker = "worker.__main__:main"
-face-ingest = "worker.ingest:main"
-face-cloud-run = "worker.cloud_run:main"
+face-submit = "worker.operator_submission:main"
 face-probe = "worker.probe:main"
 face-console = "worker.console:main"
 face-gallery-correct = "worker.gallery_correction:main"

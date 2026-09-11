@@ -13,6 +13,7 @@ class CleanupObject:
     generation: int
     lease_owner: str
     attempt_count: int
+    object_bucket: str | None = None
 
 
 class MaintenanceRepository:
@@ -26,7 +27,7 @@ class MaintenanceRepository:
         try:
             cursor.execute(
                 """UPDATE media_run SET state = 'expired', cancel_requested = true,
-                          source_page_url = NULL,
+                          outcome = NULL, retryable = false,
                           updated_at = now(), completed_at = COALESCE(completed_at, now()),
                           row_version = row_version + 1
                    WHERE expires_at <= now() AND state <> 'expired'
@@ -45,8 +46,13 @@ class MaintenanceRepository:
                    UNION ALL
                    SELECT run_id, preview_object_name, preview_generation
                    FROM submission_face_group WHERE run_id = ANY(%s::uuid[])
+                   UNION ALL
+                   SELECT run_id, representative_object_name, representative_generation
+                   FROM submission_face_group WHERE run_id = ANY(%s::uuid[])
+                     AND representative_object_name IS NOT NULL
+                     AND representative_generation IS NOT NULL
                    ON CONFLICT (object_name, object_generation) DO NOTHING""",
-                (expired_ids, expired_ids),
+                (expired_ids, expired_ids, expired_ids),
             )
             cursor.execute(
                 """DELETE FROM submission_face_group face
@@ -83,7 +89,7 @@ class MaintenanceRepository:
                        attempt_count = attempt_count + 1, updated_at = now()
                    FROM candidate WHERE cleanup.cleanup_id = candidate.cleanup_id
                    RETURNING cleanup.cleanup_id, cleanup.object_name,
-                             cleanup.object_generation, cleanup.attempt_count""",
+                             cleanup.object_generation, cleanup.attempt_count, cleanup.object_bucket""",
                 (owner, self.lease_seconds),
             )
             row = cursor.fetchone()
@@ -91,7 +97,7 @@ class MaintenanceRepository:
             if not row:
                 return None
             return CleanupObject(
-                str(row[0]), str(row[1]), int(row[2]), owner, int(row[3])
+                str(row[0]), str(row[1]), int(row[2]), owner, int(row[3]), row[4]
             )
         except Exception:
             connection.rollback()
@@ -240,7 +246,9 @@ def maintain(repository, storage) -> dict[str, int]:
     while item := repository.claim_cleanup():
         try:
             if item.object_name.startswith("training-media/"):
-                storage.delete_retained(item.object_name, item.generation)
+                storage.delete_retained(
+                    item.object_bucket, item.object_name, item.generation
+                )
             else:
                 storage.delete_temporary(item.object_name, item.generation)
         except NotFound:

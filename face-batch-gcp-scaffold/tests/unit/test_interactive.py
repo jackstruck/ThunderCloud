@@ -31,6 +31,8 @@ class Embedder:
 
 
 class Storage:
+    bucket_name = "test-bucket"
+
     def __init__(self, data):
         self.data = data
         self.previews = []
@@ -105,9 +107,6 @@ def settings():
         detector_version="detector-v1",
         embedding_model_version="embedding-v1",
         top_k=10,
-        matching_enabled=True,
-        match_threshold=0.8,
-        threshold_version="approved-v1",
     )
 
 
@@ -186,7 +185,8 @@ def test_retained_matching_promotes_before_enrollment_commit():
     )
     assert processor.match(RUN_ID)
     assert storage.promoted[1:] == ("submissions-temporary/run/source.jpg", 3)
-    assert calls[0]["threshold_version"] == "approved-v1"
+    assert "threshold_version" not in calls[0]
+    assert "threshold" not in calls[0]
 
 
 def test_enroll_only_does_not_promote_temporary_media():

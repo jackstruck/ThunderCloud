@@ -74,14 +74,6 @@ output "postgres_admin_password_secret" {
   value       = google_secret_manager_secret.postgres_admin_password.secret_id
 }
 
-output "cloud_run_job_name" {
-  value = google_cloud_run_v2_job.gpu_drain.name
-}
-
-output "cloud_run_job_region" {
-  value = google_cloud_run_v2_job.gpu_drain.location
-}
-
 output "face_console_service_uri" {
   description = "Internal load-balancer-only service URI when Phase 1 stubs are enabled."
   value       = local.phase1_enabled ? google_cloud_run_v2_service.console[0].uri : null

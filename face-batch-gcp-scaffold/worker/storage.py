@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import NotFound, PreconditionFailed
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -226,6 +226,37 @@ class StorageRepository:
             uri.object_name, generation=generation, encryption_key=self.csek
         ).delete(if_generation_match=generation)
 
+    def archive_to_temporary(self, work, max_bytes):
+        """Generation-pinned acquisition; retries reuse only byte-identical output."""
+        source_uri = f"gs://{work.archive_bucket}/{work.archive_object_name}"
+        self.source_uri(
+            source_uri
+        )  # Restrict operator input to configured archive scope.
+        data = self.download_source_generation(
+            source_uri, work.archive_generation, max_bytes
+        )
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != work.archive_sha256 or len(data) != work.expected_bytes:
+            raise ValueError(
+                "Archive input checksum differs from the submission receipt"
+            )
+        try:
+            return self.upload_temporary(work.run_id, data, work.content_type, digest)
+        except PreconditionFailed:
+            extension = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "video/mp4": ".mp4",
+            }[work.content_type]
+            name = f"submissions-temporary/{work.run_id}/source{extension}"
+            generation = self.temporary_generation(name)
+            existing, checksum = self.download_temporary(name, generation, max_bytes)
+            if checksum != digest or len(existing) != len(data):
+                raise ValueError(
+                    "Prior acquisition output differs from the submission receipt"
+                )
+            return name, generation, len(existing)
+
     def upload_temporary(
         self,
         run_id: str,
@@ -273,7 +304,11 @@ class StorageRepository:
             object_name, generation=generation, encryption_key=self.csek
         ).delete(if_generation_match=generation, timeout=30)
 
-    def delete_retained(self, object_name: str, generation: int) -> None:
+    def delete_retained(self, bucket: str, object_name: str, generation: int) -> None:
+        if bucket != self.bucket_name:
+            raise ValueError("retained object bucket differs from configured storage")
+        if generation <= 0:
+            raise ValueError("cleanup generation must be positive")
         if not object_name.startswith("training-media/"):
             raise ValueError("retained object is outside the training-media prefix")
         self.bucket.blob(
@@ -408,7 +443,12 @@ class StorageRepository:
     def download_source_file(
         self, source_uri: str, generation: int, max_bytes: int, destination: Path
     ) -> tuple[int, str]:
-        uri = self.source_uri(source_uri)
+        parsed = GcsUri.parse(source_uri)
+        uri = (
+            self._require_uri(source_uri, "training-media/")
+            if parsed.object_name.startswith("training-media/")
+            else self.source_uri(source_uri)
+        )
         blob = self.bucket.blob(
             uri.object_name, generation=generation, encryption_key=self.csek
         )

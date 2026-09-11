@@ -17,3 +17,4 @@ htmlcov/
 *.onnx
 models/*.onnx
 data/
+private-receipts/

@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Apply additive schema and least-privilege grants without exposing DB credentials."""
+"""Apply ordered, tracked schema migrations and shared least-privilege grants."""
 
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from pathlib import Path
 
 from google.cloud import secretmanager
 from google.cloud.sql.connector import Connector, IPTypes
+
+# Support both `python scripts/apply_db_migrations.py` and module invocation.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from maintenance.migrations import apply_migrations, ordered_migrations
 
 
 def parser() -> argparse.ArgumentParser:
@@ -19,32 +28,22 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--database", default="face_index")
     result.add_argument("--admin-user", default="postgres")
     result.add_argument("--app-user", action="append", required=True)
+    result.add_argument("--source-bucket", help="Reviewed bucket for existing retained sources")
     result.add_argument("--ip-type", choices=("PUBLIC", "PRIVATE"), default="PUBLIC")
     result.add_argument(
         "--password-secret", default="face-batch-postgres-admin-password"
     )
-    result.add_argument("--schema", type=Path, default=Path("scripts/db_schema.sql"))
     result.add_argument(
-        "--migration",
+        "--schema-reference",
         type=Path,
-        action="append",
-        default=[
-            Path("migrations/001_phase1_runs.sql"),
-            Path("migrations/002_phase2_enrollment.sql"),
-            Path("migrations/003_candidate_page_urls.sql"),
-            Path("migrations/004_enroll_only.sql"),
-            Path("migrations/005_gallery_fallback.sql"),
-            Path("migrations/006_recent_runs.sql"),
-        ],
-        help="Additive migration to apply after the base schema; may be repeated.",
+        help="Reference produced by isolated maintenance validation",
+    )
+    result.add_argument(
+        "--adopt-through",
+        type=int,
+        help="Explicit installed version for an untracked database; requires reference equality",
     )
     return result
-
-
-def quote_identifier(value: str) -> str:
-    if not value or "\x00" in value:
-        raise ValueError("invalid PostgreSQL identifier")
-    return '"' + value.replace('"', '""') + '"'
 
 
 def main(argv=None) -> None:
@@ -70,25 +69,25 @@ def main(argv=None) -> None:
             db=args.database,
             ip_type=IPTypes.PRIVATE if args.ip_type == "PRIVATE" else IPTypes.PUBLIC,
         )
+        reference = (
+            json.loads(args.schema_reference.read_text())
+            if args.schema_reference
+            else None
+        )
+        result = apply_migrations(
+            connection,
+            ordered_migrations(ROOT),
+            reference=reference,
+            adopt_through=args.adopt_through,
+            source_bucket=args.source_bucket,
+        )
         cursor = connection.cursor()
         try:
-            cursor.execute(args.schema.read_text(encoding="utf-8"))
-            for migration in args.migration:
-                cursor.execute(migration.read_text(encoding="utf-8"))
             for app_user in args.app_user:
-                principal = quote_identifier(app_user)
-                cursor.execute(f"GRANT CONNECT ON DATABASE face_index TO {principal}")
-                cursor.execute(f"GRANT USAGE ON SCHEMA public TO {principal}")
                 cursor.execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON "
-                    "identity, subject, source_asset, processing_job, face_track, "
-                    "processing_rollout, processing_work_item, media_run, "
-                    "submission_face_group, run_candidate, run_operation, "
-                    "subject_representative_face, run_cleanup_object, "
-                    "gallery_cleanup_object, gallery_fallback_source, "
-                    "submission_enrollment "
-                    f"TO {principal}"
+                    "SELECT set_config('thundercloud.app_user', %s, true)", (app_user,)
                 )
+                cursor.execute((ROOT / "scripts/db_grants.sql").read_text())
             connection.commit()
         except Exception:
             connection.rollback()
@@ -100,7 +99,11 @@ def main(argv=None) -> None:
         if connection is not None:
             connection.close()
         connector.close()
-    print("database schema and runtime grants applied")
+    print(
+        json.dumps(
+            {"status": "succeeded", **result, "grants": "applied"}, sort_keys=True
+        )
+    )
 
 
 if __name__ == "__main__":

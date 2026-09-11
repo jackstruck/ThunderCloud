@@ -5,9 +5,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-
 from .db import pgvector
+from .run_repository import queue_selection, request_fingerprint
+from .subject_management import (
+    enrollment_targets,
+    recalculate_subjects,
+    reconcile_gallery,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,9 @@ class DetectionWork:
 class MatchGroup:
     group_id: str
     embedding: Any
+    representative_object_name: str | None = None
+    representative_generation: int | None = None
+    quality: float | None = None
 
 
 @dataclass(frozen=True)
@@ -106,7 +113,7 @@ class InteractiveRepository:
         cursor = connection.cursor()
         try:
             cursor.execute(
-                """SELECT cancel_requested FROM media_run
+                """SELECT cancel_requested,selection_policy FROM media_run
                    WHERE run_id = %s AND state = 'detecting' FOR UPDATE""",
                 (work.run_id,),
             )
@@ -136,8 +143,9 @@ class InteractiveRepository:
                         """INSERT INTO submission_face_group
                              (group_id, run_id, local_group_id, bbox, start_ms, end_ms,
                               quality_summary, preview_object_name, preview_generation,
-                              detector_version, embedding_model_version, aggregate_embedding)
-                           VALUES (%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s,%s,%s::vector)""",
+                              detector_version, embedding_model_version, aggregate_embedding,
+                              representative_object_name, representative_generation)
+                           VALUES (%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s,%s,%s::vector,%s,%s)""",
                         (
                             group["group_id"],
                             work.run_id,
@@ -155,6 +163,8 @@ class InteractiveRepository:
                             detector_version,
                             embedding_version,
                             pgvector(group["embedding"]),
+                            group["representative_object_name"],
+                            group["representative_generation"],
                         ),
                     )
                 cursor.execute(
@@ -163,6 +173,19 @@ class InteractiveRepository:
                        WHERE run_id = %s""",
                     (work.run_id,),
                 )
+                if run[1] == "all_tracks":
+                    selected = [str(group["group_id"]) for group in groups]
+                    queue_selection(cursor, work.run_id, selected, [])
+                    cursor.execute(
+                        """UPDATE media_run SET state='matching',selection_fingerprint=%s
+                           WHERE run_id=%s""",
+                        (
+                            request_fingerprint(
+                                {"group_ids": sorted(selected), "assignments": []}
+                            ),
+                            work.run_id,
+                        ),
+                    )
             cursor.execute(
                 """UPDATE run_operation SET state = 'succeeded', lease_owner = NULL,
                           lease_expires_at = NULL, updated_at = now()
@@ -187,8 +210,13 @@ class InteractiveRepository:
                UNION ALL
                SELECT run_id, preview_object_name, preview_generation
                FROM submission_face_group WHERE run_id = %s
+               UNION ALL
+               SELECT run_id, representative_object_name, representative_generation
+               FROM submission_face_group WHERE run_id = %s
+                 AND representative_object_name IS NOT NULL
+                 AND representative_generation IS NOT NULL
                ON CONFLICT (object_name, object_generation) DO NOTHING""",
-            (run_id, run_id),
+            (run_id, run_id, run_id),
         )
 
     def claim_matching(self, run_id: str) -> MatchWork | None:
@@ -214,13 +242,19 @@ class InteractiveRepository:
                 connection.rollback()
                 return None
             cursor.execute(
-                """SELECT group_id, aggregate_embedding::text
+                """SELECT group_id, aggregate_embedding::text,
+                          COALESCE(representative_object_name, preview_object_name),
+                          COALESCE(representative_generation, preview_generation),
+                          (quality_summary->>'max_quality')::real
                    FROM submission_face_group
                    WHERE run_id = %s AND selected ORDER BY local_group_id""",
                 (run_id,),
             )
             groups = [
-                MatchGroup(str(row[0]), json.loads(row[1])) for row in cursor.fetchall()
+                MatchGroup(
+                    str(row[0]), json.loads(row[1]), str(row[2]), int(row[3]), row[4]
+                )
+                for row in cursor.fetchall()
             ]
             if not groups:
                 connection.rollback()
@@ -251,25 +285,33 @@ class InteractiveRepository:
         rankings,
         *,
         enrollment_source=None,
-        threshold: float | None = None,
-        threshold_version: str | None = None,
+        publish_representative=None,
         model_version: str | None = None,
+        source_bucket: str | None = None,
     ) -> bool:
         connection = self.database.connect()
         cursor = connection.cursor()
         try:
             for group, ranked in zip(groups, rankings, strict=True):
                 for rank, candidate in enumerate(ranked, 1):
+                    if (
+                        type(candidate.compared_subject_version) is not int
+                        or candidate.compared_subject_version < 1
+                    ):
+                        raise ValueError(
+                            "New search results require the compared subject version"
+                        )
                     cursor.execute(
                         """INSERT INTO run_candidate
                              (run_id, group_id, subject_id, rank, similarity,
                               display_name_snapshot, source_count, observation_count,
-                              page_urls)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                              page_urls, compared_subject_version)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
                            ON CONFLICT (run_id, group_id, subject_id) DO UPDATE
                            SET rank = EXCLUDED.rank, similarity = EXCLUDED.similarity,
                                display_name_snapshot = EXCLUDED.display_name_snapshot,
-                               page_urls = EXCLUDED.page_urls""",
+                               page_urls = EXCLUDED.page_urls,
+                               compared_subject_version = EXCLUDED.compared_subject_version""",
                         (
                             run_id,
                             group.group_id,
@@ -279,7 +321,8 @@ class InteractiveRepository:
                             candidate.display_name,
                             len({item["video_uri"] for item in candidate.observations}),
                             len(candidate.observations),
-                            json.dumps(list(getattr(candidate, "page_urls", ()))),
+                            json.dumps(list(candidate.page_urls)),
+                            candidate.compared_subject_version,
                         ),
                     )
             cursor.execute(
@@ -293,32 +336,28 @@ class InteractiveRepository:
                 connection.rollback()
                 return False
             if enrollment_source is not None:
-                if (
-                    threshold is None
-                    or threshold_version is None
-                    or model_version is None
-                ):
+                if model_version is None or publish_representative is None:
                     raise ValueError("enrollment configuration is required")
                 cursor.execute("SELECT pg_advisory_xact_lock(8675309)")
                 source_id, retained_name, retained_generation, retained_bytes = (
                     enrollment_source
                 )
                 cursor.execute(
-                    "SELECT source_sha256 FROM media_run WHERE run_id=%s", (run_id,)
+                    "SELECT source_sha256 FROM media_run WHERE run_id=%s",
+                    (run_id,),
                 )
-                source_sha256 = str(cursor.fetchone()[0])
+                source_row = cursor.fetchone()
+                source_sha256 = str(source_row[0])
                 if retained_name is None:
                     cursor.execute(
                         """INSERT INTO source_asset
-                             (source_id, external_source_ref, source_sha256, metadata,
+                             (source_id, external_source_ref, source_sha256, source_page_url,
                               content_type)
                            VALUES (%s,%s,%s,
-                                   CASE WHEN (SELECT source_page_url FROM media_run WHERE run_id=%s) IS NULL
-                                        THEN '{}'::jsonb ELSE jsonb_build_object(
-                                          'page_url',(SELECT source_page_url FROM media_run WHERE run_id=%s)) END,
+                                   (SELECT source_page_url FROM media_run WHERE run_id=%s),
                                    (SELECT content_type FROM media_run WHERE run_id=%s))
                            ON CONFLICT (external_source_ref, source_sha256)
-                           DO UPDATE SET metadata=EXCLUDED.metadata
+                           DO UPDATE SET source_page_url=EXCLUDED.source_page_url
                            RETURNING source_id""",
                         (
                             source_id,
@@ -326,22 +365,21 @@ class InteractiveRepository:
                             source_sha256,
                             run_id,
                             run_id,
-                            run_id,
                         ),
                     )
                 else:
+                    if not source_bucket:
+                        raise ValueError("Retained source bucket is required")
                     cursor.execute(
                         """INSERT INTO source_asset
-                         (source_id, external_source_ref, source_sha256, metadata,
-                          object_name, object_generation, object_bytes, content_type,
-                          encryption_mode)
+                         (source_id, external_source_ref, source_sha256, source_page_url,
+                          object_bucket, object_name, object_generation, object_bytes, content_type,
+                          encryption_mode, storage_kind)
                        VALUES (%s,%s,%s,
-                               CASE WHEN (SELECT source_page_url FROM media_run WHERE run_id=%s) IS NULL
-                                    THEN '{}'::jsonb ELSE jsonb_build_object(
-                                      'page_url',(SELECT source_page_url FROM media_run WHERE run_id=%s)) END,
-                               %s,%s,%s,
-                               (SELECT content_type FROM media_run WHERE run_id=%s),'CSEK')
-                       ON CONFLICT (source_sha256) WHERE object_name IS NOT NULL AND deleted_at IS NULL
+                               (SELECT source_page_url FROM media_run WHERE run_id=%s),
+                               %s,%s,%s,%s,
+                               (SELECT content_type FROM media_run WHERE run_id=%s),'CSEK','managed')
+                       ON CONFLICT (source_sha256) WHERE storage_kind='managed' AND deleted_at IS NULL
                        DO UPDATE SET source_sha256=EXCLUDED.source_sha256
                        RETURNING source_id""",
                         (
@@ -349,7 +387,7 @@ class InteractiveRepository:
                             f"submission:{run_id}",
                             source_sha256,
                             run_id,
-                            run_id,
+                            source_bucket,
                             retained_name,
                             retained_generation,
                             retained_bytes,
@@ -357,61 +395,84 @@ class InteractiveRepository:
                         ),
                     )
                 effective_source_id = str(cursor.fetchone()[0])
+                targets = enrollment_targets(cursor, run_id, model_version)
+                affected_subjects = set()
                 for group, ranked in zip(groups, rankings, strict=True):
-                    top = ranked[0] if ranked else None
-                    matched = top is not None and float(top.similarity) >= threshold
-                    subject_id = str(top.subject_id) if matched else str(uuid.uuid4())
+                    if group.group_id not in targets:
+                        raise ValueError("Selected track has no enrollment assignment")
+                    subject_id = targets[group.group_id]
+                    decision = "created"
                     cursor.execute(
-                        """INSERT INTO submission_enrollment
-                             (group_id, run_id, source_id, subject_id, decision,
-                              candidate_subject_id, candidate_similarity,
-                              embedding_model_version, threshold_version)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT (group_id) DO NOTHING RETURNING subject_id""",
-                        (
-                            group.group_id,
-                            run_id,
-                            effective_source_id,
-                            subject_id,
-                            "matched" if matched else "created",
-                            None if top is None else top.subject_id,
-                            None if top is None else top.similarity,
-                            model_version,
-                            threshold_version,
-                        ),
+                        """INSERT INTO subject(subject_id,model_version) VALUES (%s,%s)
+                           ON CONFLICT (subject_id) DO NOTHING""",
+                        (subject_id, model_version),
+                    )
+                    affected_subjects.add(subject_id)
+                    cursor.execute(
+                        """UPDATE submission_face_group
+                           SET enrollment_decision=%s,enrolled_at=now()
+                           WHERE group_id=%s AND run_id=%s AND enrolled_at IS NULL
+                           RETURNING group_id""",
+                        (decision, group.group_id, run_id),
                     )
                     if not cursor.fetchone():
                         continue
-                    if matched:
-                        cursor.execute(
-                            """SELECT canonical_embedding::text, sample_count FROM subject
-                               WHERE subject_id=%s AND model_version=%s FOR UPDATE""",
-                            (subject_id, model_version),
+                    cursor.execute(
+                        """INSERT INTO subject_example
+                             (example_id,subject_id,source_id,submission_group_id,embedding,
+                              model_version,start_ms,end_ms,quality_score)
+                           SELECT group_id,%s,%s,group_id,aggregate_embedding,%s,start_ms,end_ms,
+                                  (quality_summary->>'max_quality')::real
+                           FROM submission_face_group WHERE group_id=%s
+                           ON CONFLICT (submission_group_id) DO NOTHING""",
+                        (
+                            subject_id,
+                            effective_source_id,
+                            model_version,
+                            group.group_id,
+                        ),
+                    )
+                    representative_id = str(
+                        uuid.uuid5(uuid.UUID(group.group_id), "gallery-representative")
+                    )
+                    object_name, generation = publish_representative(
+                        subject_id, representative_id, group
+                    )
+                    # Keep failed/rolled-back publications eligible for cleanup. This
+                    # separate commit survives rollback of the enrollment transaction.
+                    self._queue_gallery_upload(
+                        representative_id, object_name, generation
+                    )
+                    cursor.execute(
+                        """INSERT INTO subject_representative_face
+                             (representative_id, object_name,
+                              object_generation, content_type, quality_score, active, example_id)
+                           VALUES (%s,%s,%s,'image/jpeg',%s,true,%s)
+                           ON CONFLICT (representative_id) DO NOTHING""",
+                        (
+                            representative_id,
+                            object_name,
+                            generation,
+                            group.quality,
+                            group.group_id,
+                        ),
+                    )
+                    cursor.execute(
+                        """DELETE FROM gallery_cleanup_object
+                           WHERE object_name=%s AND object_generation=%s AND state='queued'""",
+                        (object_name, generation),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "representative cleanup is already in progress"
                         )
-                        old, count = cursor.fetchone()
-                        combined = np.asarray(json.loads(old), dtype=np.float32) * int(
-                            count
-                        )
-                        combined += np.asarray(group.embedding, dtype=np.float32)
-                        combined /= np.linalg.norm(combined)
-                        cursor.execute(
-                            """UPDATE subject SET canonical_embedding=%s::vector,
-                                      sample_count=sample_count+1, updated_at=now()
-                               WHERE subject_id=%s""",
-                            (pgvector(combined), subject_id),
-                        )
-                    else:
-                        cursor.execute(
-                            """INSERT INTO subject
-                                 (subject_id, canonical_embedding, model_version, sample_count)
-                               VALUES (%s,%s::vector,%s,1)""",
-                            (subject_id, pgvector(group.embedding), model_version),
-                        )
+                recalculate_subjects(cursor, affected_subjects)
+                reconcile_gallery(cursor, affected_subjects)
                 cursor.execute(
                     """UPDATE media_run SET retained_source_id=%s,
-                              threshold_version=%s, enrollment_completed_at=now()
+                              enrollment_completed_at=now()
                        WHERE run_id=%s""",
-                    (effective_source_id, threshold_version, run_id),
+                    (effective_source_id, run_id),
                 )
             cursor.execute(
                 """UPDATE media_run SET state = 'succeeded', outcome = 'candidates',
@@ -432,6 +493,25 @@ class InteractiveRepository:
             cursor.close()
             connection.close()
 
+    def _queue_gallery_upload(self, representative_id, object_name, generation):
+        connection = self.database.connect()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """INSERT INTO gallery_cleanup_object
+                     (representative_id, object_name, object_generation)
+                   VALUES (%s,%s,%s)
+                   ON CONFLICT (object_name, object_generation) DO NOTHING""",
+                (representative_id, object_name, generation),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
     def rank(self, groups: list[MatchGroup], model_version: str, top_k: int):
         return self.database.search_subjects(
             [group.embedding for group in groups], model_version, top_k
@@ -443,7 +523,7 @@ class InteractiveRepository:
         try:
             cursor.execute(
                 """SELECT source_id, object_name, object_generation, object_bytes
-                   FROM source_asset WHERE source_sha256=%s AND object_name IS NOT NULL
+                   FROM source_asset WHERE source_sha256=%s AND storage_kind='managed'
                      AND deleted_at IS NULL""",
                 (sha256,),
             )

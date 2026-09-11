@@ -104,3 +104,22 @@ def test_temporary_upload_is_csek_generation_guarded_and_verified():
     # independently validates the caller's SHA-256 before upload.
     assert repository.bucket.value.kwargs["checksum"] == "auto"
     assert repository.bucket.call[1] == {"encryption_key": b"k" * 32}
+
+
+def test_retained_deletion_uses_recorded_bucket_and_generation():
+    from unittest.mock import Mock
+
+    repository = object.__new__(StorageRepository)
+    repository.bucket_name = "recorded-bucket"
+    repository.bucket = Mock()
+    repository.csek = b"k" * 32
+    with pytest.raises(ValueError, match="bucket differs"):
+        repository.delete_retained("other-bucket", "training-media/source.mp4", 7)
+    repository.bucket.blob.assert_not_called()
+    repository.delete_retained("recorded-bucket", "training-media/source.mp4", 7)
+    repository.bucket.blob.assert_called_once_with(
+        "training-media/source.mp4", generation=7, encryption_key=repository.csek
+    )
+    repository.bucket.blob.return_value.delete.assert_called_once_with(
+        if_generation_match=7, timeout=30
+    )

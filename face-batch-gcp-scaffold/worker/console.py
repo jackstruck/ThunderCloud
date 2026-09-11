@@ -16,6 +16,7 @@ from .job_invoker import CloudRunJobInvoker
 from .rate_limit import FixedWindowRateLimiter
 from .run_repository import RunConflictError, RunNotFoundError, RunRepository
 from .storage import StorageRepository, load_configured_csek, validate_sha256
+from .subject_management import SubjectError, SubjectManagement
 from .uploads import UploadService
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "video/mp4"}
@@ -146,6 +147,8 @@ def create_app(
     invoke_maintenance=None,
     upload_service=None,
     gallery_service=None,
+    subject_service=None,
+    subject_management_enabled=None,
     rate_limiter=None,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
@@ -185,6 +188,12 @@ def create_app(
         upload_service = UploadService(storage, repository, origin or "")
     if gallery_service is None and configured_repository:
         gallery_service = GalleryService(GalleryRepository(database), storage)
+    if subject_service is None and configured_repository:
+        subject_service = SubjectManagement(database)
+    if subject_management_enabled is None:
+        subject_management_enabled = os.getenv(
+            "FACE_SUBJECT_MANAGEMENT_ENABLED", "false"
+        ).lower() in {"1", "true", "yes"}
     if invoke_ingest is None:
         if configured_repository:
             invoke_ingest = CloudRunJobInvoker(
@@ -244,6 +253,121 @@ def create_app(
     @app.errorhandler(RequestError)
     def request_error(error):
         return _error(error.status, error.code, error.message)
+
+    @app.errorhandler(SubjectError)
+    def subject_error(error):
+        return _error(error.status, error.code, error.message)
+
+    def subjects_available():
+        if not subject_management_enabled or subject_service is None:
+            raise RequestError(
+                503,
+                "subjects_unavailable",
+                "Subject management is being prepared. Please try again shortly.",
+            )
+
+    @app.get("/api/features")
+    def features():
+        return jsonify(
+            {
+                "subject_management": bool(subject_management_enabled),
+                "enrollment_grouping": bool(
+                    subject_management_enabled and enrollment_enabled
+                ),
+            }
+        )
+
+    def page_size(default):
+        try:
+            return int(request.args.get("limit", default))
+        except ValueError as error:
+            raise RequestError(
+                422, "invalid_page_size", "Page size must be a number."
+            ) from error
+
+    @app.get("/api/subjects")
+    def list_subjects():
+        subjects_available()
+        multiple = request.args.get("multiple_sources", "false")
+        if multiple not in {"true", "false"}:
+            raise SubjectError(
+                422, "invalid_search", "Use true or false for the source filter."
+            )
+        return jsonify(
+            subject_service.subjects(
+                request.args.get("q", ""),
+                request.args.get("cursor"),
+                page_size(24),
+                multiple_sources=multiple == "true",
+                sort=request.args.get("sort", "id"),
+            )
+        )
+
+    @app.get("/api/subjects/<subject_id>/examples")
+    def subject_examples(subject_id):
+        subjects_available()
+        return jsonify(
+            subject_service.examples(
+                str(subject_id),
+                request.args.get("cursor"),
+                page_size(30),
+                request.args.get("source_id"),
+            )
+        )
+
+    @app.get("/api/subjects/<subject_id>/sources")
+    def subject_sources(subject_id):
+        subjects_available()
+        return jsonify(subject_service.sources(str(subject_id)))
+
+    @app.get("/api/subjects/<subject_id>/potential-matches")
+    def potential_matches(subject_id):
+        subjects_available()
+        dismissed = request.args.get("dismissed", "false")
+        if dismissed not in {"true", "false"}:
+            raise SubjectError(
+                422, "invalid_search", "Use true or false for dismissed suggestions."
+            )
+        return jsonify(
+            subject_service.potential_matches(subject_id, dismissed == "true")
+        )
+
+    @app.route(
+        "/api/subjects/<subject_id>/potential-matches/<candidate_id>/dismissal",
+        methods=["PUT", "DELETE"],
+    )
+    def suggestion_dismissal(subject_id, candidate_id):
+        subjects_available()
+        return jsonify(
+            subject_service.suggestion_dismissal(
+                subject_id,
+                candidate_id,
+                _json_object(),
+                g.principal,
+                restore=request.method == "DELETE",
+            )
+        )
+
+    @app.patch("/api/subjects/<subject_id>")
+    def edit_subject(subject_id):
+        subjects_available()
+        return jsonify(
+            subject_service.edit(str(subject_id), _json_object(), g.principal)
+        )
+
+    @app.post("/api/subjects/<subject_id>/combine")
+    def combine_subjects(subject_id):
+        subjects_available()
+        return jsonify(
+            subject_service.combine(str(subject_id), _json_object(), g.principal)
+        )
+
+    @app.post("/api/subjects/<subject_id>/move-examples")
+    def move_subject_examples(subject_id):
+        subjects_available()
+        return jsonify(
+            subject_service.move(str(subject_id), _json_object(), g.principal)
+        )
 
     @app.errorhandler(RunNotFoundError)
     def not_found(_error_value):
@@ -363,7 +487,7 @@ def create_app(
             content_type="image/jpeg",
         )
 
-    @app.get("/api/subjects/<uuid:subject_id>")
+    @app.get("/api/subjects/<subject_id>")
     def subject(subject_id: uuid.UUID):
         if gallery_service is None:
             raise RequestError(
@@ -374,7 +498,11 @@ def create_app(
     @app.put("/api/runs/<uuid:run_id>/face-selection")
     def select_groups(run_id: uuid.UUID):
         payload = _json_object()
-        if set(payload) != {"group_ids"} or not isinstance(payload["group_ids"], list):
+        if (
+            not {"group_ids"}.issubset(payload)
+            or set(payload) - {"group_ids", "assignments"}
+            or not isinstance(payload["group_ids"], list)
+        ):
             raise RequestError(422, "invalid_selection", "group_ids must be an array.")
         if not payload["group_ids"] or len(set(payload["group_ids"])) != len(
             payload["group_ids"]
@@ -388,10 +516,24 @@ def create_app(
             raise RequestError(
                 422, "invalid_selection", "Every group ID must be a UUID."
             ) from error
-        record = repository.select(
-            str(run_id), group_ids, _etag_version(request.headers.get("If-Match"))
-        )
-        invoke_gpu_match(record["run_id"])
+        if "assignments" in payload:
+            subjects_available()
+            if not isinstance(payload["assignments"], list):
+                raise RequestError(
+                    422, "invalid_assignments", "Assignments must be a list."
+                )
+            record = repository.select(
+                str(run_id),
+                group_ids,
+                _etag_version(request.headers.get("If-Match")),
+                assignments=payload["assignments"],
+            )
+        else:
+            record = repository.select(
+                str(run_id), group_ids, _etag_version(request.headers.get("If-Match"))
+            )
+        if record["state"] == "matching":
+            invoke_gpu_match(record["run_id"])
         return jsonify(record), 202
 
     @app.get("/api/runs/<uuid:run_id>/results")
@@ -424,7 +566,9 @@ def create_app(
 
     @app.get("/")
     @app.get("/runs/<uuid:_run_id>")
-    def index(_run_id=None):
+    @app.get("/subjects")
+    @app.get("/subjects/<uuid:_subject_id>")
+    def index(_run_id=None, _subject_id=None):
         return send_from_directory(
             os.path.join(os.path.dirname(__file__), "..", "ui"), "index.html"
         )
@@ -439,6 +583,12 @@ def create_app(
     def javascript():
         return send_from_directory(
             os.path.join(os.path.dirname(__file__), "..", "ui"), "app.js"
+        )
+
+    @app.get("/subjects.js")
+    def subject_javascript():
+        return send_from_directory(
+            os.path.join(os.path.dirname(__file__), "..", "ui"), "subjects.js"
         )
 
     return app

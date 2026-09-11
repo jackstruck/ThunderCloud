@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+
+from google.api_core.exceptions import GoogleAPIError
 
 from .config import Settings
 from .db import Database
@@ -25,14 +28,25 @@ def drain(
     completed = 0
     while work := repository.claim_fetch():
         try:
-            source = resolver(work.source_url)
-            fetched = fetcher(source.final_url, max_bytes=max_bytes)
-            object_name, generation, size = storage.upload_temporary(
-                work.run_id,
-                fetched.data,
-                fetched.content_type,
-                fetched.sha256,
-            )
+            if work.source_kind == "archive":
+                object_name, generation, size = storage.archive_to_temporary(
+                    work, max_bytes
+                )
+                source = SimpleNamespace(source_adapter="archive-object")
+                fetched = SimpleNamespace(
+                    final_url="",
+                    content_type=work.content_type,
+                    sha256=work.archive_sha256,
+                )
+            else:
+                source = resolver(work.source_url)
+                fetched = fetcher(source.final_url, max_bytes=max_bytes)
+                object_name, generation, size = storage.upload_temporary(
+                    work.run_id,
+                    fetched.data,
+                    fetched.content_type,
+                    fetched.sha256,
+                )
             if repository.complete_fetch(
                 work,
                 final_url=fetched.final_url,
@@ -45,12 +59,13 @@ def drain(
             ):
                 completed += 1
                 invoke_detect(work.run_id)
-        except (ValueError, RuntimeError) as error:
-            code = {
-                ValueError: "source_rejected",
-                RuntimeError: "fetch_failed",
-            }[type(error)]
-            repository.fail_fetch(work, code, retryable=isinstance(error, RuntimeError))
+        except (ValueError, RuntimeError, GoogleAPIError) as error:
+            rejected = isinstance(error, ValueError)
+            repository.fail_fetch(
+                work,
+                "source_rejected" if rejected else "fetch_failed",
+                retryable=not rejected,
+            )
     return completed
 
 

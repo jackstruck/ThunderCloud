@@ -123,7 +123,7 @@ def test_backfill_publishes_only_unambiguous_regeneration(monkeypatch):
         SimpleNamespace(
             max_video_bytes=100,
             detector_fps=8,
-            match_threshold=0.65,
+            gallery_repair_min_similarity=0.65,
             embedding_model_version="model-v1",
         ),
         repository,
@@ -135,3 +135,43 @@ def test_backfill_publishes_only_unambiguous_regeneration(monkeypatch):
     assert report["subjects_published"] == 1
     assert len(repository.staged) == 1
     assert len(repository.published[0][1]) == 1
+
+
+def test_interactive_single_frame_track_uses_original_tracking_provenance(
+    tmp_path, monkeypatch
+):
+    from contextlib import nullcontext
+    from dataclasses import replace
+
+    import av
+
+    from worker.subject_backfill import SubjectGalleryBackfill
+
+    track = replace(
+        existing(), start_ms=100, end_ms=100, local_track_id=7, content_type="video/mp4"
+    )
+    path = tmp_path / "source.mp4"
+    path.write_bytes(b"video")
+    face = {
+        "local_face_id": 7,
+        "start_ms": 100,
+        "end_ms": 100,
+        "embedding": track.embedding,
+        "max_quality": 0.9,
+    }
+    crop = SimpleNamespace(relative_path="track-000007/review-01.jpg", content=b"jpeg")
+    monkeypatch.setattr("worker.probe_service.video_faces", lambda *_: ([face], [crop]))
+    monkeypatch.setattr(
+        av, "open", lambda *_: nullcontext(SimpleNamespace(duration=1_000_000))
+    )
+    monkeypatch.setattr(GalleryBackfill, "regenerate", lambda *_: ({}, 0, 1000))
+    backfill = SubjectGalleryBackfill(
+        SimpleNamespace(max_probe_video_bytes=100), None, None, None, None
+    )
+    found, decoded, duration = backfill.regenerate(str(path), [track])
+    assert found[track.track_id].crop_jpeg == b"jpeg"
+    assert decoded == duration == 1000
+    assert backfill.regenerate(str(path), [replace(track, local_track_id=8)])[0] == {}
+    assert (
+        backfill.regenerate(str(path), [replace(track, embedding=[0.0, 1.0])])[0] == {}
+    )

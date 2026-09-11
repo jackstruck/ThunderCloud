@@ -46,62 +46,9 @@ class GalleryRepository:
             connection.close()
 
     def subject(self, subject_id: str) -> dict:
-        connection = self.database.connect()
-        cursor = connection.cursor()
-        try:
-            cursor.execute(
-                """SELECT subject.subject_id, identity.display_name,
-                          subject.model_version, subject.sample_count,
-                          count(DISTINCT face_track.source_id), count(face_track.track_id)
-                   FROM subject LEFT JOIN identity USING (identity_id)
-                   LEFT JOIN face_track USING (subject_id)
-                   WHERE subject.subject_id = %s
-                   GROUP BY subject.subject_id, identity.display_name""",
-                (subject_id,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise RunNotFoundError("subject")
-            cursor.execute(
-                """SELECT representative_id, quality_score, source_timestamp_ms
-                   FROM subject_representative_face
-                   WHERE subject_id = %s AND active
-                   ORDER BY quality_score DESC NULLS LAST, representative_id LIMIT 20""",
-                (subject_id,),
-            )
-            faces = cursor.fetchall()
-            cursor.execute(
-                """SELECT DISTINCT COALESCE(metadata->>'page_url', metadata->>'luluvid_url')
-                   FROM source_asset WHERE source_id IN (
-                     SELECT source_id FROM face_track WHERE subject_id=%s
-                     UNION SELECT source_id FROM submission_enrollment WHERE subject_id=%s
-                   ) AND COALESCE(metadata->>'page_url', metadata->>'luluvid_url') IS NOT NULL
-                   ORDER BY 1""",
-                (subject_id, subject_id),
-            )
-            page_urls = [str(item[0]) for item in cursor.fetchall()]
-            return {
-                "subject_id": str(row[0]),
-                "display_name": row[1],
-                "model_version": row[2],
-                "sample_count": int(row[3]),
-                "source_count": int(row[4]),
-                "observation_count": int(row[5]),
-                "page_urls": page_urls,
-                "representative_faces": [
-                    {
-                        "representative_id": str(face[0]),
-                        "url": f"/api/gallery/faces/{face[0]}",
-                        "quality_score": None if face[1] is None else float(face[1]),
-                        "source_timestamp_ms": face[2],
-                    }
-                    for face in faces
-                ],
-            }
-        finally:
-            connection.rollback()
-            cursor.close()
-            connection.close()
+        from .subject_management import SubjectManagement
+
+        return SubjectManagement(self.database).subject(subject_id)
 
 
 class GalleryService:
