@@ -580,6 +580,11 @@ class SubjectManagement:
         source_id = subject_uuid(source_id) if source_id else None
         with self.transaction() as cursor:
             sid = resolve_subject(cursor, subject_id)
+            source_time_range = None
+            if source_id:
+                cursor.execute("SELECT min(start_ms),max(end_ms) FROM subject_example WHERE subject_id=%s AND source_id=%s", (sid, source_id))
+                span = cursor.fetchone()
+                source_time_range = {"start_ms": span[0], "end_ms": span[1]}
             cursor.execute(
                 """SELECT e.example_id,e.source_id,e.model_version,e.start_ms,e.end_ms,e.quality_score,
                                      ft.processing_job_id,g.run_id,sa.content_type,
@@ -620,6 +625,7 @@ class SubjectManagement:
             return {
                 "subject_id": sid,
                 "examples": examples,
+                "source_time_range": source_time_range,
                 "next_cursor": str(rows[limit - 1][0]) if len(rows) > limit else None,
             }
 

@@ -109,3 +109,18 @@ nav a.link{display:inline-flex;align-items:center;text-decoration:none;border-ra
 
 .subject-card-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px}
 .subject-card-actions>a{white-space:nowrap}
+
+.button-link{display:inline-flex;align-items:center;justify-content:center;border-radius:7px;padding:10px 14px;font-size:.85rem;font-weight:700;text-decoration:none}
+.enrolled-subject{min-width:0;border:1px solid var(--border);border-radius:9px;padding:12px;background:var(--page)}
+.enrolled-subject h3{font-size:.9rem;overflow-wrap:anywhere;margin:0 0 8px}
+.enrolled-subject .representatives{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.enrolled-subject .button-link{width:100%;margin-top:6px}
+.subject-heading{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.subject-heading h1{margin:0;min-width:0;overflow-wrap:anywhere}
+.edit-identity{flex:none;font-size:1.2rem}
+.subject-edit[hidden],.merge-destination[hidden]{display:none}
+.merge-destination{flex:1 0 100%;min-width:0;font-size:.85rem}
+.merge-destination select{width:100%;min-width:0}
+
+.example-source-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;width:100%;margin:12px 0}
+.example-source-actions>button,.example-source-actions>.button-link{width:100%;min-width:0;margin:0;padding:10px 8px;text-align:center;font-size:.85rem;overflow-wrap:anywhere}

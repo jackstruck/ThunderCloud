@@ -158,12 +158,16 @@
       const cards = el('div', null, 'subject-grid'); subjects.forEach(s => cards.append(subjectCard(s))); contents.append(cards);
       if (!await confirmation('Merge selected subjects?', contents, 'Merge entire subjects')) return;
       const destination = subjects.find(s => s.subject_id === survivor.value);
+      await mergeSubjects(subjects, destination);
+    } catch (error) { errorAt(message, error); }
+  }
+
+  async function mergeSubjects(subjects, destination) {
       const result = (await mutate(`/api/subjects/${destination.subject_id}/bulk-combine`, 'POST', {
         version: destination.version,
         subjects: subjects.filter(s => s !== destination).map(s => ({ subject_id: s.subject_id, version: s.version })),
       })).body;
       await navigate(`/subjects/${result.destination.subject_id}`);
-    } catch (error) { errorAt(message, error); }
   }
 
   function bulkMergePanel(root, subject, initial = null) {
@@ -221,19 +225,31 @@
     const requestId = ++detailRequest; show('subject');
     const root = document.querySelector('#subject-detail'); root.replaceChildren(el('p', 'Source', 'eyebrow'), el('h1', 'Subjects in this source'), el('code', sourceId, 'subject-id'));
     const selected = new Map(), tools = el('div', null, 'merge-tools'), count = el('strong', '0 subjects selected'), message = el('p', '', 'inline-message'), browser = el('div');
-    const merge = button('Review selected merge', async () => {
+    const keepField = el('label', 'Keep subject'), survivor = el('select'); keepField.className = 'merge-destination'; keepField.append(survivor); survivor.setAttribute('aria-label', 'Keep subject'); keepField.hidden = true;
+    const merge = button('Merge', async () => {
+      const subjects = [...selected.values()], destination = selected.get(survivor.value);
+      if (subjects.length < 2 || !destination) return;
       merge.disabled = true;
-      try { await reviewBulkMerge([...selected.values()], selected.keys().next().value, message, sourceId); }
+      try { await mergeSubjects(subjects, destination); }
+      catch (error) { errorAt(message, error); }
       finally { merge.disabled = selected.size < 2; }
     }, 'primary'); merge.disabled = true;
-    tools.append(count, merge, button('Clear selection', () => { selected.clear(); selectionChanged(); browser.querySelectorAll('input[data-merge-id]').forEach(c => { c.checked = false; }); }));
-    function selectionChanged() { count.textContent = `${selected.size} subjects selected`; merge.disabled = selected.size < 2; }
+    tools.append(count, keepField, merge, button('Clear selection', () => { selected.clear(); selectionChanged(); browser.querySelectorAll('input[data-merge-id]').forEach(c => { c.checked = false; }); }));
+    tools.append(el('span', 'Merge combines all examples of the selected subjects, including other sources.', 'hint selection-hint'));
+    function selectionChanged() {
+      count.textContent = `${selected.size} subjects selected`; merge.disabled = selected.size < 2;
+      const previous = survivor.value; survivor.replaceChildren();
+      selected.forEach(subject => { const option = el('option', `${name(subject)} · ${subject.subject_id}`); option.value = subject.subject_id; survivor.append(option); });
+      if (selected.has(previous)) survivor.value = previous; keepField.hidden = selected.size < 2;
+    }
     root.append(browser, message);
     browser.classList.add('source-subject-browser');
     lookup(browser, null, { load: true, sourceId, selection: selected, selectionTools: tools, onSelection: selectionChanged, onCard: async (card, subject) => {
       try {
         const data = (await api(`/api/subjects/${subject.subject_id}/examples?source_id=${sourceId}&with_previews=true&limit=3`)).body;
         if (requestId !== detailRequest || !card.isConnected) return;
+        const span = data.source_time_range;
+        if (span?.start_ms !== null && span?.start_ms !== undefined && span.end_ms !== null) card.append(el('p', `${(span.start_ms / 1000).toFixed(1)}–${(span.end_ms / 1000).toFixed(1)} seconds`, 'hint source-time-range'));
         const pictures = card.querySelector('.representatives'); pictures.replaceChildren();
         data.examples.filter(e => e.preview_url).forEach(e => { const img = el('img'); img.src = e.preview_url; img.alt = `Example from this source of ${name(subject)}`; pictures.append(img); });
         if (!pictures.children.length) pictures.append(el('p', 'No preview available for this source.', 'hint'));
@@ -344,12 +360,15 @@
 
   function renderSubject(root, subject) {
     root.replaceChildren();
-    root.append(el('p', 'Subject', 'eyebrow'), el('h1', name(subject)), subjectCard(subject));
+    const heading = el('div', null, 'subject-heading'); heading.append(el('h1', name(subject)));
+    root.append(el('p', 'Subject', 'eyebrow'), heading, subjectCard(subject));
     // The detail card already represents the open subject.
     root.querySelector('.subject-card a')?.remove();
     const message = el('p', '', 'inline-message'); root.append(message);
     if (subject.resolved_from) root.append(el('p', `The requested subject ${subject.resolved_from} was combined into ${subject.subject_id}.`, 'hint'));
-    const form = el('form', null, 'subject-edit');
+    const form = el('form', null, 'subject-edit'); form.hidden = true; form.id = 'subject-identity-edit';
+    const edit = button('✎', () => { form.hidden = !form.hidden; edit.setAttribute('aria-expanded', String(!form.hidden)); if (!form.hidden) form.querySelector('input').focus(); }, 'link edit-identity');
+    edit.setAttribute('aria-label', 'Edit identity'); edit.setAttribute('aria-expanded', 'false'); edit.setAttribute('aria-controls', form.id); edit.title = 'Edit identity'; heading.append(edit);
     const fields = {};
     [['display_name', 'Display name'], ['external_identity_ref', 'External identity reference']].forEach(([key, text]) => {
       const label = el('label', text); const input = el('input'); input.name = key; input.maxLength = 200; input.value = subject[key] || ''; label.append(input); form.append(label); fields[key] = input;
@@ -467,13 +486,14 @@
       exampleRows.forEach(row => { if (!sources.has(row.source_id)) sources.set(row.source_id, []); sources.get(row.source_id).push(row); });
       if (!sources.size) examplesRoot.append(el('p', 'This subject has no enrolled examples.', 'hint'));
       sources.forEach((rows, source) => {
-        const section = el('section', null, 'example-source'); section.append(el('h3', `Source ${source}`), sourceLink(source));
-        section.append(button("Select this source's examples", e => selectSource(source, e.currentTarget)), button('Clear source selection', () => { rows.forEach(r => selected.delete(r.example_id)); selectionChanged(); renderExamples(); }));
+        const section = el('section', null, 'example-source'); const openSource = sourceLink(source); openSource.className = 'button-link secondary'; section.append(el('h3', `Source ${source}`));
+        const controls = el('div', null, 'example-source-actions');
+        controls.append(openSource, button("Select this source's examples", e => selectSource(source, e.currentTarget)), button('Clear source selection', () => { rows.forEach(r => selected.delete(r.example_id)); selectionChanged(); renderExamples(); })); section.append(controls);
         rows.forEach(row => {
           const label = el('label', null, 'example-row'); const checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.value = row.example_id; checkbox.checked = selected.has(row.example_id);
           checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(row.example_id) : selected.delete(row.example_id); selectionChanged(); });
           label.append(checkbox); if (row.preview_url) { const img = el('img'); img.src = row.preview_url; img.alt = 'Enrolled example'; img.loading = 'lazy'; label.append(img); }
-          const text = el('div'); text.append(el('code', row.example_id, 'subject-id'), el('p', row.model_version, 'hint'));
+          const text = el('div'); text.append(el('code', row.example_id, 'subject-id'));
           if (row.start_ms !== null) text.append(el('p', `${(row.start_ms / 1000).toFixed(1)}–${(row.end_ms / 1000).toFixed(1)} seconds`, 'hint'));
           if (row.run_id) { const a = el('a', `Run ${row.run_id}`); a.href = `/runs/${row.run_id}`; text.append(a); }
           if (row.processing_job_id) text.append(el('p', `Processing job ${row.processing_job_id}`, 'hint'));

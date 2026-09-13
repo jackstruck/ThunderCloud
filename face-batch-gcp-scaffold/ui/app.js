@@ -49,15 +49,17 @@ function renderResults(){
   (e.representative_faces||[]).forEach(f=>enrollments.get(e.subject_id).set(f.representative_id,f));
  });
  document.querySelector('#results h2').textContent=enrollments.size?'Enrollment and matching results':'Candidate matches';
+ const enrolledGrid=document.createElement('div');enrolledGrid.className='subject-grid enrolled-grid';
+ if(enrollments.size)root.append(enrolledGrid);
  enrollments.forEach((faces,subjectId)=>{
   const section=document.createElement('section');section.className='enrolled-subject';
-  const h=document.createElement('h3');h.textContent='Enrolled subject';
-  const link=document.createElement('a');link.href=`/subjects/${subjectId}`;link.textContent=`View subject and potential matches · ${subjectId}`;
+  const h=document.createElement('h3');h.textContent=`Enrolled ${subjectId}`;
+  const link=document.createElement('a');link.href=`/subjects/${subjectId}`;link.textContent='View Subject';link.className='button-link secondary';
   const gallery=document.createElement('div');gallery.className='representatives';
   faces.forEach(f=>{const img=document.createElement('img');img.src=f.url;img.alt='Enrolled face from this run';img.loading='lazy';gallery.append(img);});
-  section.append(h,link,gallery);
+  section.append(h,gallery);
   if(!faces.size){const p=document.createElement('p');p.textContent='No gallery images are available for this enrollment.';section.append(p);}
-  root.append(section);
+  section.append(link);enrolledGrid.append(section);
  });
  if(state.results.handling_policy==='enroll_only'){
   const p=document.createElement('p');p.className='matching-status';p.textContent='Enroll Only: matching against existing subjects was not run. Open the enrolled subject to view potential matches.';root.append(p);

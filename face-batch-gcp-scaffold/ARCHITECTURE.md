@@ -158,3 +158,5 @@ The Sources navigation entry opens `/sources`, a paginated browse of retained so
 Merge selection supports Select all across the current search results (up to the existing 50-subject merge limit, including the destination) and Shift-click ranges within the visible page. Selections persist across pagination; a result set exceeding the limit leaves selection unchanged and asks the operator to narrow the search.
 
 Source-card previews request `with_previews=true` on the existing subject examples endpoint. The query filters to examples with active gallery thumbnails before applying its page limit, so earlier examples without thumbnails cannot hide available images later in the same source. Ordinary example browsing continues to include examples without previews.
+
+Source-page Merge submits directly using the selected identity in the inline Keep subject control; the existing atomic version checks and merge recovery remain in effect. Source cards show the full example time span for that subject and source, independent of preview filtering or pagination.

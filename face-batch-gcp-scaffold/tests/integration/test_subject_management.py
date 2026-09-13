@@ -508,13 +508,19 @@ def test_browser_edit_search_move_and_combine(db, browser_console):
     page.get_by_role("button", name="Search Subjects", exact=True).click()
     expect(page.locator(".subject-card")).to_have_count(1)
     page.get_by_role("link", name="Open subject").click()
-    expect(page.get_by_label("Display name", exact=True)).to_be_visible()
+    expect(page.get_by_label("Display name", exact=True)).to_be_hidden()
+    expect(page.get_by_role('button', name='Save details', exact=True)).to_be_hidden()
+    page.get_by_role('button', name='Edit identity', exact=True).click()
+    expect(page.get_by_label("Display name", exact=True)).to_be_focused()
     page.get_by_label("Display name", exact=True).fill("<img src=x onerror=alert(1)>")
     page.get_by_label("External identity reference").fill("browser-reference")
     page.get_by_role("button", name="Save details").click()
     expect(page.locator("#subject-detail h1")).to_have_text(
         "<img src=x onerror=alert(1)>"
     )
+    expect(page.get_by_label("Display name", exact=True)).to_be_hidden()
+    expect(page.locator(".example-source .button-link")).to_have_text("Open Source")
+    expect(page.locator(".example-row").get_by_text("model", exact=True)).to_have_count(0)
     page.go_back()
     expect(page.get_by_label("Subject ID or display name")).to_have_value(sid)
     page.go_forward()
@@ -1722,6 +1728,9 @@ def test_browser_enrollment_gallery_and_matching_status(db, browser_console, pol
     expect(page.locator(".enrolled-subject a")).to_have_attribute(
         "href", "/subjects/" + sid
     )
+    expect(page.locator('.enrolled-subject h3')).to_have_text('Enrolled ' + sid)
+    expect(page.locator('.enrolled-subject a')).to_have_text('View Subject')
+    assert page.locator('.enrolled-subject a').bounding_box()['y'] > page.locator('.enrolled-subject .representatives').bounding_box()['y']
     images = page.locator(".enrolled-subject img")
     expect(images).to_have_count(7)
     expect(images.first).to_be_visible()
@@ -1854,13 +1863,11 @@ def test_browser_bulk_merge_source_and_separate(db, browser_console):
     expect(page.get_by_text('3 subjects selected', exact=True)).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     search_box = page.get_by_role('button', name='Search Subjects', exact=True).bounding_box()
-    merge_box = page.get_by_role('button', name='Review selected merge', exact=True).bounding_box()
+    merge_box = page.get_by_role('button', name='Merge', exact=True).bounding_box()
     assert merge_box['y'] > search_box['y'] + search_box['height']
-    page.get_by_role('button', name='Review selected merge', exact=True).click()
-    dialog = page.get_by_role('dialog')
-    expect(dialog).to_contain_text('All 3 examples from 1 distinct sources')
-    dialog.get_by_label('Keep this subject and its identity details').select_option(primary)
-    dialog.get_by_role('button', name='Merge entire subjects', exact=True).click()
+    page.get_by_label('Keep subject', exact=True).select_option(primary)
+    page.get_by_role('button', name='Merge', exact=True).click()
+    expect(page.get_by_role('dialog')).to_have_count(0)
     expect(page).to_have_url(origin + '/subjects/' + primary)
     expect(page.locator('.example-row')).to_have_count(3)
     page.get_by_role('button', name='Separate a previous merge', exact=True).click()
@@ -1930,6 +1937,8 @@ def test_browser_source_previews_skip_examples_without_thumbnails(db, browser_co
     assert all(e['preview_url'] is None for e in service.examples(subject, source_id=source, limit=3)['examples'])
     previews = service.examples(subject, source_id=source, limit=3, with_previews=True)
     assert previews['examples']
+    span = sql(db, 'SELECT min(start_ms),max(end_ms) FROM subject_example WHERE subject_id=%s AND source_id=%s', (subject, source))[0]
+    assert previews['source_time_range'] == {'start_ms': span[0], 'end_ms': span[1]}
     assert all(e['preview_url'] and e['source_id'] == source for e in previews['examples'])
     single = service.examples(subject, source_id=source, limit=1, with_previews=True)
     if single['next_cursor']:
@@ -1938,6 +1947,7 @@ def test_browser_source_previews_skip_examples_without_thumbnails(db, browser_co
     page.goto(origin + '/sources/' + source)
     images = page.locator('#subject-detail .subject-card .representatives img')
     expect(images).to_have_count(len(previews['examples']))
+    expect(page.locator('.source-time-range')).to_have_text(f'{span[0]/1000:.1f}–{span[1]/1000:.1f} seconds')
     expect(page.get_by_text('No preview available for this source.', exact=True)).to_have_count(0)
     invalid = page.request.get(origin + f'/api/subjects/{subject}/examples?with_previews=invalid')
     assert invalid.status == 422
@@ -1946,3 +1956,36 @@ def test_browser_source_previews_skip_examples_without_thumbnails(db, browser_co
     assert len(service.examples(subject, source_id=source)['examples']) == 8
     page.reload()
     expect(page.get_by_text('No preview available for this source.', exact=True)).to_be_visible()
+
+
+def test_browser_compact_run_grid_and_direct_merge_stale_selection(db, browser_console):
+    from playwright.sync_api import expect
+    page, origin = browser_console
+    run, groups = make_run(db, count=2)
+    RunRepository(db).select(run, groups, 1)
+    worker, _ = processor(db)
+    assert worker.match(run)
+    page.goto(origin + '/runs/' + run)
+    cards = page.locator('.enrolled-subject')
+    expect(cards).to_have_count(2)
+    boxes = [card.bounding_box() for card in cards.all()]
+    assert abs(boxes[0]['y'] - boxes[1]['y']) < 2
+    assert boxes[1]['x'] > boxes[0]['x'] + boxes[0]['width']
+    if os.getenv('FACE_BROWSER_SCREENSHOTS'):
+        folder = Path(os.environ['FACE_BROWSER_SCREENSHOTS'])
+        folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder / 'compact-run-desktop.png'))
+        page.set_viewport_size({'width': 390, 'height': 844})
+        assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        page.screenshot(path=str(folder / 'compact-run-mobile.png'))
+    service = SubjectManagement(db)
+    subjects = [s['subject_id'] for s in service.subjects()['subjects']]
+    source = service.sources(subjects[0])['sources'][0]['source_id']
+    page.goto(origin + '/sources/' + source)
+    page.get_by_role('button', name='Select all', exact=True).click()
+    expect(page.get_by_label('Keep subject', exact=True)).to_be_visible()
+    sql(db, 'UPDATE subject SET row_version=row_version+1 WHERE subject_id=%s', (subjects[0],))
+    page.get_by_role('button', name='Merge', exact=True).click()
+    expect(page.get_by_role('alert')).to_be_visible()
+    expect(page.get_by_role('dialog')).to_have_count(0)
+    assert len(service.subjects(source_id=source)['subjects']) == 2
