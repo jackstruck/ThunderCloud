@@ -282,6 +282,37 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/EditSubject'
+  /api/sources:
+    get:
+      operationId: browseSources
+      description: Browse sources with current enrolled subjects, ordered by source ID.
+      parameters:
+      - {name: q, in: query, schema: {type: string, maxLength: 200}, description: Source ID or page URL substring.}
+      - {name: cursor, in: query, schema: {type: string, format: uuid}}
+      - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 24}}
+      - {name: multiple_subjects, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: Sources with current subject and example counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  next_cursor: {type: [string, 'null']}
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        source_id: {type: string, format: uuid}
+                        page_url: {type: [string, 'null']}
+                        subject_count: {type: integer}
+                        example_count: {type: integer}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /api/subjects:
     get:
       operationId: listSubjects
@@ -331,6 +362,14 @@ paths:
       - name: multiple_sources
         in: query
         schema: {type: boolean, default: false}
+      - name: shared_source
+        in: query
+        description: Subjects sharing at least one source with another current subject.
+        schema: {type: boolean, default: false}
+      - name: source_id
+        in: query
+        description: Only subjects with examples in this source.
+        schema: {type: string, format: uuid}
       - name: sort
         in: query
         schema: {type: string, enum: [id, sources], default: id}
@@ -413,6 +452,10 @@ paths:
       - name: source_id
         in: query
         schema: {type: string, format: uuid}
+      - name: with_previews
+        in: query
+        description: Only return examples with an active saved gallery thumbnail; applied before pagination.
+        schema: {type: boolean, default: false}
   /api/subjects/{subject_id}/sources:
     parameters:
       - name: subject_id
@@ -439,6 +482,7 @@ paths:
                       properties:
                         source_id: {type: string, format: uuid}
                         example_count: {type: integer}
+                        subject_count: {type: integer, description: Current subjects sharing this source.}
                         page_url: {type: [string, 'null']}
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
@@ -480,6 +524,105 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CombineSubjects'
+  /api/subjects/{subject_id}/bulk-combine:
+    parameters:
+    - name: subject_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    post:
+      operationId: bulkCombineSubjects
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkSubjectCorrection'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkCombineSubjects'
+  /api/subjects/{subject_id}/separate-merge:
+    parameters:
+    - name: subject_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    post:
+      operationId: separateMergeMember
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubjectCorrection'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SeparateMergeMember'
+  /api/subjects/{subject_id}/merge-members:
+    parameters:
+    - name: subject_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      operationId: listMergeMembers
+      responses:
+        '200':
+          description: Current result, or the result of an identical operation replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeMembers'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
   /api/subjects/{subject_id}/move-examples:
     parameters:
     - name: subject_id
@@ -946,6 +1089,61 @@ components:
           - integer
           - 'null'
           minimum: 1
+    BulkCombineSubjects:
+      type: object
+      additionalProperties: false
+      required: [operation_id, version, subjects]
+      properties:
+        operation_id: {type: string, format: uuid}
+        version: {type: integer}
+        subjects:
+          type: array
+          minItems: 1
+          maxItems: 49
+          items:
+            type: object
+            additionalProperties: false
+            required: [subject_id, version]
+            properties:
+              subject_id: {type: string, format: uuid}
+              version: {type: integer}
+    BulkSubjectCorrection:
+      type: object
+      required: [destination, operation_id, merged_subject_ids]
+      properties:
+        destination:
+          $ref: '#/components/schemas/Subject'
+        operation_id: {type: string, format: uuid}
+        merged_subject_ids:
+          type: array
+          items: {type: string, format: uuid}
+    SeparateMergeMember:
+      type: object
+      additionalProperties: false
+      required: [operation_id, version, merge_operation_id, member_subject_id]
+      properties:
+        operation_id: {type: string, format: uuid}
+        version: {type: integer}
+        merge_operation_id: {type: string, format: uuid}
+        member_subject_id: {type: string, format: uuid}
+    MergeMembers:
+      type: object
+      required: [subject_id, version, members]
+      properties:
+        subject_id: {type: string, format: uuid}
+        version: {type: integer}
+        members:
+          type: array
+          description: Members from the most recent 20 merges into this subject.
+          items:
+            type: object
+            properties:
+              operation_id: {type: string, format: uuid}
+              subject_id: {type: string, format: uuid}
+              display_name: {type: [string, 'null']}
+              example_count: {type: integer}
+              can_separate: {type: boolean}
+              created_at: {type: string, format: date-time}
     SubjectCorrection:
       type: object
       required:

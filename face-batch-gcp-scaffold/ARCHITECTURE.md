@@ -86,6 +86,22 @@ the pair eligible again.
 The overview supports UUID/name lookup, source filtering and sorting. **Check a run**
 contains manual run lookup and the authenticated principal's recent unexpired runs.
 
+The subjects overview distinguishes subjects appearing in multiple sources from
+subjects sharing a source with another current subject. `/sources/{source_id}`
+lists the source's current subjects with previews from that source. Operators can
+select up to 50 subjects there, or select candidates from a subject's merge browser
+or potential matches, and choose one surviving identity in a single review.
+Bulk merges validate every version and model before changing membership, then
+commit together under the existing correction lock. Operation IDs make retries
+idempotent. Source links and original per-member example IDs remain recorded.
+
+The surviving subject offers **Separate a previous merge** for members of its
+latest 20 merges. **Separate back out** restores the previous subject and its exact
+examples if they still belong to that survivor. Changed memberships require manual
+selection instead. **Separate selected into new subject** also supports individual
+examples or all examples from a source. Both paths retain source provenance and
+recalculate embeddings and representative membership using existing corrections.
+
 ## Ephemeral local face search
 
 `face-probe` accepts one local JPEG/PNG image, one local MP4, or a directory of
@@ -136,3 +152,9 @@ deploying the final components together, and verifying access and processing bef
 reopening. Recovery restores matching application images and the pre-cutover data.
 See [operations](OPERATIONS.md), [contracts](docs/platform-contracts.md), and
 [maintenance procedures](docs/history/2026-09-09-platform-maintenance.md).
+
+The Sources navigation entry opens `/sources`, a paginated browse of retained sources with current enrolled subjects. Search accepts a source ID or page URL; the Multiple subjects filter uses current membership and updates after merges or separations. Subject cards link directly to each source and show its current subject count. This uses the existing source and example tables and console service, with no new infrastructure.
+
+Merge selection supports Select all across the current search results (up to the existing 50-subject merge limit, including the destination) and Shift-click ranges within the visible page. Selections persist across pagination; a result set exceeding the limit leaves selection unchanged and asks the operator to narrow the search.
+
+Source-card previews request `with_previews=true` on the existing subject examples endpoint. The query filters to examples with active gallery thumbnails before applying its page limit, so earlier examples without thumbnails cannot hide available images later in the same source. Ordinary example browsing continues to include examples without previews.

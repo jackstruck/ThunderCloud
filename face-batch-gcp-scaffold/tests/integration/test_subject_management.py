@@ -43,7 +43,7 @@ def database():
     cur.execute("SELECT to_regclass('media_run')")
     if cur.fetchone()[0]:
         cur.execute(
-            "TRUNCATE identity,subject,source_asset,media_run,subject_change_event CASCADE"
+            "TRUNCATE identity,subject,source_asset,media_run,subject_change_event,gallery_cleanup_object CASCADE"
         )
     c.commit()
     apply_migrations(c, ordered_migrations(Path(".")), source_bucket="test-bucket")
@@ -55,7 +55,7 @@ def database():
 def db(database):
     c = database.connect()
     c.cursor().execute(
-        "TRUNCATE identity,subject,source_asset,media_run,subject_change_event CASCADE"
+        "TRUNCATE identity,subject,source_asset,media_run,subject_change_event,gallery_cleanup_object CASCADE"
     )
     c.commit()
     c.close()
@@ -531,16 +531,15 @@ def test_browser_edit_search_move_and_combine(db, browser_console):
     expect(page).not_to_have_url(origin + "/subjects/" + sid)
     expect(page.locator(".example-row")).to_have_count(1)
     moved = page.url.split("/")[-1]
-    page.get_by_role("button", name="Combine with another subject").click()
+    page.get_by_role("button", name="Merge subjects").click()
     page.locator(".correction-panel").get_by_label("Subject ID or display name").fill(
         target
     )
     page.locator(".correction-panel").get_by_role(
         "button", name="Search Subjects", exact=True
     ).click()
-    page.locator(".correction-panel").get_by_role(
-        "button", name="Choose subject"
-    ).click()
+    page.locator(".correction-panel").get_by_label("Select for merge").check()
+    page.locator(".correction-panel").get_by_role("button", name="Review selected merge").click()
     page.get_by_role("dialog").get_by_label(
         "Keep this subject and its identity details"
     ).select_option(target)
@@ -871,16 +870,15 @@ def test_browser_source_selection_crosses_pages_and_previews_all_sources(
     expect(
         page.get_by_role("button", name="Move 31 selected examples", exact=True)
     ).to_be_enabled()
-    page.get_by_role("button", name="Combine with another subject").click()
+    page.get_by_role("button", name="Merge subjects").click()
     page.locator(".correction-panel").get_by_label("Subject ID or display name").fill(
         destination
     )
     page.locator(".correction-panel").get_by_role(
         "button", name="Search Subjects", exact=True
     ).click()
-    page.locator(".correction-panel").get_by_role(
-        "button", name="Choose subject"
-    ).click()
+    page.locator(".correction-panel").get_by_label("Select for merge").check()
+    page.locator(".correction-panel").get_by_role("button", name="Review selected merge").click()
     dialog = page.get_by_role("dialog")
     expect(dialog).to_contain_text(
         "All 41 examples from 3 distinct sources will be merged."
@@ -956,6 +954,8 @@ def test_browser_subject_controls_layout(db, browser_console, theme, width):
     assert abs(geometry["button"]["width"] - geometry["container"]["width"]) < 1
     assert geometry["scroll"] <= geometry["viewport"]
     checkbox.focus()
+    page.keyboard.press("Tab")
+    expect(page.get_by_label("Multiple Subjects per Source", exact=True)).to_be_focused()
     page.keyboard.press("Tab")
     expect(order).to_be_focused()
     page.keyboard.press("Tab")
@@ -1736,3 +1736,213 @@ def test_browser_enrollment_gallery_and_matching_status(db, browser_console, pol
     else:
         expect(page.locator(".candidate")).to_have_count(7)
         expect(page.locator(".matching-status")).to_have_count(0)
+
+
+def test_bulk_merge_atomic_replay_and_separate_previous_member(db):
+    service = SubjectManagement(db)
+    ids = [enroll(db, n)[0] for n in (2, 3, 4)]
+    before = {sid: service.subject(sid) for sid in ids}
+    origins = sql(db, 'SELECT example_id,source_id FROM subject_example ORDER BY example_id')
+    data = {'operation_id': str(uuid.uuid4()), 'version': before[ids[0]]['version'],
+            'subjects': [{'subject_id': sid, 'version': before[sid]['version']} for sid in ids[1:]]}
+    invalid = {**data, 'subjects': [data['subjects'][0], {**data['subjects'][1], 'version': -1}]}
+    with pytest.raises(SubjectError) as error:
+        service.bulk_combine(ids[0], invalid, 'tester')
+    assert error.value.code == 'stale_subject'
+    assert [service.subject(s)['example_count'] for s in ids] == [2, 3, 4]
+    result = service.bulk_combine(ids[0], data, 'tester')
+    assert result['destination']['example_count'] == 9
+    assert service.bulk_combine(ids[0], data, 'tester') == json.loads(json.dumps(result, default=str))
+    assert len(sql(db, 'SELECT * FROM subject_change_event')) == 1
+    with pytest.raises(SubjectError):
+        service.bulk_combine(ids[0], data, 'other-actor')
+    history = service.merge_members(ids[0])
+    assert len(history['members']) == 2 and all(m['can_separate'] for m in history['members'])
+    separation = {'operation_id': str(uuid.uuid4()), 'version': result['destination']['version'],
+                  'merge_operation_id': data['operation_id'], 'member_subject_id': ids[1]}
+    restored = service.separate_merge(ids[0], separation, 'tester')
+    assert restored['destination']['subject_id'] == ids[1]
+    assert restored['destination']['example_count'] == 3
+    assert restored['subject']['example_count'] == 6
+    assert service.separate_merge(ids[0], separation, 'tester') == json.loads(json.dumps(restored, default=str))
+    assert sql(db, 'SELECT example_id,source_id FROM subject_example ORDER BY example_id') == origins
+    assert service.coverage()['count_mismatches'] == 0
+    assert not next(m for m in service.merge_members(ids[0])['members'] if m['subject_id'] == ids[1])['can_separate']
+
+
+def test_bulk_separation_refuses_changed_membership(db):
+    service = SubjectManagement(db)
+    left, right = enroll(db)[0], enroll(db, 2)[0]
+    data = {'operation_id': str(uuid.uuid4()), 'version': service.subject(left)['version'],
+            'subjects': [{'subject_id': right, 'version': service.subject(right)['version']}]}
+    moved = service.examples(right)['examples'][0]['example_id']
+    merged = service.bulk_combine(left, data, 'tester')
+    service.move(left, {'operation_id': str(uuid.uuid4()), 'version': merged['destination']['version'],
+                       'example_ids': [moved], 'target_subject_id': None, 'target_version': None}, 'tester')
+    assert not service.merge_members(left)['members'][0]['can_separate']
+    with pytest.raises(SubjectError) as error:
+        service.separate_merge(left, {'operation_id': str(uuid.uuid4()), 'version': service.subject(left)['version'],
+                                    'merge_operation_id': data['operation_id'], 'member_subject_id': right}, 'tester')
+    assert error.value.code == 'examples_changed'
+
+
+def test_shared_source_filter_tracks_current_membership_and_pagination(db):
+    service = SubjectManagement(db)
+    primary = enroll(db, 3)[0]
+    unrelated = enroll(db)[0]
+    source = service.sources(primary)['sources'][0]['source_id']
+    example = service.examples(primary)['examples'][0]['example_id']
+    split = service.move(primary, {'operation_id': str(uuid.uuid4()), 'version': service.subject(primary)['version'],
+                                  'example_ids': [example], 'target_subject_id': None, 'target_version': None}, 'tester')['destination']['subject_id']
+    first = service.subjects(shared_source=True, limit=1)
+    second = service.subjects(shared_source=True, limit=1, after=first['next_cursor'])
+    assert {s['subject_id'] for s in first['subjects'] + second['subjects']} == {primary, split}
+    assert second['next_cursor'] is None
+    assert service.subjects(q=unrelated, shared_source=True)['subjects'] == []
+    assert len(service.subjects(q=primary, shared_source=True)['subjects']) == 1
+    assert service.subjects(q=unrelated, source_id=source)['subjects'] == []
+    assert len(service.subjects(source_id=source)['subjects']) == 2
+    assert service.sources(primary)['sources'][0]['subject_count'] == 2
+    assert service.browse_sources(multiple_subjects=True)['sources'][0]['source_id'] == source
+    assert service.browse_sources(q=source)['sources'][0]['subject_count'] == 2
+    page = service.browse_sources(limit=1)
+    next_page = service.browse_sources(limit=1, after=page['next_cursor'])
+    assert len(page['sources'] + next_page['sources']) == 2
+    assert next_page['next_cursor'] is None
+
+    service.bulk_combine(primary, {'operation_id': str(uuid.uuid4()), 'version': service.subject(primary)['version'],
+                                  'subjects': [{'subject_id': split, 'version': service.subject(split)['version']}]}, 'tester')
+    assert service.subjects(shared_source=True)['subjects'] == []
+    assert len(service.subjects(source_id=source)['subjects']) == 1
+    assert service.browse_sources(multiple_subjects=True)['sources'] == []
+
+
+def test_browser_bulk_merge_source_and_separate(db, browser_console):
+    from playwright.sync_api import expect
+    page, origin = browser_console
+    service = SubjectManagement(db)
+    primary = enroll(db, 3)[0]
+    source = service.sources(primary)['sources'][0]['source_id']
+    examples = service.examples(primary)['examples']
+    for example in examples[:2]:
+        service.move(primary, {'operation_id': str(uuid.uuid4()), 'version': service.subject(primary)['version'],
+                              'example_ids': [example['example_id']], 'target_subject_id': None, 'target_version': None}, 'tester')
+    page.goto(origin + '/subjects')
+    page.get_by_label('Multiple Subjects per Source', exact=True).check()
+    expect(page.locator('#subject-browser .subject-card')).to_have_count(3)
+    expect(page).to_have_url(origin + '/subjects?shared_source=true')
+    page.reload()
+    expect(page.get_by_label('Multiple Subjects per Source', exact=True)).to_be_checked()
+    page.get_by_role('link', name='Open Source (3 subjects)', exact=True).first.click()
+    expect(page).to_have_url(origin + '/sources/' + source)
+    page.get_by_role('link', name='Sources', exact=True).click()
+    page.get_by_label('Multiple subjects', exact=True).check()
+    expect(page.locator('#subject-detail .subject-card')).to_have_count(1)
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    page.reload()
+    expect(page.get_by_label('Multiple subjects', exact=True)).to_be_checked()
+    page.get_by_role('link', name='Open Source (3 subjects)', exact=True).click()
+    expect(page.locator('#subject-detail .subject-card')).to_have_count(3)
+    checks = page.get_by_label('Select for merge', exact=True)
+    checks.nth(0).click()
+    checks.nth(2).click(modifiers=['Shift'])
+    expect(page.get_by_text('3 subjects selected', exact=True)).to_be_visible()
+    checks.nth(0).click(modifiers=['Shift'])
+    expect(page.get_by_text('0 subjects selected', exact=True)).to_be_visible()
+    page.get_by_role('button', name='Select all', exact=True).click()
+    expect(page.get_by_text('3 subjects selected', exact=True)).to_be_visible()
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    search_box = page.get_by_role('button', name='Search Subjects', exact=True).bounding_box()
+    merge_box = page.get_by_role('button', name='Review selected merge', exact=True).bounding_box()
+    assert merge_box['y'] > search_box['y'] + search_box['height']
+    page.get_by_role('button', name='Review selected merge', exact=True).click()
+    dialog = page.get_by_role('dialog')
+    expect(dialog).to_contain_text('All 3 examples from 1 distinct sources')
+    dialog.get_by_label('Keep this subject and its identity details').select_option(primary)
+    dialog.get_by_role('button', name='Merge entire subjects', exact=True).click()
+    expect(page).to_have_url(origin + '/subjects/' + primary)
+    expect(page.locator('.example-row')).to_have_count(3)
+    page.get_by_role('button', name='Separate a previous merge', exact=True).click()
+    expect(page.get_by_role('button', name='Separate back out', exact=True)).to_have_count(2)
+    page.get_by_role('button', name='Separate back out', exact=True).first.click()
+    page.get_by_role('dialog').get_by_role('button', name='Separate subject', exact=True).click()
+    expect(page).not_to_have_url(origin + '/subjects/' + primary)
+    expect(page.locator('.example-row')).to_have_count(1)
+    page.locator('.example-row input').check()
+    page.get_by_role('button', name='Separate selected into new subject', exact=True).click()
+    expect(page.get_by_role('dialog')).to_contain_text('A new subject will be created')
+    page.get_by_role('dialog').get_by_role('button', name='Cancel', exact=True).click()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.goto(origin + '/sources/' + source)
+    expect(page.locator('#subject-detail .subject-card')).to_have_count(2)
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+def test_browser_select_all_crosses_pages_and_respects_limit(db, browser_console):
+    from playwright.sync_api import expect
+    page, origin = browser_console
+    service = SubjectManagement(db)
+    primary = enroll(db, 13)[0]
+    source = service.sources(primary)['sources'][0]['source_id']
+    for example in service.examples(primary)['examples'][:12]:
+        service.move(primary, {'operation_id': str(uuid.uuid4()), 'version': service.subject(primary)['version'],
+                              'example_ids': [example['example_id']], 'target_subject_id': None, 'target_version': None}, 'tester')
+    page.goto(origin + '/sources/' + source)
+    expect(page.get_by_label('Select for merge', exact=True)).to_have_count(12)
+    page.get_by_role('button', name='Select all', exact=True).click()
+    expect(page.get_by_text('13 subjects selected', exact=True)).to_be_visible()
+    next_button = page.get_by_role('button', name='Next', exact=True)
+    grid = page.locator('.subject-grid').bounding_box()
+    bounds = next_button.bounding_box()
+    assert abs(bounds['width'] - (grid['width'] - 12) / 2) < 2
+    assert bounds['y'] >= grid['y'] + grid['height'] + 24
+    if os.getenv('FACE_BROWSER_SCREENSHOTS'):
+        folder = Path(os.environ['FACE_BROWSER_SCREENSHOTS'])
+        folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder / 'source-merge-desktop.png'))
+        page.set_viewport_size({'width': 390, 'height': 844})
+        assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        page.screenshot(path=str(folder / 'source-merge-mobile.png'))
+    next_button.click()
+    expect(page.get_by_label('Select for merge', exact=True)).to_have_count(1)
+    expect(page.get_by_label('Select for merge', exact=True)).to_be_checked()
+    page.get_by_role('button', name='Clear selection', exact=True).click()
+    expect(page.get_by_text('0 subjects selected', exact=True)).to_be_visible()
+    page.route('**/api/subjects?**limit=100**', lambda route: route.fulfill(json={
+        'subjects': [{'subject_id': str(uuid.uuid4())} for _ in range(51)],
+        'next_cursor': None,
+    }))
+    page.get_by_role('button', name='Select all', exact=True).click()
+    expect(page.get_by_role('alert')).to_contain_text('Select at most 50 subjects')
+    expect(page.get_by_text('0 subjects selected', exact=True)).to_be_visible()
+
+
+def test_browser_source_previews_skip_examples_without_thumbnails(db, browser_console):
+    from playwright.sync_api import expect
+    page, origin = browser_console
+    service = SubjectManagement(db)
+    subject = enroll(db, 8)[0]
+    source = service.sources(subject)['sources'][0]['source_id']
+    first = service.examples(subject, source_id=source, limit=3)['examples']
+    sql(db, 'UPDATE subject_representative_face SET active=false,retired_at=now() WHERE example_id=ANY(%s::uuid[])',
+        ([e['example_id'] for e in first],))
+    assert all(e['preview_url'] is None for e in service.examples(subject, source_id=source, limit=3)['examples'])
+    previews = service.examples(subject, source_id=source, limit=3, with_previews=True)
+    assert previews['examples']
+    assert all(e['preview_url'] and e['source_id'] == source for e in previews['examples'])
+    single = service.examples(subject, source_id=source, limit=1, with_previews=True)
+    if single['next_cursor']:
+        following = service.examples(subject, source_id=source, limit=1, after=single['next_cursor'], with_previews=True)
+        assert following['examples'][0]['example_id'] != single['examples'][0]['example_id']
+    page.goto(origin + '/sources/' + source)
+    images = page.locator('#subject-detail .subject-card .representatives img')
+    expect(images).to_have_count(len(previews['examples']))
+    expect(page.get_by_text('No preview available for this source.', exact=True)).to_have_count(0)
+    invalid = page.request.get(origin + f'/api/subjects/{subject}/examples?with_previews=invalid')
+    assert invalid.status == 422
+    sql(db, 'UPDATE subject_representative_face r SET active=false,retired_at=now() FROM subject_example e WHERE r.example_id=e.example_id AND e.subject_id=%s', (subject,))
+    assert service.examples(subject, source_id=source, with_previews=True)['examples'] == []
+    assert len(service.examples(subject, source_id=source)['examples']) == 8
+    page.reload()
+    expect(page.get_by_text('No preview available for this source.', exact=True)).to_be_visible()

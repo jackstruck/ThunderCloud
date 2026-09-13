@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 import sys
 import time
@@ -13,10 +14,11 @@ from pathlib import Path
 
 from bulk_download.config import load_config, load_csek
 from bulk_download.download import download_video
-from bulk_download.fetch import Fetcher
+from bulk_download.fetch import FetchError, Fetcher
 from bulk_download.manifest import append, completed_hashes, completed_urls
 from bulk_download.pipeline import discover_luluvid, load_inputs
 from bulk_download.storage import StorageAdapter
+from bulk_download.urls import luluvid_fetch_url
 
 
 def now() -> str:
@@ -41,6 +43,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--delay", type=float, default=1.0)
     parser.add_argument("--partition", choices=("all", "front", "back"), default="all")
     parser.add_argument("--reverse", action="store_true")
+    parser.add_argument("--error-code", action="append", help="Retry latest matching errors; repeat for multiple codes")
     return parser.parse_args()
 
 
@@ -82,9 +85,14 @@ def recover_existing(blob, config, uid: str) -> dict[str, object]:
         path.unlink(missing_ok=True)
 
 
-def main() -> int:
+def main(*, checkpoint=None) -> int:
     args = arguments()
     config = load_config(args.config)
+    def record(item):
+        append(config.manifest_file, item)
+        if checkpoint is not None:
+            checkpoint()
+
     key = load_csek(config)
     storage = StorageAdapter(config, key)
     storage.check_bucket()
@@ -105,6 +113,14 @@ def main() -> int:
     done = completed_urls(config.manifest_file)
     hash_index = completed_hashes(config.manifest_file)
     pending = [url for url in selected if url not in done]
+    if args.error_code:
+        latest = {}
+        if config.manifest_file.exists():
+            for line in config.manifest_file.read_text().splitlines():
+                if line.strip():
+                    row = json.loads(line)
+                    latest[row.get("luluvid_url")] = row
+        pending = [url for url in pending if latest.get(url, {}).get("error_code") in args.error_code]
     if args.limit is not None:
         pending = pending[:args.limit]
     failures = 0
@@ -125,7 +141,7 @@ def main() -> int:
                 existing = storage.existing(object_name)
                 if existing is not None:
                     provenance = recover_existing(existing, config, item.uid)
-                    append(config.manifest_file, {
+                    record({
                         "timestamp": now(), "status": "complete", "recovered_from_gcs": True,
                         "luluvid_url": item.luluvid_url, "uid": item.uid,
                         "object": f"gs://{config.gcp.bucket}/{object_name}",
@@ -133,12 +149,13 @@ def main() -> int:
                     })
                     print(f"{index}/{len(pending)} recovered uid={item.uid}", flush=True)
                     continue
-                downloaded = download_video(fetcher, config, item.media_url, item.uid)
+                with fetcher.referring_to(item.media_referer or luluvid_fetch_url(item.luluvid_url)):
+                    downloaded = download_video(fetcher, config, item.media_url, item.uid)
                 with content_lock(config.manifest_file.parent / "content-dedupe.lock"):
                     hash_index.update(completed_hashes(config.manifest_file))
                     prior = hash_index.get(downloaded.sha256)
                     if prior is not None:
-                        append(config.manifest_file, {
+                        record({
                             "timestamp": now(), "status": "duplicate",
                             "luluvid_url": item.luluvid_url, "uid": item.uid,
                             "sha256": downloaded.sha256,
@@ -151,7 +168,7 @@ def main() -> int:
                         blob = storage.upload(
                             object_name, downloaded.path, downloaded.content_type, downloaded.size
                         )
-                        record = {
+                        completion_record = {
                             "timestamp": now(), "status": "complete",
                             "luluvid_url": item.luluvid_url, "uid": item.uid,
                             "object": f"gs://{config.gcp.bucket}/{object_name}",
@@ -159,8 +176,8 @@ def main() -> int:
                             "content_type": downloaded.content_type,
                             "bytes": downloaded.size, "sha256": downloaded.sha256,
                         }
-                        append(config.manifest_file, record)
-                        hash_index[downloaded.sha256] = record
+                        record(completion_record)
+                        hash_index[downloaded.sha256] = completion_record
                 downloaded.path.unlink(missing_ok=True)
                 if prior is not None:
                     print(
@@ -179,7 +196,7 @@ def main() -> int:
                 failures += 1
                 if downloaded is not None:
                     downloaded.path.unlink(missing_ok=True)
-                append(config.manifest_file, {
+                record({
                     "timestamp": now(), "status": "failed", "luluvid_url": luluvid_url,
                     "error_code": str(exc) if str(exc) else type(exc).__name__,
                     "message": type(exc).__name__,
@@ -189,6 +206,13 @@ def main() -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+                if isinstance(exc, FetchError) and exc.code == "access_challenge":
+                    print(
+                        "access challenge reached; stopping with pending URLs and saved progress intact",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return 75
             time.sleep(max(0, args.delay))
     print(f"batch finished successes={len(pending) - failures} failures={failures}", flush=True)
     return 1 if failures else 0

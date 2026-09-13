@@ -12,7 +12,7 @@ class UnsafeUrl(ValueError):
 HOSTS = {
     "heylink": {"heylink.me", "www.heylink.me"},
     "justpaste": {"justpaste.it", "www.justpaste.it"},
-    "luluvid": {"luluvid.com", "www.luluvid.com"},
+    "luluvid": {"luluvid.com", "www.luluvid.com", "luluvdoo.com", "www.luluvdoo.com"},
 }
 
 
@@ -37,6 +37,21 @@ def require_stage(url: str, stage: str) -> str:
     canonical = canonicalize(url)
     if urlsplit(canonical).hostname not in HOSTS[stage]:
         raise UnsafeUrl(f"URL host is not allowed for {stage}")
+    return canonical
+
+
+def luluvid_fetch_url(url: str) -> str:
+    """Use LuluStream's public file page while preserving the input's identity.
+
+    JustPaste also publishes luluvdoo.com links. The same file IDs are served by
+    luluvid.com, whose pages expose the static player used by this downloader.
+    This is only a transport URL; manifests and deterministic UIDs retain the
+    original input URL.
+    """
+    canonical = require_stage(url, "luluvid")
+    parts = urlsplit(canonical)
+    if parts.hostname in {"luluvdoo.com", "www.luluvdoo.com"}:
+        return urlunsplit(("https", "luluvid.com", parts.path, parts.query, ""))
     return canonical
 
 

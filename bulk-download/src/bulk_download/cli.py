@@ -128,7 +128,8 @@ def run(config, input_stage: str = "all") -> int:
                 continue
             downloaded = None
             try:
-                downloaded = download_video(fetcher, config, item.media_url, item.uid)
+                with fetcher.referring_to(item.media_referer or item.luluvid_url):
+                    downloaded = download_video(fetcher, config, item.media_url, item.uid)
                 prior = hash_index.get(downloaded.sha256)
                 if prior is not None:
                     append(config.manifest_file, {

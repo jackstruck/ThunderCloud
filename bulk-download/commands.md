@@ -41,9 +41,3 @@ https://justpaste.it/example-two
 ```
 
 Because the seeded HeyLink URL currently returns an access challenge, comment it out in `input/heylink_urls.txt` by adding `#` at the beginning of its line when using the direct JustPaste input.
-
-## Run the outstanding backfill
-
-Use [Local JustPaste backfill](../LOCAL_JUSTPASTE_BACKFILL.md) for current queue
-counts, resumable discovery, sequential download/upload, and the separate
-receipt-based face-processing handoff.

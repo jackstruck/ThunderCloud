@@ -61,6 +61,23 @@ def video_url(html: str, base_url: str) -> str | None:
     return None
 
 
+def player_referer(html: str, page_url: str) -> str:
+    """Use the matching provider embed's origin, as browser playback does."""
+    page = urlsplit(canonicalize(page_url))
+    file_id = page.path.rstrip('/').rsplit('/', 1)[-1]
+    for frame in BeautifulSoup(html, 'html.parser').find_all('iframe', src=True):
+        try:
+            embed = urlsplit(canonicalize(urljoin(page_url, str(frame['src']))))
+        except UnsafeUrl:
+            continue
+        if (
+            embed.hostname in {'luluvdo.com', 'luluvid.com', 'luluvdoo.com'}
+            and embed.path.rstrip('/') == f'/e/{file_id}'
+        ):
+            return f'https://{embed.netloc}/'
+    return canonicalize(page_url)
+
+
 _DIGITS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 

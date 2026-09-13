@@ -83,3 +83,29 @@ button:disabled{opacity:.55;cursor:wait}
 .subject-sort-inline label{display:block;flex:none;white-space:nowrap}
 .subject-sort-inline select{flex:1;min-width:0;width:100%}
 .subject-search-button{display:block;width:100%;margin:16px 0 0}
+
+/* Compact browsing and merge controls. */
+.pagination{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding-top:24px}
+.pagination button{width:100%;margin:0}
+.pagination button:last-child:not(:first-child){grid-column:2}
+.subject-id-row{display:flex;align-items:center;gap:6px;width:100%;min-width:0}
+.subject-id-row code{flex:1;min-width:0}
+.subject-id-row .copy-id{flex:none;margin:0;font-size:1.15rem;padding:5px 8px}
+.source-card-links{display:flex;flex-wrap:wrap;gap:6px 12px}
+.source-card-links a{white-space:nowrap}
+.subject-card{gap:8px}
+.subject-card .subject-filter-inline{margin-top:0}
+.merge-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:14px 0 0}
+.merge-tools strong{flex:1 0 100%;font-size:.9rem}
+.merge-tools button{flex:1 1 auto;margin:0;padding:10px 12px}
+.merge-tools .selection-hint{flex-basis:100%}
+.inline-message:empty{display:none}
+.source-subject-browser{margin-top:14px}
+.source-subject-browser .subject-grid{gap:10px;margin-top:12px}
+.source-subject-browser .subject-card{padding:10px;gap:6px}
+.source-subject-browser .representatives{margin:0;gap:6px}
+nav a.link{display:inline-flex;align-items:center;text-decoration:none;border-radius:7px;font:700 13.3333px Arial,sans-serif}
+@media(max-width:600px){nav{gap:6px;padding:10px 6px}.merge-tools button{flex:1 1 40%}}
+
+.subject-card-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px}
+.subject-card-actions>a{white-space:nowrap}

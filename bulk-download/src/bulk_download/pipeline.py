@@ -6,8 +6,8 @@ from pathlib import Path
 
 from .config import Config
 from .fetch import Fetcher
-from .resolvers import anchor_links, video_url
-from .urls import UnsafeUrl, require_stage
+from .resolvers import anchor_links, player_referer, video_url
+from .urls import UnsafeUrl, luluvid_fetch_url, require_stage
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class Discovery:
     luluvid_url: str
     media_url: str
     uid: str
+    media_referer: str | None = None
 
 
 class DiscoveryFailure(RuntimeError):
@@ -63,7 +64,7 @@ def discover(fetcher: Fetcher, heylink_url: str) -> tuple[list[Discovery], list[
             if luluvid in seen_luluvid:
                 continue
             seen_luluvid.add(luluvid)
-            html, final_luluvid = fetcher.html(luluvid)
+            html, final_luluvid = fetcher.html(luluvid_fetch_url(luluvid))
             media = video_url(html, final_luluvid)
             if media is None:
                 failures.append(DiscoveryFailure(
@@ -72,7 +73,7 @@ def discover(fetcher: Fetcher, heylink_url: str) -> tuple[list[Discovery], list[
                 ))
                 continue
             uid = str(uuid.uuid5(uuid.NAMESPACE_URL, luluvid))
-            found.append(Discovery(heylink_url, justpaste, luluvid, media, uid))
+            found.append(Discovery(heylink_url, justpaste, luluvid, media, uid, player_referer(html, final_luluvid)))
     return found, failures
 
 
@@ -86,7 +87,7 @@ def discover_justpaste(fetcher: Fetcher, justpaste_url: str) -> tuple[list[Disco
     found: list[Discovery] = []
     failures: list[DiscoveryFailure] = []
     for luluvid in luluvid_urls:
-        html, final_luluvid = fetcher.html(luluvid)
+        html, final_luluvid = fetcher.html(luluvid_fetch_url(luluvid))
         media = video_url(html, final_luluvid)
         if media is None:
             failures.append(DiscoveryFailure(
@@ -95,16 +96,16 @@ def discover_justpaste(fetcher: Fetcher, justpaste_url: str) -> tuple[list[Disco
             ))
             continue
         uid = str(uuid.uuid5(uuid.NAMESPACE_URL, luluvid))
-        found.append(Discovery(None, justpaste_url, luluvid, media, uid))
+        found.append(Discovery(None, justpaste_url, luluvid, media, uid, player_referer(html, final_luluvid)))
     return found, failures
 
 
 def discover_luluvid(fetcher: Fetcher, luluvid_url: str) -> tuple[list[Discovery], list[DiscoveryFailure]]:
-    html, final_luluvid = fetcher.html(luluvid_url)
+    html, final_luluvid = fetcher.html(luluvid_fetch_url(luluvid_url))
     media = video_url(html, final_luluvid)
     if media is None:
         return [], [DiscoveryFailure(
             "no_static_video_url", "no static video URL", {"luluvid_url": luluvid_url}
         )]
     uid = str(uuid.uuid5(uuid.NAMESPACE_URL, luluvid_url))
-    return [Discovery(None, None, luluvid_url, media, uid)], []
+    return [Discovery(None, None, luluvid_url, media, uid, player_referer(html, final_luluvid))], []

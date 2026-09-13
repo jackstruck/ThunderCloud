@@ -285,11 +285,21 @@ def create_app(
                 422, "invalid_page_size", "Page size must be a number."
             ) from error
 
+    @app.get("/api/sources")
+    def list_sources():
+        subjects_available()
+        multiple = request.args.get("multiple_subjects", "false")
+        if multiple not in {"true", "false"}:
+            raise SubjectError(422, "invalid_search", "Use true or false for the source filter.")
+        return jsonify(subject_service.browse_sources(
+            request.args.get("q", ""), request.args.get("cursor"), page_size(24), multiple == "true"))
+
     @app.get("/api/subjects")
     def list_subjects():
         subjects_available()
         multiple = request.args.get("multiple_sources", "false")
-        if multiple not in {"true", "false"}:
+        shared = request.args.get("shared_source", "false")
+        if multiple not in {"true", "false"} or shared not in {"true", "false"}:
             raise SubjectError(
                 422, "invalid_search", "Use true or false for the source filter."
             )
@@ -300,18 +310,24 @@ def create_app(
                 page_size(24),
                 multiple_sources=multiple == "true",
                 sort=request.args.get("sort", "id"),
+                shared_source=shared == "true",
+                source_id=request.args.get("source_id"),
             )
         )
 
     @app.get("/api/subjects/<subject_id>/examples")
     def subject_examples(subject_id):
         subjects_available()
+        previews = request.args.get("with_previews", "false")
+        if previews not in {"true", "false"}:
+            raise SubjectError(422, "invalid_search", "Use true or false for the preview filter.")
         return jsonify(
             subject_service.examples(
                 str(subject_id),
                 request.args.get("cursor"),
                 page_size(30),
                 request.args.get("source_id"),
+                with_previews=previews == "true",
             )
         )
 
@@ -368,6 +384,21 @@ def create_app(
         return jsonify(
             subject_service.move(str(subject_id), _json_object(), g.principal)
         )
+
+    @app.post("/api/subjects/<subject_id>/bulk-combine")
+    def bulk_combine_subjects(subject_id):
+        subjects_available()
+        return jsonify(subject_service.bulk_combine(subject_id, _json_object(), g.principal))
+
+    @app.get("/api/subjects/<subject_id>/merge-members")
+    def subject_merge_members(subject_id):
+        subjects_available()
+        return jsonify(subject_service.merge_members(subject_id))
+
+    @app.post("/api/subjects/<subject_id>/separate-merge")
+    def separate_subject_merge(subject_id):
+        subjects_available()
+        return jsonify(subject_service.separate_merge(subject_id, _json_object(), g.principal))
 
     @app.errorhandler(RunNotFoundError)
     def not_found(_error_value):
@@ -566,9 +597,11 @@ def create_app(
 
     @app.get("/")
     @app.get("/runs/<uuid:_run_id>")
+    @app.get("/sources")
     @app.get("/subjects")
     @app.get("/subjects/<uuid:_subject_id>")
-    def index(_run_id=None, _subject_id=None):
+    @app.get("/sources/<uuid:_source_id>")
+    def index(_run_id=None, _subject_id=None, _source_id=None):
         return send_from_directory(
             os.path.join(os.path.dirname(__file__), "..", "ui"), "index.html"
         )

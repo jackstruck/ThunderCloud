@@ -210,13 +210,15 @@ class SubjectManagement:
         with self.transaction() as cursor:
             return self._detail(cursor, subject_id)
 
-    def subjects(self, q="", after=None, limit=24, multiple_sources=False, sort="id"):
+    def subjects(self, q="", after=None, limit=24, multiple_sources=False, sort="id",
+                 shared_source=False, source_id=None):
         if (
             not isinstance(q, str)
             or len(q) > 200
             or type(limit) is not int
             or not 1 <= limit <= 100
             or type(multiple_sources) is not bool
+            or type(shared_source) is not bool
             or sort not in {"id", "sources"}
         ):
             raise SubjectError(
@@ -225,6 +227,7 @@ class SubjectManagement:
                 "Use a valid search, source filter, sort, and page size from 1 to 100.",
             )
         q = q.strip()
+        source_id = subject_uuid(source_id) if source_id else None
         after_count, after_id = None, None
         if after:
             if sort == "sources":
@@ -247,9 +250,18 @@ class SubjectManagement:
                 exact = None
             if exact:
                 detail = self._detail(cursor, exact)
+                cursor.execute("""SELECT EXISTS (
+                    SELECT 1 FROM subject_example e WHERE e.subject_id=%s
+                    AND (%s::uuid IS NULL OR e.source_id=%s::uuid)
+                    AND (NOT %s OR EXISTS (
+                        SELECT 1 FROM subject_example other JOIN subject s ON s.subject_id=other.subject_id
+                        WHERE other.source_id=e.source_id AND other.subject_id<>e.subject_id
+                          AND s.merged_into_subject_id IS NULL)))""",
+                    (detail['subject_id'], source_id, source_id, shared_source))
+                included = cursor.fetchone()[0] if source_id or shared_source else True
                 return {
                     "subjects": [detail]
-                    if not multiple_sources or detail["source_count"] > 1
+                    if included and (not multiple_sources or detail["source_count"] > 1)
                     else [],
                     "next_cursor": None,
                 }
@@ -268,6 +280,13 @@ class SubjectManagement:
                       WHERE s.merged_into_subject_id IS NULL
                         AND (%s='' OR lower(i.display_name) LIKE lower(%s))
                         AND (NOT %s OR COALESCE(c.sources,0)>1)
+                        AND (%s::uuid IS NULL OR EXISTS (
+                            SELECT 1 FROM subject_example e WHERE e.subject_id=s.subject_id AND e.source_id=%s::uuid))
+                        AND (NOT %s OR EXISTS (
+                            SELECT 1 FROM subject_example e JOIN subject_example other ON other.source_id=e.source_id
+                            JOIN subject other_subject ON other_subject.subject_id=other.subject_id
+                            WHERE e.subject_id=s.subject_id AND other.subject_id<>s.subject_id
+                              AND other_subject.merged_into_subject_id IS NULL))
                     ) SELECT subject_id,sources FROM listed
                     WHERE (%s::uuid IS NULL OR
                       (%s='id' AND subject_id>%s::uuid) OR
@@ -277,6 +296,9 @@ class SubjectManagement:
                     q,
                     pattern,
                     multiple_sources,
+                    source_id,
+                    source_id,
+                    shared_source,
                     after_id,
                     sort,
                     after_id,
@@ -504,6 +526,24 @@ class SubjectManagement:
             )
             return result
 
+    def browse_sources(self, q="", after=None, limit=24, multiple_subjects=False):
+        if not isinstance(q, str) or len(q) > 200 or type(limit) is not int or not 1 <= limit <= 100 or type(multiple_subjects) is not bool:
+            raise SubjectError(422, "invalid_search", "Use a valid source search and page size from 1 to 100.")
+        after = subject_uuid(after) if after else None
+        pattern = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self.transaction() as cursor:
+            cursor.execute("""SELECT e.source_id,sa.source_page_url,count(DISTINCT e.subject_id),count(*)
+                FROM subject_example e JOIN subject s USING(subject_id) JOIN source_asset sa USING(source_id)
+                WHERE s.merged_into_subject_id IS NULL
+                  AND (%s::uuid IS NULL OR e.source_id>%s::uuid)
+                  AND (e.source_id::text ILIKE %s OR sa.source_page_url ILIKE %s)
+                GROUP BY e.source_id,sa.source_page_url
+                HAVING NOT %s OR count(DISTINCT e.subject_id)>1
+                ORDER BY e.source_id LIMIT %s""", (after, after, pattern, pattern, multiple_subjects, limit + 1))
+            rows = cursor.fetchall()
+            return {"sources": [{"source_id": str(r[0]), "page_url": r[1], "subject_count": r[2], "example_count": r[3]} for r in rows[:limit]],
+                    "next_cursor": str(rows[limit - 1][0]) if len(rows) > limit else None}
+
     def sources(self, subject_id):
         with self.transaction() as cursor:
             sid = resolve_subject(cursor, subject_id)
@@ -512,7 +552,10 @@ class SubjectManagement:
             )
             version = cursor.fetchone()[0]
             cursor.execute(
-                """SELECT e.source_id,count(*),sa.source_page_url
+                """SELECT e.source_id,count(*),sa.source_page_url,
+                              (SELECT count(DISTINCT other.subject_id) FROM subject_example other
+                               JOIN subject current_subject ON current_subject.subject_id=other.subject_id
+                               WHERE other.source_id=e.source_id AND current_subject.merged_into_subject_id IS NULL)
                               FROM subject_example e JOIN source_asset sa USING(source_id)
                               WHERE e.subject_id=%s GROUP BY e.source_id,sa.source_page_url ORDER BY e.source_id""",
                 (sid,),
@@ -521,16 +564,18 @@ class SubjectManagement:
                 "subject_id": sid,
                 "version": version,
                 "sources": [
-                    {"source_id": str(r[0]), "example_count": r[1], "page_url": r[2]}
+                    {"source_id": str(r[0]), "example_count": r[1], "page_url": r[2], "subject_count": r[3]}
                     for r in cursor.fetchall()
                 ],
             }
 
-    def examples(self, subject_id, after=None, limit=30, source_id=None):
+    def examples(self, subject_id, after=None, limit=30, source_id=None, with_previews=False):
         if not isinstance(limit, int) or not 1 <= limit <= 100:
             raise SubjectError(
                 422, "invalid_page_size", "Page size must be from 1 to 100."
             )
+        if type(with_previews) is not bool:
+            raise SubjectError(422, "invalid_search", "Use true or false for the preview filter.")
         after = subject_uuid(after) if after else None
         source_id = subject_uuid(source_id) if source_id else None
         with self.transaction() as cursor:
@@ -547,8 +592,10 @@ class SubjectManagement:
                               JOIN source_asset sa ON sa.source_id=e.source_id
                               WHERE e.subject_id=%s AND (%s::uuid IS NULL OR e.example_id>%s::uuid)
                                 AND (%s::uuid IS NULL OR e.source_id=%s::uuid)
+                                AND (NOT %s OR EXISTS (SELECT 1 FROM subject_representative_face preview
+                                     WHERE preview.example_id=e.example_id AND preview.active))
                               ORDER BY e.example_id LIMIT %s""",
-                (sid, after, after, source_id, source_id, limit + 1),
+                (sid, after, after, source_id, source_id, with_previews, limit + 1),
             )
             rows = cursor.fetchall()
             examples = []
@@ -812,6 +859,124 @@ class SubjectManagement:
                 },
                 result,
             )
+            return result
+
+    def bulk_combine(self, subject_id, data, actor):
+        if set(data) != {'operation_id', 'version', 'subjects'}:
+            raise SubjectError(422, 'invalid_combine', 'Provide the destination version and selected subjects.')
+        sid = subject_uuid(subject_id)
+        members = data['subjects']
+        if not isinstance(members, list) or not 1 <= len(members) <= 49:
+            raise SubjectError(422, 'invalid_combine', 'Choose between 2 and 50 subjects in total.')
+        versions = {}
+        for member in members:
+            if not isinstance(member, dict) or set(member) != {'subject_id', 'version'}:
+                raise SubjectError(422, 'invalid_combine', 'Each selected subject needs its ID and version.')
+            member_id = subject_uuid(member['subject_id'])
+            if member_id == sid or member_id in versions:
+                raise SubjectError(422, 'invalid_combine', 'Choose each subject once.')
+            versions[member_id] = member['version']
+        with self.transaction(write=True) as cursor:
+            operation, fingerprint, replay = self._operation(cursor, sid, 'combine', data, actor)
+            if replay is not None:
+                return replay
+            destination = self._detail(cursor, sid)
+            if destination['subject_id'] != sid:
+                raise SubjectError(409, 'subject_merged', 'Refresh the destination subject.')
+            self._version(destination['version'], data['version'])
+            groups = []
+            # Validate every member before changing any membership.
+            for member_id in sorted(versions):
+                member = self._detail(cursor, member_id)
+                if member['subject_id'] != member_id:
+                    raise SubjectError(409, 'subject_merged', 'A selected subject was already merged. Refresh the selection.')
+                self._version(member['version'], versions[member_id])
+                if member['model_version'] != destination['model_version']:
+                    raise SubjectError(409, 'model_mismatch', 'Subjects must use the same recognition model.')
+                cursor.execute('SELECT example_id FROM subject_example WHERE subject_id=%s ORDER BY example_id', (member_id,))
+                groups.append({'subject': member, 'example_ids': [str(r[0]) for r in cursor.fetchall()]})
+            for group in groups:
+                member_id = group['subject']['subject_id']
+                cursor.execute('UPDATE subject_example SET subject_id=%s WHERE subject_id=%s', (sid, member_id))
+                cursor.execute('UPDATE subject SET merged_into_subject_id=%s WHERE subject_id=%s', (sid, member_id))
+            recalculate_subjects(cursor, [sid, *versions])
+            result = {'destination': self._detail(cursor, sid), 'operation_id': operation,
+                      'merged_subject_ids': sorted(versions)}
+            self._record(cursor, operation, actor, 'combine', fingerprint,
+                         {'subject': destination, 'to_subject_id': sid, 'members': groups}, result)
+            return result
+
+    @staticmethod
+    def _merge_members(details):
+        if 'members' in details:
+            return details['members']
+        # Existing pairwise merges already recorded enough information to separate.
+        if details.get('other') and details.get('example_ids'):
+            return [{'subject': details['other'], 'example_ids': details['example_ids']}]
+        return []
+
+    def _can_separate(self, cursor, sid, member):
+        old_id = member['subject']['subject_id']
+        ids = member['example_ids']
+        cursor.execute('SELECT merged_into_subject_id FROM subject WHERE subject_id=%s', (old_id,))
+        row = cursor.fetchone()
+        if not row or str(row[0]) != sid or not ids:
+            return False
+        cursor.execute('SELECT count(*) FROM subject_example WHERE subject_id=%s AND example_id=ANY(%s::uuid[])', (sid, ids))
+        if cursor.fetchone()[0] != len(ids):
+            return False
+        cursor.execute('SELECT count(*) FROM subject_example WHERE subject_id=%s', (old_id,))
+        return cursor.fetchone()[0] == 0
+
+    def merge_members(self, subject_id):
+        with self.transaction() as cursor:
+            sid = resolve_subject(cursor, subject_uuid(subject_id))
+            detail = self._detail(cursor, sid)
+            cursor.execute("""SELECT operation_id,details,created_at FROM subject_change_event
+                WHERE action='combine' AND details->>'to_subject_id'=%s
+                ORDER BY created_at DESC,operation_id DESC LIMIT 20""", (sid,))
+            events = cursor.fetchall()
+            members = []
+            for operation, details, created in events:
+                for member in self._merge_members(details):
+                    members.append({'operation_id': str(operation),
+                        'subject_id': member['subject']['subject_id'],
+                        'display_name': member['subject'].get('display_name'),
+                        'example_count': len(member['example_ids']),
+                        'can_separate': self._can_separate(cursor, sid, member),
+                        'created_at': created.isoformat()})
+            return {'subject_id': sid, 'version': detail['version'], 'members': members}
+
+    def separate_merge(self, subject_id, data, actor):
+        if set(data) != {'operation_id', 'version', 'merge_operation_id', 'member_subject_id'}:
+            raise SubjectError(422, 'invalid_separation', 'Choose a previous merge member and the current subject version.')
+        sid = subject_uuid(subject_id)
+        merge_id = subject_uuid(data['merge_operation_id'])
+        member_id = subject_uuid(data['member_subject_id'])
+        with self.transaction(write=True) as cursor:
+            operation, fingerprint, replay = self._operation(cursor, sid, 'move', data, actor)
+            if replay is not None:
+                return replay
+            before = self._detail(cursor, sid)
+            if before['subject_id'] != sid:
+                raise SubjectError(409, 'subject_merged', 'Refresh the surviving subject before separating.')
+            self._version(before['version'], data['version'])
+            cursor.execute("SELECT details FROM subject_change_event WHERE operation_id=%s AND action='combine'", (merge_id,))
+            row = cursor.fetchone()
+            if not row or row[0].get('to_subject_id') != sid:
+                raise SubjectError(409, 'merge_changed', 'This merge is not available on this subject.')
+            member = next((m for m in self._merge_members(row[0]) if m['subject']['subject_id'] == member_id), None)
+            if member is None or not self._can_separate(cursor, sid, member):
+                raise SubjectError(409, 'examples_changed', 'These examples have changed. Select the examples to separate manually.')
+            cursor.execute('UPDATE subject SET merged_into_subject_id=NULL WHERE subject_id=%s', (member_id,))
+            cursor.execute('UPDATE subject_example SET subject_id=%s WHERE subject_id=%s AND example_id=ANY(%s::uuid[])',
+                           (member_id, sid, member['example_ids']))
+            recalculate_subjects(cursor, [sid, member_id])
+            result = {'subject': self._detail(cursor, sid), 'destination': self._detail(cursor, member_id),
+                      'moved_example_ids': member['example_ids']}
+            self._record(cursor, operation, actor, 'move', fingerprint,
+                         {'subject': before, 'example_ids': member['example_ids'], 'from_subject_id': sid,
+                          'to_subject_id': member_id, 'separated_merge_operation_id': merge_id}, result)
             return result
 
     def combine(self, subject_id, data, actor):

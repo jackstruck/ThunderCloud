@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
+import httpx
 import imageio_ffmpeg
 
 from .config import Config
 from .fetch import Fetcher
 from .urls import canonicalize
-
 
 EXTENSIONS = {"video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov"}
 
@@ -87,6 +87,89 @@ def _media_playlist(fetcher: Fetcher, config: Config, url: str) -> tuple[list[st
     return lines, final_url
 
 
+def _write_hls_ranges(fetcher, config, url, handle, completed_bytes, size, etag):
+    """Recover a segment using exact ranges pinned to a strong entity tag."""
+    if completed_bytes + size > config.http.max_video_bytes:
+        raise RuntimeError("video_too_large")
+    chunk_size = min(config.chunk_bytes, 64 * 1024)
+    for offset in range(0, size, chunk_size):
+        end = min(offset + chunk_size, size) - 1
+        start = handle.tell()
+        for attempt in range(config.http.attempts):
+            try:
+                response = fetcher.request(
+                    url, stream=True,
+                    headers={"Range": f"bytes={offset}-{end}", "If-Range": etag},
+                )
+                try:
+                    if (
+                        response.status_code != 206
+                        or response.headers.get("etag") != etag
+                        or response.headers.get("content-range", "").strip()
+                        != f"bytes {offset}-{end}/{size}"
+                    ):
+                        raise RuntimeError("verification_failure")
+                    received = 0
+                    for chunk in response.iter_bytes(min(config.chunk_bytes, 65536)):
+                        received += len(chunk)
+                        if received > end - offset + 1:
+                            raise RuntimeError("verification_failure")
+                        handle.write(chunk)
+                    if received != end - offset + 1:
+                        raise httpx.RemoteProtocolError("incomplete HLS byte range")
+                finally:
+                    response.close()
+                break
+            except httpx.TransportError:
+                handle.seek(start)
+                handle.truncate()
+                if attempt + 1 == config.http.attempts:
+                    raise
+                fetcher._sleep(attempt)
+    return size
+
+
+def _write_hls_segment(fetcher: Fetcher, config: Config, url: str, handle, completed_bytes: int) -> int:
+    """Retry interrupted bodies without retaining bytes from a partial segment."""
+    start = handle.tell()
+    range_reference = None
+    for attempt in range(config.http.attempts):
+        try:
+            response = fetcher.request(url, stream=True)
+            try:
+                etag = response.headers.get("etag", "")
+                length = response.headers.get("content-length", "")
+                if (
+                    response.status_code == 200
+                    and response.headers.get("accept-ranges", "").lower() == "bytes"
+                    and etag.startswith('"') and etag.endswith('"')
+                    and length.isdecimal() and int(length) > 0
+                ):
+                    range_reference = (int(length), etag)
+                size = 0
+                for chunk in response.iter_bytes(config.chunk_bytes):
+                    size += len(chunk)
+                    if completed_bytes + size > config.http.max_video_bytes:
+                        raise RuntimeError("video_too_large")
+                    handle.write(chunk)
+                if size == 0:
+                    raise RuntimeError("download_failure")
+                return size
+            finally:
+                response.close()
+        except httpx.TransportError:
+            handle.seek(start)
+            handle.truncate()
+            if attempt + 1 == config.http.attempts:
+                if range_reference is not None:
+                    return _write_hls_ranges(
+                        fetcher, config, url, handle, completed_bytes, *range_reference
+                    )
+                raise
+            fetcher._sleep(attempt)
+    raise RuntimeError("download_failure")
+
+
 def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downloaded:
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     path = config.temp_dir / f"{uid}.part"
@@ -103,15 +186,9 @@ def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downl
     try:
         with transport.open("xb") as handle:
             for index, segment_url in enumerate(segments, 1):
-                response = fetcher.request(segment_url, stream=True)
-                try:
-                    for chunk in response.iter_bytes(config.chunk_bytes):
-                        downloaded_bytes += len(chunk)
-                        if downloaded_bytes > config.http.max_video_bytes:
-                            raise RuntimeError("video_too_large")
-                        handle.write(chunk)
-                finally:
-                    response.close()
+                downloaded_bytes += _write_hls_segment(
+                    fetcher, config, segment_url, handle, downloaded_bytes
+                )
                 if index % 10 == 0 or index == len(segments):
                     print(f"[download] uid={uid} segments={index}/{len(segments)}", flush=True)
             handle.flush()
@@ -125,7 +202,8 @@ def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downl
             "-fs", str(config.http.max_video_bytes), "-f", "mp4", str(path),
         ]
         result = subprocess.run(
-            command, stdin=subprocess.DEVNULL, capture_output=True, timeout=6 * 60 * 60
+            command, stdin=subprocess.DEVNULL, capture_output=True, timeout=6 * 60 * 60,
+            check=False,
         )
         if result.returncode != 0 or not path.is_file() or path.stat().st_size == 0:
             raise RuntimeError("download_failure")

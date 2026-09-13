@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import email.utils
 import time
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from typing import Self
 from urllib.parse import urljoin
 
 import httpx
@@ -34,11 +36,24 @@ class Fetcher:
     def close(self) -> None:
         self.client.close()
 
-    def __enter__(self) -> "Fetcher":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+    @contextmanager
+    def referring_to(self, page_url: str):
+        """Keep a media request chain associated with its public player page."""
+        previous = self.client.headers.get("Referer")
+        self.client.headers["Referer"] = canonicalize(page_url)
+        try:
+            yield
+        finally:
+            if previous is None:
+                self.client.headers.pop("Referer", None)
+            else:
+                self.client.headers["Referer"] = previous
 
     def _sleep(self, attempt: int, response: httpx.Response | None = None) -> None:
         delay = self.config.backoff_seconds * (2 ** attempt)
@@ -49,16 +64,18 @@ class Fetcher:
             except ValueError:
                 try:
                     when = email.utils.parsedate_to_datetime(value)
-                    delay = max(delay, (when - datetime.now(timezone.utc)).total_seconds())
+                    delay = max(delay, (when - datetime.now(UTC)).total_seconds())
                 except (TypeError, ValueError):
                     pass
         time.sleep(max(0, delay))
 
-    def _request_once(self, url: str, stream: bool) -> httpx.Response:
+    def _request_once(
+        self, url: str, stream: bool, headers: dict[str, str] | None = None
+    ) -> httpx.Response:
         current = canonicalize(url)
         for redirects in range(self.config.max_redirects + 1):
             ensure_public_host(current)
-            request = self.client.build_request("GET", current)
+            request = self.client.build_request("GET", current, headers=headers)
             response = self.client.send(request, stream=stream)
             if response.status_code not in _REDIRECTS:
                 return response
@@ -71,11 +88,13 @@ class Fetcher:
             current = canonicalize(urljoin(current, location))
         raise FetchError("http_failure", "too many redirects")
 
-    def request(self, url: str, *, stream: bool = False) -> httpx.Response:
+    def request(
+        self, url: str, *, stream: bool = False, headers: dict[str, str] | None = None
+    ) -> httpx.Response:
         last: Exception | None = None
         for attempt in range(self.config.attempts):
             try:
-                response = self._request_once(url, stream)
+                response = self._request_once(url, stream, headers)
                 if response.headers.get("cf-mitigated", "").lower() == "challenge":
                     response.close()
                     raise FetchError("access_challenge", "site requires an interactive access challenge")

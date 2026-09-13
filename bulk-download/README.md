@@ -4,9 +4,6 @@ This Python CLI resolves HeyLink → JustPaste → Luluvid links, downloads vide
 locally, and uploads immutable CSEK-encrypted objects under
 `gs://teak-banner-dome-bulk-videos/videos/`. Acquisition runs sequentially.
 
-For the outstanding queue, use [Local JustPaste backfill](../LOCAL_JUSTPASTE_BACKFILL.md).
-That guide covers current counts, disk requirements, resumable discovery,
-download/upload, failure handling, and the separate face-processing handoff.
 Use [Browser link collection](commands.md) to add direct JustPaste inputs.
 
 ## Setup
