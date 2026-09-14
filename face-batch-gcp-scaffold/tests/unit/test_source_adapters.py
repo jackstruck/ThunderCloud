@@ -1,5 +1,4 @@
 import pytest
-
 from worker.source_adapters import resolve_source
 
 
@@ -53,3 +52,41 @@ def test_adapter_rejects_non_https_media_url():
     html = '<video src="http://cdn.example/a.mp4"></video>'
     with pytest.raises(ValueError, match="no static HTTPS"):
         resolve_source("https://luluvid.com/a", lambda url: (html, url))
+
+
+def hotscope_html(videos):
+    import json
+    return '<script>self.__next_f.push(' + json.dumps([1, '1:' + json.dumps({'videos': videos}) + '\n']) + ')</script>'
+
+
+def test_hotscope_resolves_requested_full_playlist_only():
+    page = 'https://hotscope.tv/video/abc'
+    html = hotscope_html([
+        {'id': 'related', 'playlist': 'https://cdn.hotscope.tv/videos/related/playlist.m3u8'},
+        {'id': 'abc', 'preview': 'https://cdn.hotscope.tv/videos/abc/preview.mp4',
+         'playlist': 'https://cdn.hotscope.tv/videos/abc/playlist.m3u8'},
+    ])
+    def fetcher(url, **kwargs):
+        assert kwargs['allowed_hosts'] == {'hotscope.tv', 'www.hotscope.tv'}
+        return html, url
+    result = resolve_source(page, fetcher)
+    assert result.source_adapter == 'hotscope'
+    assert result.final_url == 'https://cdn.hotscope.tv/videos/abc/playlist.m3u8'
+    assert result.page_url == page
+
+
+@pytest.mark.parametrize('videos', [
+    [{'id': 'abc', 'preview': 'https://cdn.hotscope.tv/videos/abc/preview.mp4'}],
+    [{'id': 'abc', 'playlist': 'https://cdn.hotscope.tv/videos/other/playlist.m3u8'}],
+    [{'id': 'abc', 'playlist': 'https://evil.test/videos/abc/playlist.m3u8'}],
+])
+def test_hotscope_rejects_previews_and_mismatched_descriptors(videos):
+    with pytest.raises(ValueError):
+        resolve_source('https://hotscope.tv/video/abc', lambda url, **kw: (hotscope_html(videos), url))
+
+
+def test_hotscope_rejects_profile_and_redirect_to_another_video():
+    with pytest.raises(ValueError, match='video page'):
+        resolve_source('https://hotscope.tv/user/alice')
+    with pytest.raises(ValueError, match='another video'):
+        resolve_source('https://hotscope.tv/video/abc', lambda url, **kw: ('', 'https://hotscope.tv/video/def'))

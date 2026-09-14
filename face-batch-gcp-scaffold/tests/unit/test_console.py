@@ -322,3 +322,17 @@ def test_repository_conflict_is_sanitized():
     )
     assert response.status_code == 409
     assert response.json["code"] == "run_conflict"
+
+
+def test_hotscope_video_is_accepted_without_arbitrary_host_access():
+    invoked = []
+    response = post_run(client(invoke=invoked.append),
+                        {'kind': 'url', 'url': 'https://hotscope.tv/video/abc'})
+    assert response.status_code == 202
+    assert invoked == [RUN_ID]
+
+
+def test_hotscope_profile_is_rejected_as_a_single_video_source():
+    response = post_run(client(), {'kind': 'url', 'url': 'https://hotscope.tv/user/alice'})
+    assert response.status_code == 422
+    assert response.json['code'] == 'invalid_url'

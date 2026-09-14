@@ -254,3 +254,40 @@ See [operator workflow, CLI, bounds, and staged rollout](docs/source-merges.md).
 Operator application is now enabled after the reviewed source/threshold rollout
 recorded in the guide. New deployments default to proposals only; enable
 `source_merges_apply_enabled` after the small-source review and explicit threshold calibration. The CLI uses IAP and the existing merge/recovery semantics.
+
+## Submit a Hotscope video page
+
+The URL submission path accepts `https://hotscope.tv/video/ID` (also `www`).
+Paste an individual video page into the existing link form, or submit it as a
+normal `source: {kind: "url", url: "https://hotscope.tv/video/ID"}`. User/profile
+URLs belong to the separate bulk downloader and are rejected by this single-source
+workflow.
+
+The ingestion worker resolves the requested video's full HLS playlist from page
+data, downloads the highest advertised bandwidth rendition, and remuxes it to
+MP4 without re-encoding. It validates decoding and duration before uploading to
+the existing encrypted temporary storage. The original page attribution and the
+selected run policy follow the normal platform workflow; past bulk downloads are
+not submitted automatically by this change.
+
+Provider page requests and every playlist/segment redirect retain connection-time
+DNS pinning. Hotscope acquisition is restricted to the known page/CDN hosts.
+Previews and related videos are not accepted as substitutes. The fetcher sends the
+generic `BulkDownloader/1.0` user agent.
+
+Limits: the configured ingestion byte cap applies to both acquired segments and
+the resulting MP4; HLS additionally requires a finite playlist of at most 10,000
+segments and 15 minutes, with a 180-second acquisition/validation budget (individual
+network operations may finish after the budget before it is checked again).
+Encrypted HLS, separate audio renditions, fMP4 maps, byte ranges, gaps, and
+discontinuities currently produce source rejection. The existing run retry path
+refreshes playback descriptors after transient acquisition failures. FFmpeg is
+restricted to local file/pipe protocols; all network acquisition uses the secure
+Python transport.
+
+Rollout requires rebuilding and deploying the console image used by both the web
+service and `face-ingest-drain`. `Dockerfile.console` now includes FFmpeg/ffprobe.
+No database migration or extra cloud service is required. Code-level verification
+includes the URL API, resolver, transport restrictions, generated HLS media,
+ingestion advancement, and a live acquisition of the previously tested Hotscope
+video; deployment and live processing are separate rollout steps.

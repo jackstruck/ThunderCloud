@@ -15,6 +15,7 @@ from .gallery import GalleryRepository, GalleryService
 from .job_invoker import CloudRunJobInvoker
 from .rate_limit import FixedWindowRateLimiter
 from .run_repository import RunConflictError, RunNotFoundError, RunRepository
+from .source_adapters import HOTSCOPE_PAGE_HOSTS, hotscope_video_id
 from .source_merges import SourceMerges
 from .storage import StorageRepository, load_configured_csek, validate_sha256
 from .subject_management import SubjectError, SubjectManagement
@@ -22,6 +23,8 @@ from .uploads import UploadService
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "video/mp4"}
 ADAPTER_HOST_SUFFIXES = {
+    "hotscope.tv": "hotscope",
+    "www.hotscope.tv": "hotscope",
     "justpaste.it": "justpaste",
     "luluvid.com": "luluvid",
     "www.luluvid.com": "luluvid",
@@ -108,6 +111,11 @@ def _create_payload(
                 422, "invalid_url", "Use an HTTPS URL without credentials or fragments."
             )
         host = parsed.hostname.rstrip(".").lower()
+        if host in HOTSCOPE_PAGE_HOSTS:
+            try:
+                hotscope_video_id(source["url"])
+            except ValueError as error:
+                raise RequestError(422, "invalid_url", str(error)) from error
         if host == "heylink.me" or host.endswith(".heylink.me"):
             raise RequestError(422, "unsupported_source", "HeyLink is not supported.")
         if host not in ADAPTER_HOST_SUFFIXES and not allow_arbitrary_hosts:

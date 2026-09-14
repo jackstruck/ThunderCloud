@@ -90,3 +90,18 @@ def test_transient_fetch_error_is_retryable():
         resolver=lambda url: ResolvedSource(url, "direct"),
     )
     assert repository.failed[0][1:] == ("fetch_failed", True)
+
+
+def test_hotscope_drain_uses_hls_and_preserves_page_attribution():
+    repository = Repository()
+    page = 'https://hotscope.tv/video/abc'
+    playlist = 'https://cdn.hotscope.tv/videos/abc/playlist.m3u8'
+    def hls(url, *, page_url, max_bytes):
+        assert (url, page_url, max_bytes) == (playlist, page, 100)
+        return FetchResult(page, 'video/mp4', b'\xff\xd8\xffimage', 'a' * 64)
+    def direct(*args, **kwargs):
+        raise AssertionError('HLS must not use direct MP4 fetching')
+    assert drain(repository, Storage(), max_bytes=100, fetcher=direct, hls_fetcher=hls,
+                 resolver=lambda url: ResolvedSource(playlist, 'hotscope', page)) == 1
+    assert repository.completed[0][1]['final_url'] == page
+    assert repository.completed[0][1]['source_adapter'] == 'hotscope'

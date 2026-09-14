@@ -946,7 +946,7 @@ components:
       required: [kind, url]
       properties:
         kind: {type: string, const: url}
-        url: {type: string, format: uri, pattern: '^https://'}
+        url: {type: string, format: uri, pattern: '^https://', description: 'HTTPS media URL or supported provider page. Hotscope requires /video/ID; user profiles are not single-video sources.'}
     UploadSource:
       type: object
       additionalProperties: false

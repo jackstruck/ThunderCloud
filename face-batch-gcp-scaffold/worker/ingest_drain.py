@@ -7,6 +7,7 @@ from google.api_core.exceptions import GoogleAPIError
 
 from .config import Settings
 from .db import Database
+from .hls_fetch import fetch_hotscope_video
 from .ingest_repository import IngestRepository
 from .job_invoker import CloudRunJobInvoker
 from .maintenance import MaintenanceRepository, maintain
@@ -23,6 +24,7 @@ def drain(
     max_bytes: int,
     fetcher=fetch_media,
     resolver=resolve_source,
+    hls_fetcher=fetch_hotscope_video,
     invoke_detect=lambda _run_id: None,
 ) -> int:
     completed = 0
@@ -40,7 +42,10 @@ def drain(
                 )
             else:
                 source = resolver(work.source_url)
-                fetched = fetcher(source.final_url, max_bytes=max_bytes)
+                if source.source_adapter == "hotscope":
+                    fetched = hls_fetcher(source.final_url, page_url=source.page_url, max_bytes=max_bytes)
+                else:
+                    fetched = fetcher(source.final_url, max_bytes=max_bytes)
                 object_name, generation, size = storage.upload_temporary(
                     work.run_id,
                     fetched.data,

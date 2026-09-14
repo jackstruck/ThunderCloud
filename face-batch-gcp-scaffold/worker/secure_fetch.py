@@ -81,6 +81,8 @@ def fetch_resource(
     validate_signature: bool,
     timeout: float = 20,
     max_redirects: int = 4,
+    allowed_hosts: set[str] | None = None,
+    referer: str | None = None,
     resolver=public_addresses,
     connection_factory=PinnedHTTPSConnection,
 ) -> FetchResult:
@@ -96,6 +98,11 @@ def fetch_resource(
             or parsed.fragment
         ):
             raise ValueError("media URL must be credential-free HTTPS")
+        if allowed_hosts is not None and (
+            parsed.hostname.lower().rstrip(".") not in allowed_hosts
+            or parsed.port not in {None, 443}
+        ):
+            raise ValueError("source host is not allowed for this adapter")
         port = parsed.port or 443
         addresses = resolver(parsed.hostname, port)
         last_error = None
@@ -117,8 +124,9 @@ def fetch_resource(
                     path,
                     headers={
                         "Host": parsed.netloc,
-                        "Accept": "image/jpeg,image/png,video/mp4",
-                        "User-Agent": "ThunderCloud-Face-Ingest/1",
+                        "Accept": ",".join(sorted(allowed_types)),
+                        "User-Agent": "BulkDownloader/1.0",
+                        **({"Referer": referer} if referer else {}),
                     },
                 )
                 response = connection.getresponse()
@@ -130,6 +138,8 @@ def fetch_resource(
         if response is None:
             raise RuntimeError("media fetch connection failed") from last_error
         try:
+            if response.getheader("cf-mitigated") == "challenge":
+                raise ValueError("source requires an interactive challenge")
             if response.status in {401, 403, 407}:
                 raise ValueError("source requires authentication")
             if response.status in REDIRECTS:
@@ -151,11 +161,15 @@ def fetch_resource(
             data = response.read(max_bytes + 1)
             if not data or len(data) > max_bytes:
                 raise ValueError("source is empty or exceeds configured byte limit")
+            if length is not None and len(data) != int(length):
+                raise RuntimeError("source response was incomplete")
             if validate_signature:
                 _validate_signature(content_type, data)
             return FetchResult(
                 current, content_type, data, hashlib.sha256(data).hexdigest()
             )
+        except (OSError, http.client.HTTPException) as error:
+            raise RuntimeError("source transfer failed") from error
         finally:
             connection.close()
     raise AssertionError("redirect loop ended unexpectedly")

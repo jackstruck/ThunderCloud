@@ -1,7 +1,6 @@
 import socket
 
 import pytest
-
 from worker.secure_fetch import fetch_html, fetch_media, public_addresses
 
 
@@ -180,3 +179,18 @@ def test_html_fetch_uses_same_pinned_redirect_transport():
     assert html == "<html>ok</html>"
     assert final_url == "https://justpaste.it/a"
     assert calls[0][2] == "93.184.216.34"
+
+
+def test_provider_redirect_cannot_escape_host_allowlist():
+    resolver, factory, calls, _ = harness([Response(302, {'Location': 'https://other.test/media'})])
+    with pytest.raises(ValueError, match='not allowed'):
+        fetch_html('https://hotscope.tv/video/abc', allowed_hosts={'hotscope.tv'},
+                   resolver=resolver, connection_factory=factory)
+    assert len(calls) == 1
+
+
+def test_incomplete_response_cannot_be_accepted_as_complete():
+    resolver, factory, _, _ = harness([Response(headers={'Content-Type': 'image/jpeg', 'Content-Length': '50'})])
+    with pytest.raises(RuntimeError, match='incomplete'):
+        fetch_media('https://example.test/media', max_bytes=100,
+                    resolver=resolver, connection_factory=factory)
