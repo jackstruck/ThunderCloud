@@ -15,6 +15,7 @@ from .gallery import GalleryRepository, GalleryService
 from .job_invoker import CloudRunJobInvoker
 from .rate_limit import FixedWindowRateLimiter
 from .run_repository import RunConflictError, RunNotFoundError, RunRepository
+from .source_merges import SourceMerges
 from .storage import StorageRepository, load_configured_csek, validate_sha256
 from .subject_management import SubjectError, SubjectManagement
 from .uploads import UploadService
@@ -271,6 +272,8 @@ def create_app(
         return jsonify(
             {
                 "subject_management": bool(subject_management_enabled),
+                "source_merges_apply_enabled": bool(subject_management_enabled and os.getenv(
+                    "FACE_SOURCE_MERGES_APPLY_ENABLED", "false").lower() in {"1", "true", "yes"}),
                 "enrollment_grouping": bool(
                     subject_management_enabled and enrollment_enabled
                 ),
@@ -284,6 +287,19 @@ def create_app(
             raise RequestError(
                 422, "invalid_page_size", "Page size must be a number."
             ) from error
+
+    def source_merge_service():
+        subjects_available()
+        return SourceMerges(subject_service, apply_enabled=os.getenv(
+            "FACE_SOURCE_MERGES_APPLY_ENABLED", "false").lower() in {"1", "true", "yes"})
+
+    @app.post("/api/sources/<source_id>/merge-proposals")
+    def source_merge_proposals(source_id):
+        return jsonify(source_merge_service().plan(source_id, _json_object()))
+
+    @app.post("/api/sources/<source_id>/merge-proposals/apply")
+    def apply_source_merge_proposals(source_id):
+        return jsonify(source_merge_service().apply(source_id, _json_object(), g.principal))
 
     @app.get("/api/sources")
     def list_sources():

@@ -247,3 +247,10 @@ The completed 2026-09-09 source separation preserved all 43,670 examples and 8,6
 active gallery images. Its protected recovery records remain under `.local/source-split`.
 Temporary cutover resources and retained cutover recovery storage were removed
 on 2026-09-10 at the user’s request, as described in the cutover review.
+
+## Within-source matching
+
+See [operator workflow, CLI, bounds, and staged rollout](docs/source-merges.md).
+Operator application is now enabled after the reviewed source/threshold rollout
+recorded in the guide. New deployments default to proposals only; enable
+`source_merges_apply_enabled` after the small-source review and explicit threshold calibration. The CLI uses IAP and the existing merge/recovery semantics.

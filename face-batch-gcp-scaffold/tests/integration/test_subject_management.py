@@ -1989,3 +1989,327 @@ def test_browser_compact_run_grid_and_direct_merge_stale_selection(db, browser_c
     expect(page.get_by_role('alert')).to_be_visible()
     expect(page.get_by_role('dialog')).to_have_count(0)
     assert len(service.subjects(source_id=source)['subjects']) == 2
+
+
+def source_merge_fixture(db, angles):
+    run, groups = make_run(db, len(angles))
+    for group, angle in zip(groups, angles, strict=True):
+        sql(db, 'UPDATE submission_face_group SET aggregate_embedding=%s::vector WHERE group_id=%s', (pgvector(vector(angle)), group))
+    RunRepository(db).select(run, groups, 1)
+    worker, _ = processor(db)
+    assert worker.match(run)
+    ids = [str(r[0]) for r in sql(db, 'SELECT subject_id FROM subject_example JOIN submission_face_group ON submission_group_id=group_id WHERE run_id=%s ORDER BY local_group_id', (run,))]
+    source = SubjectManagement(db).sources(ids[0])['sources'][0]['source_id']
+    return source, ids
+
+
+def test_source_groups_scope_replay_partial_resume_and_recovery(db):
+    from worker.source_merges import SourceMerges
+    service = SubjectManagement(db)
+    planner = SourceMerges(service, apply_enabled=True)
+    source, ids = source_merge_fixture(db, [0, .05, 1.5, 1.55, 3])
+    lookalike = enroll(db)[0]
+    origins = sql(db, 'SELECT example_id,source_id FROM subject_example ORDER BY example_id')
+    plan = planner.plan(source, {'threshold': .99})
+    assert len(plan['groups']) == 2
+    assert {frozenset(m['subject_id'] for m in g['members']) for g in plan['groups']} == {frozenset(ids[:2]), frozenset(ids[2:4])}
+    assert lookalike not in str(plan)
+    for group in plan['groups']:
+        group['selected'] = True
+    stale_id = plan['groups'][1]['members'][0]['subject_id']
+    sql(db, 'UPDATE subject SET row_version=row_version+1 WHERE subject_id=%s', (stale_id,))
+    assert [o['status'] for o in planner.apply(source, plan, 'tester')['outcomes']] == ['merged', 'stale']
+    assert planner.apply(source, plan, 'tester')['outcomes'][0]['status'] == 'merged'
+    assert len(sql(db, 'SELECT * FROM subject_change_event WHERE operation_id=ANY(%s::uuid[])', ([g['operation_id'] for g in plan['groups']],))) == 2
+    assert len(sql(db, "SELECT * FROM subject_change_event WHERE action='combine' AND result ? 'destination'")) == 1
+    refreshed = planner.plan(source, {'threshold': .99})
+    assert len(refreshed['groups']) == 1
+    refreshed['groups'][0]['selected'] = True
+    assert planner.apply(source, refreshed, 'tester')['outcomes'][0]['status'] == 'merged'
+    assert service.subject(lookalike)['sample_count'] == service.subject(ids[-1])['sample_count'] == 1
+    assert sql(db, 'SELECT example_id,source_id FROM subject_example ORDER BY example_id') == origins
+    first = plan['groups'][0]
+    survivor = first['survivor_id']
+    history = service.merge_members(survivor)
+    assert history['members'][0]['can_separate']
+    service.separate_merge(survivor, {'operation_id': str(uuid.uuid4()), 'version': history['version'],
+        'merge_operation_id': first['operation_id'], 'member_subject_id': history['members'][0]['subject_id']}, 'tester')
+    assert sql(db, 'SELECT example_id,source_id FROM subject_example ORDER BY example_id') == origins
+    event = sql(db, 'SELECT details FROM subject_change_event WHERE operation_id=%s', (first['operation_id'],))[0][0]
+    assert event['source_merge']['algorithm'] == 'complete-linkage-v1'
+    assert event['source_merge']['threshold'] == .99
+
+
+def test_source_boundary_rechecked_and_multisource_skipped(db):
+    from worker.source_merges import SourceMerges
+    service = SubjectManagement(db)
+    planner = SourceMerges(service, apply_enabled=True)
+    source, ids = source_merge_fixture(db, [0, .01, .02])
+    other = enroll(db)[0]
+    plan = planner.plan(source, {'threshold': .99})
+    plan['groups'][0]['selected'] = True
+    example = service.examples(other)['examples'][0]
+    service.move(other, {'operation_id': str(uuid.uuid4()), 'version': service.subject(other)['version'],
+        'example_ids': [example['example_id']], 'target_subject_id': ids[1], 'target_version': service.subject(ids[1])['version']}, 'tester')
+    before = sql(db, 'SELECT subject_id,example_id FROM subject_example ORDER BY example_id')
+    outcome = planner.apply(source, plan, 'tester')['outcomes'][0]
+    assert outcome['status'] == 'stale' and outcome['code'] == 'source_membership_changed'
+    assert sql(db, 'SELECT subject_id,example_id FROM subject_example ORDER BY example_id') == before
+    new_plan = planner.plan(source, {'threshold': .99})
+    assert new_plan['skipped'] == [{'subject_id': ids[1], 'reason': 'multi_source'}]
+
+
+def test_source_chain_dismissals_identity_and_forged_score(db):
+    from worker.source_merges import SourceMerges
+    service = SubjectManagement(db)
+    planner = SourceMerges(service, apply_enabled=True)
+    source, ids = source_merge_fixture(db, [0, .3, .6])
+    plan = planner.plan(source, {'threshold': .94})
+    assert len(plan['groups']) == 1 and len(plan['groups'][0]['members']) == 2
+    group = plan['groups'][0]
+    a, b = group['members']
+    service.suggestion_dismissal(a['subject_id'], b['subject_id'], {'operation_id': str(uuid.uuid4()), 'version': a['version'], 'target_version': b['version']}, 'tester')
+    group['selected'] = True
+    assert planner.apply(source, plan, 'tester')['outcomes'][0]['code'] == 'pair_ineligible'
+    assert sorted([a['subject_id'], b['subject_id']]) in planner.plan(source, {'threshold': .94})['dismissed_pairs']
+    source2, ids2 = source_merge_fixture(db, [0, .01])
+    for sid, label in zip(ids2, ['Alice', 'Bob'], strict=True):
+        service.edit(sid, {'operation_id': str(uuid.uuid4()), 'version': service.subject(sid)['version'], 'identity_version': None, 'display_name': label, 'external_identity_ref': None}, 'tester')
+    plan2 = planner.plan(source2, {'threshold': .99})
+    group2 = plan2['groups'][0]
+    assert group2['identity_conflicts'] == ['display_name']
+    group2['selected'] = True
+    assert planner.apply(source2, plan2, 'tester')['outcomes'][0]['code'] == 'identity_conflict'
+    group2['review_identity_conflicts'] = True
+    assert planner.apply(source2, plan2, 'tester')['outcomes'][0]['code'] == 'operation_conflict'
+    plan2 = planner.plan(source2, {'threshold': .99})
+    group2 = plan2['groups'][0]
+    group2['selected'] = group2['review_identity_conflicts'] = True
+    assert planner.apply(source2, plan2, 'tester')['outcomes'][0]['status'] == 'merged'
+    assert planner.apply(source2, {**plan2, 'threshold': .98}, 'tester')['outcomes'][0]['code'] == 'operation_conflict'
+    forged = planner.plan(source, {'threshold': .94})
+    forged['groups'][0]['members'] = [service.subject(sid) for sid in ids]
+    forged['groups'][0]['minimum_similarity'] = 1
+    forged['groups'][0]['selected'] = True
+    assert planner.apply(source, forged, 'tester')['outcomes'][0]['code'] == 'pair_ineligible'
+
+
+def test_source_missing_models_limits_and_read_only_rollout(db, monkeypatch):
+    from worker import source_merges
+    service = SubjectManagement(db)
+    planner = source_merges.SourceMerges(service)
+    source, ids = source_merge_fixture(db, [0, .01, .02, .03])
+    sql(db, 'UPDATE subject SET canonical_embedding=NULL WHERE subject_id=%s', (ids[0],))
+    sql(db, "UPDATE subject SET model_version='other' WHERE subject_id=%s", (ids[1],))
+    plan = planner.plan(source, {'threshold': .99})
+    assert {m['reason'] for m in plan['skipped']} == {'missing_embedding', 'model_mismatch'}
+    assert len(plan['groups']) == 1 and {m['subject_id'] for m in plan['groups'][0]['members']} == set(ids[2:])
+    with pytest.raises(SubjectError) as error:
+        planner.apply(source, plan, 'tester')
+    assert error.value.code == 'proposals_only'
+    monkeypatch.setattr(source_merges, 'MAX_SUBJECTS', 3)
+    with pytest.raises(SubjectError) as error:
+        planner.plan(source, {'threshold': .99})
+    assert error.value.code == 'background_scan_required'
+
+
+def test_browser_source_matching_mobile_and_cli_parity(db, browser_console, monkeypatch, tmp_path):
+    from playwright.sync_api import expect
+
+    from worker.source_merges_cli import apply_plan, save_private
+    monkeypatch.setenv('FACE_SOURCE_MERGES_APPLY_ENABLED', 'true')
+    page, origin = browser_console
+    source, _ids = source_merge_fixture(db, [0, .01, 1.5, 1.51])
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.goto(origin + '/sources/' + source)
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    page.locator('.source-merge-panel > summary').click()
+    page.get_by_label('Reviewed cosine threshold').fill('0.99')
+    page.get_by_role('button', name='Find matching groups', exact=True).click()
+    expect(page.locator('.merge-group')).to_have_count(2)
+    expect(page.locator('.merge-group h3')).to_have_text(['Group 1', 'Group 2'])
+    expect(page.locator('.merge-correction[open]')).to_have_count(0)
+    expect(page.get_by_role('button', name='Merge selected groups', exact=True)).to_be_disabled()
+    page.get_by_role('button', name='Select all groups', exact=True).click()
+    expect(page.locator('.merge-selection-summary')).to_have_text('2 groups selected · 4 subjects → 2 subjects')
+    # A saved proposal-only review must use the current server gate, preserving selections.
+    page.evaluate('''() => {
+        const saved = JSON.parse(sessionStorage.getItem('source-merge-review-v1'));
+        for (const plan of Object.values(saved)) plan.apply_enabled = false;
+        sessionStorage.setItem('source-merge-review-v1', JSON.stringify(saved));
+    }''')
+    page.reload()
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    page.locator('.source-merge-panel > summary').click()
+    expect(page.locator('.merge-selection-summary')).to_have_text('2 groups selected · 4 subjects → 2 subjects')
+    expect(page.get_by_role('button', name='Merge selected groups', exact=True)).to_be_enabled()
+    monkeypatch.setenv('FACE_SOURCE_MERGES_APPLY_ENABLED', 'false')
+    page.reload()
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    page.locator('.source-merge-panel > summary').click()
+    expect(page.get_by_text('Proposal review only. Operator application is not enabled.', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='Merge selected groups', exact=True)).to_be_disabled()
+    monkeypatch.setenv('FACE_SOURCE_MERGES_APPLY_ENABLED', 'true')
+    page.reload()
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    page.locator('.source-merge-panel > summary').click()
+    expect(page.get_by_role('button', name='Merge selected groups', exact=True)).to_be_enabled()
+    page.get_by_role('button', name='Clear group selection', exact=True).click()
+    expect(page.get_by_role('button', name='Merge selected groups', exact=True)).to_be_disabled()
+    expect(page.locator('.merge-survivor-badge')).to_have_count(2)
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    page.locator('.merge-group').first.get_by_label('Include group', exact=True).check()
+    page.get_by_role('button', name='Merge selected groups', exact=True).click()
+    expect(page.locator('.merge-outcome')).to_contain_text(['merged:'])
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    expect(page.locator('.source-merge-panel > summary')).to_have_text('Matching groups · 1 group merged')
+    expect(page.get_by_role('dialog')).to_have_count(0)
+    page.reload()
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    page.locator('.source-merge-panel > summary').click()
+    expect(page.locator('.merge-outcome')).to_contain_text(['merged:'])
+    class Client:
+        def post(self, path, data):
+            response = page.request.post(origin + path, data=data, headers={'Origin': origin})
+            assert response.ok, response.text()
+            return response.json()
+    client = Client()
+    client.origin = origin
+    plan = client.post(f'/api/sources/{source}/merge-proposals', {'threshold': .99})
+    plan['groups'][0]['selected'] = True
+    path, receipt = tmp_path / 'plan.json', tmp_path / 'receipt.json'
+    save_private(path, {'format_version': 1, 'origin': origin, 'plans': [plan]})
+    result = apply_plan(client, path, receipt)
+    assert next(iter(result['operations'].values()))['outcome']['status'] == 'merged'
+    assert apply_plan(client, path, receipt) == result
+    assert len(SubjectManagement(db).subjects(source_id=source)['subjects']) == 2
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_source_oversized_group_never_split_or_applied(db):
+    from worker.source_merges import SourceMerges
+    service = SubjectManagement(db)
+    planner = SourceMerges(service, apply_enabled=True)
+    source, ids = source_merge_fixture(db, [0] * 51)
+    plan = planner.plan(source, {'threshold': .99})
+    assert len(plan['groups']) == 1
+    assert len(plan['groups'][0]['members']) == 51
+    assert plan['groups'][0]['manual_handling_required']
+    plan['groups'][0]['selected'] = True
+    outcome = planner.apply(source, plan, 'tester')['outcomes'][0]
+    assert outcome['status'] == 'failed' and outcome['code'] == 'manual_handling_required'
+    assert len(service.subjects(source_id=source, limit=100)['subjects']) == len(ids)
+
+
+def test_source_recheck_waits_for_enrollment_lock_then_rejects_entire_group(db):
+    import concurrent.futures
+    import threading
+
+    from worker.source_merges import SourceMerges
+    service = SubjectManagement(db)
+    planner = SourceMerges(service, apply_enabled=True)
+    source, ids = source_merge_fixture(db, [0, .01, .02])
+    plan = planner.plan(source, {'threshold': .99})
+    plan['groups'][0]['selected'] = True
+    started = threading.Event()
+    def apply():
+        started.set()
+        return planner.apply(source, plan, 'tester')
+    connection = db.connect()
+    try:
+        cursor = connection.cursor()
+        cursor.execute('SELECT pg_advisory_xact_lock(8675309)')
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(apply)
+            assert started.wait(5)
+            cursor.execute('UPDATE subject SET row_version=row_version+1 WHERE subject_id=%s', (ids[1],))
+            connection.commit()
+            outcome = future.result(timeout=10)['outcomes'][0]
+            assert outcome['status'] == 'stale' and outcome['code'] == 'stale_subject'
+    finally:
+        connection.close()
+    assert len(service.subjects(source_id=source)['subjects']) == 3
+
+
+def test_browser_multiple_source_matching_is_independent(db, browser_console):
+    from playwright.sync_api import expect
+    page, origin = browser_console
+    for _ in range(2):
+        source_merge_fixture(db, [0, .01])
+    page.goto(origin + '/sources')
+    expect(page.get_by_label('Select source for matching')).to_have_count(2)
+    for checkbox in page.get_by_label('Select source for matching').all():
+        checkbox.check()
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    page.locator('.source-merge-panel > summary').click()
+    page.get_by_label('Reviewed cosine threshold').fill('0.99')
+    page.get_by_role('button', name='Find matching groups', exact=True).click()
+    expect(page.locator('.source-merge-result')).to_have_count(2)
+    expect(page.locator('.merge-group')).to_have_count(2)
+    expect(page.get_by_text('Proposal review only. Operator application is not enabled.', exact=True)).to_be_visible()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+def test_browser_source_group_exclusion_and_dismissal(db, browser_console, monkeypatch):
+    from playwright.sync_api import expect
+    monkeypatch.setenv('FACE_SOURCE_MERGES_APPLY_ENABLED', 'true')
+    page, origin = browser_console
+    source, _ids = source_merge_fixture(db, [0, .01, .02])
+    page.goto(origin + '/sources/' + source)
+    expect(page.locator('.source-merge-panel')).not_to_have_attribute('open', '')
+    page.locator('.source-merge-panel > summary').click()
+    page.get_by_label('Reviewed cosine threshold').fill('0.99')
+    page.get_by_role('button', name='Find matching groups', exact=True).click()
+    expect(page.locator('.merge-group-member')).to_have_count(3)
+    page.get_by_role('button', name='Exclude member', exact=True).first.click()
+    expect(page.locator('.merge-group-member')).to_have_count(2)
+    expect(page.get_by_text('Minimum similarity lower bound after exclusion', exact=False)).to_be_visible()
+    page.get_by_text('Fix a mismatch', exact=True).click()
+    page.get_by_role('button', name='These are different people', exact=True).click()
+    expect(page.locator('.merge-outcome')).to_contain_text('Pair dismissed')
+    page.get_by_role('button', name='Find matching groups', exact=True).click()
+    expect(page.locator('.source-merge-result')).to_contain_text('1 currently dismissed pairs excluded')
+    page.locator('.merge-group').get_by_label('Include group', exact=True).check()
+    page.get_by_role('button', name='Merge selected groups', exact=True).click()
+    expect(page.locator('.merge-outcome')).to_contain_text('merged:')
+    assert len(SubjectManagement(db).subjects(source_id=source)['subjects']) == 2
+
+
+def test_source_identity_changes_and_concurrent_manual_merge_are_stale(db):
+    from worker.source_merges import SourceMerges
+    service = SubjectManagement(db)
+    planner = SourceMerges(service, apply_enabled=True)
+    source, ids = source_merge_fixture(db, [0, .01, .02])
+    service.edit(ids[0], {'operation_id': str(uuid.uuid4()), 'version': service.subject(ids[0])['version'],
+        'identity_version': None, 'display_name': 'Reviewed', 'external_identity_ref': None}, 'tester')
+    plan = planner.plan(source, {'threshold': .99})
+    plan['groups'][0]['selected'] = True
+    identity = service.subject(ids[0])['identity_id']
+    sql(db, "UPDATE identity SET display_name='Changed',row_version=row_version+1 WHERE identity_id=%s", (identity,))
+    assert planner.apply(source, plan, 'tester')['outcomes'][0]['code'] == 'identity_changed'
+    plan = planner.plan(source, {'threshold': .99})
+    plan['groups'][0]['selected'] = True
+    service.bulk_combine(ids[0], {'operation_id': str(uuid.uuid4()), 'version': service.subject(ids[0])['version'],
+        'subjects': [{'subject_id': ids[1], 'version': service.subject(ids[1])['version']}]}, 'tester')
+    before = sql(db, 'SELECT subject_id,example_id FROM subject_example ORDER BY example_id')
+    assert planner.apply(source, plan, 'tester')['outcomes'][0]['code'] == 'source_membership_changed'
+    assert sql(db, 'SELECT subject_id,example_id FROM subject_example ORDER BY example_id') == before
+
+
+def test_source_merge_rolls_back_mutation_and_persists_definitive_failure(db):
+    from worker.source_merges import SourceMerges
+    service = SubjectManagement(db)
+    planner = SourceMerges(service, apply_enabled=True)
+    source, ids = source_merge_fixture(db, [0, math.pi])
+    plan = planner.plan(source, {'threshold': -1})
+    group = plan['groups'][0]
+    group['selected'] = True
+    before = sql(db, 'SELECT subject_id,example_id FROM subject_example ORDER BY example_id')
+    result = planner.apply(source, plan, 'tester')
+    assert result['outcomes'][0]['code'] == 'invalid_embedding'
+    assert sql(db, 'SELECT subject_id,example_id FROM subject_example ORDER BY example_id') == before
+    assert all(service.subject(sid)['subject_id'] == sid for sid in ids)
+    assert planner.apply(source, plan, 'tester') == result
+    assert len(sql(db, 'SELECT * FROM subject_change_event WHERE operation_id=%s', (group['operation_id'],))) == 1
+    assert service.merge_members(group['survivor_id'])['members'] == []

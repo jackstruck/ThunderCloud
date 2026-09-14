@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ThunderCloud Face Console
-  version: 0.4.0
+  version: 0.5.0
   description: Search, enrollment, and subject management API. IAP authentication is required for every operation.
 servers:
   - url: /
@@ -388,6 +388,8 @@ paths:
                     type: boolean
                   enrollment_grouping:
                     type: boolean
+                  source_merges_apply_enabled:
+                    type: boolean
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -760,6 +762,66 @@ paths:
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /api/sources/{source_id}/merge-proposals:
+    parameters:
+      - {name: source_id, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: planSourceMerges
+      description: Read-only complete-linkage scan of current single-source subjects, partitioned by model. At most 400 subjects / 79,800 comparisons. Oversized or timed-out scans require bounded background execution; no partial plan is returned. Origin and IAP authentication are required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [threshold]
+              properties:
+                threshold: {type: number, minimum: -1, maximum: 1, description: Explicit reviewed cosine threshold; no default or probability interpretation.}
+      responses:
+        '200':
+          description: Disjoint groups, excluded subjects and dismissed pairs. Groups start unselected.
+          content: {application/json: {schema: {$ref: '#/components/schemas/SourceMergePlan'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /api/sources/{source_id}/merge-proposals/apply:
+    parameters:
+      - {name: source_id, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: applySourceMerges
+      description: Operator rollout gate required. Applies explicitly selected disjoint groups independently and atomically. Revalidates current membership, model, versions, identities, dismissals and all pair scores under the enrollment lock. Uncertain requests must retry the original operation ID and payload. Completed groups survive later failures. No unattended selection.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SourceMergePlan'}}}
+      responses:
+        '200':
+          description: Per-group results; HTTP success does not imply all groups merged.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [source_id, outcomes]
+                properties:
+                  source_id: {type: string, format: uuid}
+                  outcomes:
+                    type: array
+                    items:
+                      type: object
+                      required: [operation_id, status]
+                      properties:
+                        operation_id: {type: string, format: uuid}
+                        status: {enum: [merged, skipped, stale, failed]}
+                        code: {type: string}
+                        message: {type: string}
+                        reason: {type: string}
+                        result: {type: object, description: Existing bulk merge result including destination and merged subject IDs.}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     iap: {type: openIdConnect, openIdConnectUrl: 'https://cloud.google.com/iap'}
@@ -788,6 +850,74 @@ components:
       description: Unknown run.
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
   schemas:
+    SourceMergePlan:
+      type: object
+      required: [format_version, algorithm, source_id, threshold, groups]
+      properties:
+        format_version: {const: 1}
+        algorithm: {const: complete-linkage-v1}
+        plan_id: {type: string, format: uuid}
+        source_id: {type: string, format: uuid}
+        threshold: {type: number, minimum: -1, maximum: 1}
+        apply_enabled: {type: boolean}
+        subject_limit: {const: 400}
+        comparison_limit: {const: 79800}
+        eligible_subject_count: {type: integer}
+        model_partitions:
+          type: array
+          items:
+            type: object
+            properties:
+              model_version: {type: string}
+              subject_count: {type: integer}
+        skipped:
+          type: array
+          items:
+            type: object
+            properties:
+              subject_id: {type: string, format: uuid}
+              reason: {type: string}
+        dismissed_pairs:
+          type: array
+          items: {type: array, minItems: 2, maxItems: 2, items: {type: string, format: uuid}}
+        groups:
+          type: array
+          maxItems: 200
+          items: {$ref: '#/components/schemas/SourceMergeGroup'}
+    SourceMergeGroup:
+      type: object
+      required: [operation_id, model_version, members, survivor_id, selected, review_identity_conflicts]
+      properties:
+        operation_id: {type: string, format: uuid}
+        model_version: {type: string}
+        survivor_id: {type: string, format: uuid}
+        selected: {type: boolean, default: false}
+        review_identity_conflicts: {type: boolean, default: false}
+        minimum_similarity: {type: number, minimum: -1, maximum: 1, description: Display score; rechecked during apply. After member exclusion this is a conservative lower bound.}
+        identity_conflicts: {type: array, items: {enum: [display_name, external_identity_ref]}}
+        manual_handling_required: {type: boolean, description: Groups over 50 members are proposals for manual handling and cannot be applied.}
+        members:
+          type: array
+          minItems: 2
+          maxItems: 400
+          items:
+            type: object
+            required: [subject_id, version, identity_version]
+            properties:
+              subject_id: {type: string, format: uuid}
+              version: {type: integer, minimum: 1}
+              identity_version: {type: [integer, 'null']}
+              identity_id: {type: [string, 'null']}
+              display_name: {type: [string, 'null']}
+              external_identity_ref: {type: [string, 'null']}
+              model_version: {type: string}
+              example_count: {type: integer}
+              representative_faces: {type: array, items: {type: object}}
+              source_time_range:
+                type: object
+                properties:
+                  start_ms: {type: [integer, 'null']}
+                  end_ms: {type: [integer, 'null']}
     SuggestionReview:
       type: object
       additionalProperties: false

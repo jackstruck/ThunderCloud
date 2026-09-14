@@ -41,3 +41,16 @@ https://justpaste.it/example-two
 ```
 
 Because the seeded HeyLink URL currently returns an access challenge, comment it out in `input/heylink_urls.txt` by adding `#` at the beginning of its line when using the direct JustPaste input.
+
+## Hotscope (download and encrypted storage only)
+
+```bash
+bulk-download discover --user USERNAME --max-videos-per-user 5
+bulk-download run --users-file input/hotscope_users.txt --videos-file input/hotscope_videos.txt
+bulk-download run --user USER_A --user USER_B --max-videos-per-user 5
+```
+
+Users may be usernames or profile URLs. Video selections may be IDs or page
+URLs; `--video-id` can also be repeated. Omit selection/count flags to download
+all listed videos, bounded by `--max-pages` (default 100 per user). These commands
+use the existing config and CSEK; they do not submit processing jobs.

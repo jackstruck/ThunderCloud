@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 from pathlib import Path
 
+import google_crc32c
 from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
 
@@ -29,6 +32,21 @@ class StorageAdapter:
         except NotFound:
             return None
 
+    def verify(self, blob, path: Path, content_type: str, expected_size: int) -> None:
+        checksum = google_crc32c.Checksum()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(self.config.chunk_bytes), b""):
+                checksum.update(chunk)
+        encryption = blob._properties.get("customerEncryption", {})
+        if (
+            blob.size != expected_size
+            or blob.content_type != content_type
+            or blob.crc32c != base64.b64encode(checksum.digest()).decode("ascii")
+            or encryption.get("encryptionAlgorithm") != "AES256"
+            or encryption.get("keySha256") != base64.b64encode(hashlib.sha256(self.csek).digest()).decode("ascii")
+        ):
+            raise RuntimeError("verification_failure")
+
     def upload(self, object_name: str, path: Path, content_type: str, expected_size: int) -> storage.Blob:
         blob = self._blob(object_name)
         try:
@@ -38,6 +56,5 @@ class StorageAdapter:
         except PreconditionFailed as exc:
             raise RuntimeError("object_exists") from exc
         blob.reload()
-        if blob.size != expected_size:
-            raise RuntimeError("verification_failure")
+        self.verify(blob, path, content_type, expected_size)
         return blob

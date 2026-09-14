@@ -32,3 +32,6 @@ enable_arbitrary_host_fetch = true
 
 # Cloud Monitoring sends execution-failure and dead-letter alerts here.
 monitoring_email_address = "jack@jackstruck.info"
+
+# Enable only after reviewing a small production proposal set at an explicit threshold.
+source_merges_apply_enabled = false

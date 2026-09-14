@@ -82,3 +82,8 @@ output "face_console_service_uri" {
 output "face_ingest_job_name" {
   value = local.phase1_enabled ? google_cloud_run_v2_job.ingest_drain[0].name : null
 }
+
+output "source_merge_operator_service_account" {
+  description = "Keyless IAP CLI identity; impersonation is restricted to the approved console principal."
+  value       = local.phase1_enabled ? google_service_account.source_merge_operator[0].email : null
+}

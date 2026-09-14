@@ -14,7 +14,7 @@ temp_dir = "data/tmp"
 manifest_file = "data/manifest.jsonl"
 
 [http]
-user_agent = "ThunderCloudBulkDownloader/1.0"
+user_agent = "BulkDownloader/1.0"
 connect_timeout_seconds = 10
 read_timeout_seconds = 60
 max_redirects = 5

@@ -249,6 +249,10 @@ resource "google_cloud_run_v2_service" "console" {
         value = tostring(var.enable_arbitrary_host_fetch)
       }
       env {
+        name  = "FACE_SOURCE_MERGES_APPLY_ENABLED"
+        value = tostring(var.source_merges_apply_enabled)
+      }
+      env {
         name  = "FACE_SUBJECT_MANAGEMENT_ENABLED"
         value = tostring(var.subject_management_enabled)
       }
@@ -299,7 +303,7 @@ resource "google_iap_web_cloud_run_service_iam_binding" "approved_team" {
   location               = var.region
   cloud_run_service_name = google_cloud_run_v2_service.console[0].name
   role                   = "roles/iap.httpsResourceAccessor"
-  members                = [var.approved_iap_member]
+  members                = [var.approved_iap_member, google_service_account.source_merge_operator[0].member]
 }
 
 resource "google_cloud_run_v2_job" "ingest_drain" {
@@ -543,3 +547,18 @@ resource "google_cloud_scheduler_job" "phase1_maintenance" {
 # External OAuth audience configuration cannot be inferred here. The plan requires
 # inspecting the actual organization and proving an intended external account before
 # launch even though direct Cloud Run IAP and its group binding are managed above.
+
+# Keyless CLI identity: no project/data roles and no service-account keys.
+resource "google_service_account" "source_merge_operator" {
+  count        = local.phase1_enabled ? 1 : 0
+  project      = var.project_id
+  account_id   = "${var.name_prefix}-merge-cli"
+  display_name = "Source merge operator CLI"
+}
+
+resource "google_service_account_iam_member" "source_merge_operator_signer" {
+  count              = local.phase1_enabled ? 1 : 0
+  service_account_id = google_service_account.source_merge_operator[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.approved_iap_member
+}

@@ -868,6 +868,10 @@ class SubjectManagement:
             return result
 
     def bulk_combine(self, subject_id, data, actor):
+        with self.transaction(write=True) as cursor:
+            return self._bulk_combine(cursor, subject_id, data, actor)
+
+    def _bulk_combine(self, cursor, subject_id, data, actor, *, scope=None, validate=None):
         if set(data) != {'operation_id', 'version', 'subjects'}:
             raise SubjectError(422, 'invalid_combine', 'Provide the destination version and selected subjects.')
         sid = subject_uuid(subject_id)
@@ -882,35 +886,36 @@ class SubjectManagement:
             if member_id == sid or member_id in versions:
                 raise SubjectError(422, 'invalid_combine', 'Choose each subject once.')
             versions[member_id] = member['version']
-        with self.transaction(write=True) as cursor:
-            operation, fingerprint, replay = self._operation(cursor, sid, 'combine', data, actor)
-            if replay is not None:
-                return replay
-            destination = self._detail(cursor, sid)
-            if destination['subject_id'] != sid:
-                raise SubjectError(409, 'subject_merged', 'Refresh the destination subject.')
-            self._version(destination['version'], data['version'])
-            groups = []
-            # Validate every member before changing any membership.
-            for member_id in sorted(versions):
-                member = self._detail(cursor, member_id)
-                if member['subject_id'] != member_id:
-                    raise SubjectError(409, 'subject_merged', 'A selected subject was already merged. Refresh the selection.')
-                self._version(member['version'], versions[member_id])
-                if member['model_version'] != destination['model_version']:
-                    raise SubjectError(409, 'model_mismatch', 'Subjects must use the same recognition model.')
-                cursor.execute('SELECT example_id FROM subject_example WHERE subject_id=%s ORDER BY example_id', (member_id,))
-                groups.append({'subject': member, 'example_ids': [str(r[0]) for r in cursor.fetchall()]})
-            for group in groups:
-                member_id = group['subject']['subject_id']
-                cursor.execute('UPDATE subject_example SET subject_id=%s WHERE subject_id=%s', (sid, member_id))
-                cursor.execute('UPDATE subject SET merged_into_subject_id=%s WHERE subject_id=%s', (sid, member_id))
-            recalculate_subjects(cursor, [sid, *versions])
-            result = {'destination': self._detail(cursor, sid), 'operation_id': operation,
-                      'merged_subject_ids': sorted(versions)}
-            self._record(cursor, operation, actor, 'combine', fingerprint,
-                         {'subject': destination, 'to_subject_id': sid, 'members': groups}, result)
-            return result
+        operation, fingerprint, replay = self._operation(cursor, sid, 'combine', {**data, **({'source_merge': scope} if scope else {})}, actor)
+        if replay is not None:
+            return replay
+        if validate is not None:
+            validate(cursor)
+        destination = self._detail(cursor, sid)
+        if destination['subject_id'] != sid:
+            raise SubjectError(409, 'subject_merged', 'Refresh the destination subject.')
+        self._version(destination['version'], data['version'])
+        groups = []
+        # Validate every member before changing any membership.
+        for member_id in sorted(versions):
+            member = self._detail(cursor, member_id)
+            if member['subject_id'] != member_id:
+                raise SubjectError(409, 'subject_merged', 'A selected subject was already merged. Refresh the selection.')
+            self._version(member['version'], versions[member_id])
+            if member['model_version'] != destination['model_version']:
+                raise SubjectError(409, 'model_mismatch', 'Subjects must use the same recognition model.')
+            cursor.execute('SELECT example_id FROM subject_example WHERE subject_id=%s ORDER BY example_id', (member_id,))
+            groups.append({'subject': member, 'example_ids': [str(r[0]) for r in cursor.fetchall()]})
+        for group in groups:
+            member_id = group['subject']['subject_id']
+            cursor.execute('UPDATE subject_example SET subject_id=%s WHERE subject_id=%s', (sid, member_id))
+            cursor.execute('UPDATE subject SET merged_into_subject_id=%s WHERE subject_id=%s', (sid, member_id))
+        recalculate_subjects(cursor, [sid, *versions])
+        result = {'destination': self._detail(cursor, sid), 'operation_id': operation,
+                  'merged_subject_ids': sorted(versions)}
+        self._record(cursor, operation, actor, 'combine', fingerprint,
+                     {'subject': destination, 'to_subject_id': sid, 'members': groups, **({'source_merge': scope} if scope else {})}, result)
+        return result
 
     @staticmethod
     def _merge_members(details):

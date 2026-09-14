@@ -124,3 +124,45 @@ nav a.link{display:inline-flex;align-items:center;text-decoration:none;border-ra
 
 .example-source-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;width:100%;margin:12px 0}
 .example-source-actions>button,.example-source-actions>.button-link{width:100%;min-width:0;margin:0;padding:10px 8px;text-align:center;font-size:.85rem;overflow-wrap:anywhere}
+
+.source-merge-panel { margin-block: 1.5rem; }
+.source-merge-panel > summary { cursor: pointer; font-size: 1.25rem; font-weight: 600; }
+.source-merge-result { margin-block: 1rem; }
+.merge-group { margin-block: 1rem; }
+.merge-group-members { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 1rem; }
+.merge-group-member { min-width: 0; }
+.merge-group select, .source-merge-panel input[type=number] { max-width: 100%; min-width: 0; }
+.merge-group .subject-id, .merge-outcome { overflow-wrap: anywhere; }
+
+/* Group review keeps decisions prominent and correction details out of the way. */
+.merge-scan-controls { display:flex; align-items:end; gap:12px; flex-wrap:wrap; }
+.merge-scan-controls label { flex:1 1 190px; }
+.merge-scan-controls button { margin:0; flex:1 1 160px; }
+.merge-scan-details { margin:12px 0; font-size:.85rem; }
+.merge-scan-details summary, .merge-member-details summary, .merge-correction summary { cursor:pointer; color:var(--muted); }
+.merge-group { padding:16px; gap:12px; border-width:2px; }
+.merge-group.is-selected { border-color:var(--primary); }
+.merge-group-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; width:100%; }
+.merge-group-heading h3 { margin:0; font-size:1.1rem; }
+.merge-group-heading .subject-filter-inline { font-size:.85rem; }
+.merge-group-effect { font-weight:600; }
+.merge-group-members { grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:10px; width:100%; }
+.merge-group-member { display:flex; flex-direction:column; align-items:stretch; gap:6px; padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--surface); font-size:.85rem; }
+.merge-group-member > strong { overflow-wrap:anywhere; }
+.merge-group-member.is-survivor { border-color:var(--primary); }
+.merge-group-member .representatives { grid-template-columns:minmax(0,1fr); gap:4px; margin:0; }
+.merge-group-member .representatives img { width:100%; height:110px; object-fit:cover; }
+.merge-group-member .representatives .hint { grid-column:1/-1; font-size:.8rem; }
+.merge-group-member button { margin:0; margin-top:auto; padding:9px 6px; }
+.merge-survivor-badge { color:var(--text); background:var(--surface-soft); padding:3px 6px; border-radius:4px; font-size:.75rem; }
+.merge-member-details { min-width:0; }
+.merge-member-details .subject-id { display:block; margin-top:6px; font-size:.7rem; }
+.merge-keep-field, .merge-keep-description, .merge-correction { width:100%; }
+.merge-keep-field { padding-top:10px; border-top:1px solid var(--border); }
+.merge-correction { border-top:1px solid var(--border); padding-top:12px; font-size:.85rem; }
+.merge-correction[open] summary { color:var(--text); font-weight:600; margin-bottom:8px; }
+.merge-pair-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.merge-action-bar { background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:12px; margin-top:16px; box-shadow:0 3px 12px var(--shadow); display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+.merge-selection-summary { margin:0; font-size:.85rem; flex:1 1 190px; }
+.merge-action-bar button { margin:0; flex:1 1 180px; }
+@media(max-width:600px) { .merge-group { padding:10px; } .merge-group-members { grid-template-columns:repeat(2,minmax(0,1fr)); } .merge-pair-fields { grid-template-columns:1fr; } }

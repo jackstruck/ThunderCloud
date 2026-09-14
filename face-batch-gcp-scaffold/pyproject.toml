@@ -26,6 +26,7 @@ gpu = ["onnxruntime-gpu>=1.21,<2"]
 dev = ["pytest>=8,<10", "pytest-cov>=6,<8", "ruff>=0.16,<1"]
 
 [project.scripts]
+source-merges = "worker.source_merges_cli:main"
 face-worker = "worker.__main__:main"
 face-submit = "worker.operator_submission:main"
 face-probe = "worker.probe:main"

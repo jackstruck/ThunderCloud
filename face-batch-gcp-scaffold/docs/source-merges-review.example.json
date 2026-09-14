@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "algorithm": "complete-linkage-v1",
+  "model_version": null,
+  "threshold": null,
+  "reviewer": null,
+  "reviewed_at": null,
+  "source_ids": [],
+  "plan_ids": [],
+  "reviewed_proposed_pairs": [],
+  "reviewed_unproposed_pairs": [],
+  "false_merges": [],
+  "missed_matches": [],
+  "accepted_threshold": false,
+  "notes": "Each pair record needs source_id, subject_ids and review outcome. False merges additionally reference operation_id. Keep false merges and missed matches separate."
+}

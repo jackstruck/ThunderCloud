@@ -54,3 +54,34 @@ on retry and check existing submissions before processing historical objects.
 
 Keep configuration, keys, credentials, manifests, and temporary media out of Git.
 The resolver uses static pages; unsupported or unavailable sources remain failures.
+
+## Hotscope user downloads
+
+Use the same config, CSEK, and GCS bucket as the existing downloader:
+
+```bash
+bulk-download discover --user USERNAME --max-videos-per-user 5
+bulk-download run --user USER_A --user USER_B --max-videos-per-user 5
+bulk-download run --users-file input/hotscope_users.txt --videos-file input/hotscope_videos.txt
+```
+
+Repeat `--user` or provide one username/profile URL per line in `--users-file`.
+Select individual videos with repeated `--video-id ID` or a `--videos-file`
+containing IDs or Hotscope video-page URLs. Blank lines and `#` comments are
+ignored. Without a selection/count limit, all videos listed for the supplied
+users are selected. `--max-pages` defaults to 100 per user; unfinished pagination
+and selected IDs not found are reported as failures. Count limits use provider
+order and include previously completed videos, making repeated runs stable.
+Hotscope commands do not require the legacy input files to exist.
+
+Full HLS videos are downloaded, validated, and uploaded with the configured CSEK;
+reruns skip completed pages and deduplicate identical content. GCS upload is the
+end of this workflow. Run one writer per manifest/temp directory. The process
+must stay running; local scratch media and manifests are not encrypted by CSEK.
+See [the acquisition design](../docs/design/hotscope-acquisition.md) for supported
+formats, recovery behavior, and limitations.
+
+HLS uses `IMAGEIO_FFMPEG_EXE` when set, then a system `ffmpeg`, then the bundled
+imageio binary. Install system FFmpeg if the bundled binary is incompatible with
+the host. The generated-media tests exercise remuxing, audio/video decoding, and
+cleanup (`python -m unittest discover -s tests`).

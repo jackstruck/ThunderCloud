@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Self
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -26,6 +26,7 @@ _REDIRECTS = {301, 302, 303, 307, 308}
 class Fetcher:
     def __init__(self, config: HttpConfig):
         self.config = config
+        self.allowed_hosts: set[str] | None = None
         self.client = httpx.Client(
             follow_redirects=False,
             timeout=httpx.Timeout(config.read_timeout_seconds, connect=config.connect_timeout_seconds),
@@ -55,6 +56,15 @@ class Fetcher:
             else:
                 self.client.headers["Referer"] = previous
 
+    @contextmanager
+    def restricted_to(self, hosts: set[str]):
+        previous = self.allowed_hosts
+        self.allowed_hosts = hosts if previous is None else hosts & previous
+        try:
+            yield
+        finally:
+            self.allowed_hosts = previous
+
     def _sleep(self, attempt: int, response: httpx.Response | None = None) -> None:
         delay = self.config.backoff_seconds * (2 ** attempt)
         if response is not None and response.headers.get("Retry-After"):
@@ -70,12 +80,15 @@ class Fetcher:
         time.sleep(max(0, delay))
 
     def _request_once(
-        self, url: str, stream: bool, headers: dict[str, str] | None = None
+        self, url: str, stream: bool, headers: dict[str, str] | None = None,
+        method: str = "GET", content: bytes | None = None
     ) -> httpx.Response:
         current = canonicalize(url)
         for redirects in range(self.config.max_redirects + 1):
+            if self.allowed_hosts is not None and urlsplit(current).hostname not in self.allowed_hosts:
+                raise UnsafeUrl("unexpected provider host")
             ensure_public_host(current)
-            request = self.client.build_request("GET", current, headers=headers)
+            request = self.client.build_request(method, current, headers=headers, content=content)
             response = self.client.send(request, stream=stream)
             if response.status_code not in _REDIRECTS:
                 return response
@@ -85,16 +98,19 @@ class Fetcher:
                 raise FetchError("http_failure", "redirect response has no Location")
             if redirects == self.config.max_redirects:
                 raise FetchError("http_failure", "too many redirects")
+            if method != "GET":
+                raise FetchError("http_failure", "action redirect is unsupported")
             current = canonicalize(urljoin(current, location))
         raise FetchError("http_failure", "too many redirects")
 
     def request(
-        self, url: str, *, stream: bool = False, headers: dict[str, str] | None = None
+        self, url: str, *, stream: bool = False, headers: dict[str, str] | None = None,
+        method: str = "GET", content: bytes | None = None
     ) -> httpx.Response:
         last: Exception | None = None
         for attempt in range(self.config.attempts):
             try:
-                response = self._request_once(url, stream, headers)
+                response = self._request_once(url, stream, headers, method, content)
                 if response.headers.get("cf-mitigated", "").lower() == "challenge":
                     response.close()
                     raise FetchError("access_challenge", "site requires an interactive access challenge")

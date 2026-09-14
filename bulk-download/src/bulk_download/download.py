@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +18,10 @@ from .fetch import Fetcher
 from .urls import canonicalize
 
 EXTENSIONS = {"video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov"}
+
+
+def ffmpeg_executable() -> str:
+    return os.environ.get("IMAGEIO_FFMPEG_EXE") or shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
 
 @dataclass(frozen=True)
@@ -78,12 +85,19 @@ def _read_playlist(fetcher: Fetcher, config: Config, url: str) -> tuple[list[str
 
 def _media_playlist(fetcher: Fetcher, config: Config, url: str) -> tuple[list[str], str]:
     lines, final_url = _read_playlist(fetcher, config, url)
+    if any(line.startswith("#EXT-X-MEDIA:") and 'TYPE=AUDIO' in line for line in lines):
+        raise RuntimeError("unsupported_video_type")
+    variants = []
     for index, line in enumerate(lines):
-        if line.startswith("#EXT-X-STREAM-INF"):
-            for candidate in lines[index + 1:]:
-                if not candidate.startswith("#"):
-                    variant = canonicalize(urljoin(final_url, candidate))
-                    return _read_playlist(fetcher, config, variant)
+        if line.startswith("#EXT-X-STREAM-INF:"):
+            bandwidth = re.search(r"(?:[:,])BANDWIDTH=(\d+)", line)
+            if bandwidth is None or index + 1 >= len(lines) or lines[index + 1].startswith("#"):
+                raise RuntimeError("download_failure")
+            variants.append((int(bandwidth.group(1)), lines[index + 1]))
+    if variants:
+        # Highest advertised bandwidth, URL as a stable tie breaker.
+        _, candidate = max(variants)
+        return _read_playlist(fetcher, config, canonicalize(urljoin(final_url, candidate)))
     return lines, final_url
 
 
@@ -177,15 +191,21 @@ def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downl
     if path.exists() or transport.exists():
         raise FileExistsError(path if path.exists() else transport)
     lines, playlist_url = _media_playlist(fetcher, config, url)
-    if any(line.startswith(("#EXT-X-KEY", "#EXT-X-MAP", "#EXT-X-BYTERANGE")) for line in lines):
+    if any(line.startswith(("#EXT-X-KEY", "#EXT-X-MAP", "#EXT-X-BYTERANGE", "#EXT-X-STREAM-INF", "#EXT-X-DISCONTINUITY", "#EXT-X-GAP")) for line in lines):
         raise RuntimeError("unsupported_video_type")
+    if "#EXT-X-ENDLIST" not in lines:
+        raise RuntimeError("unsupported_video_type")
+    durations = [float(line.split(":", 1)[1].split(",", 1)[0])
+                 for line in lines if line.startswith("#EXTINF:")]
     segments = [canonicalize(urljoin(playlist_url, line)) for line in lines if not line.startswith("#")]
-    if not segments or len(segments) > 10_000:
+    if not segments or len(segments) > 10_000 or len(durations) != len(segments) or any(not math.isfinite(d) or d <= 0 for d in durations):
         raise RuntimeError("download_failure")
     downloaded_bytes = 0
     try:
         with transport.open("xb") as handle:
             for index, segment_url in enumerate(segments, 1):
+                if shutil.disk_usage(config.temp_dir).free < 64 * 1024 * 1024 + config.chunk_bytes:
+                    raise RuntimeError("insufficient_disk_space")
                 downloaded_bytes += _write_hls_segment(
                     fetcher, config, segment_url, handle, downloaded_bytes
                 )
@@ -193,13 +213,15 @@ def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downl
                     print(f"[download] uid={uid} segments={index}/{len(segments)}", flush=True)
             handle.flush()
             os.fsync(handle.fileno())
+        if shutil.disk_usage(config.temp_dir).free < downloaded_bytes + 64 * 1024 * 1024:
+            raise RuntimeError("insufficient_disk_space")
         command = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
+            ffmpeg_executable(),
             "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-i", str(transport),
+            "-protocol_whitelist", "file,pipe", "-i", str(transport),
             "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy",
             "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart",
-            "-fs", str(config.http.max_video_bytes), "-f", "mp4", str(path),
+            "-f", "mp4", str(path),
         ]
         result = subprocess.run(
             command, stdin=subprocess.DEVNULL, capture_output=True, timeout=6 * 60 * 60,
@@ -210,6 +232,7 @@ def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downl
         size = path.stat().st_size
         if size > config.http.max_video_bytes:
             raise RuntimeError("video_too_large")
+        _validate_hls(path, sum(durations))
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(config.chunk_bytes), b""):
@@ -220,3 +243,17 @@ def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downl
         path.unlink(missing_ok=True)
         transport.unlink(missing_ok=True)
         raise
+
+
+def _validate_hls(path: Path, expected_duration: float) -> None:
+    """Decode the completed file and compare its duration with the finite playlist."""
+    result = subprocess.run(
+        [ffmpeg_executable(), "-nostdin", "-hide_banner", "-v", "error",
+         "-xerror", "-protocol_whitelist", "file,pipe", "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?",
+         "-progress", "pipe:1", "-f", "null", "-"],
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=6 * 60 * 60, check=False,
+    )
+    times = re.findall(rb"out_time_us=(\d+)", result.stdout)
+    duration = int(times[-1]) / 1_000_000 if times else 0
+    if result.returncode or duration <= 0 or abs(duration - expected_duration) > max(2, expected_duration * 0.02):
+        raise RuntimeError("verification_failure")

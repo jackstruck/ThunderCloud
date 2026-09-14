@@ -11,15 +11,16 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
-COPY worker ./worker
-COPY ui ./ui
 RUN python -m venv /opt/venv \
     && python -m pip install --upgrade pip \
     && python -m pip install \
        'cloud-sql-python-connector[pg8000]>=1.16,<2' \
-       'flask>=3.1,<4' 'google-cloud-secret-manager>=2.25,<3' \
-       'google-cloud-storage>=3,<4' 'gunicorn>=23,<24' \
-    && python -m pip install --no-deps .
+       'numpy>=2,<3' 'flask>=3.1,<4' 'google-cloud-secret-manager>=2.25,<3' \
+       'google-cloud-storage>=3,<4' 'gunicorn>=23,<24'
+
+COPY worker ./worker
+COPY ui ./ui
+RUN python -m pip install --no-deps .
 
 RUN useradd --create-home --uid 10001 console
 USER console

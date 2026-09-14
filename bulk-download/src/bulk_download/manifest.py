@@ -18,8 +18,8 @@ def completed_urls(path: Path) -> set[str]:
                 item = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"invalid manifest JSON on line {line_number}") from exc
-            if item.get("status") in {"complete", "duplicate"} and isinstance(item.get("luluvid_url"), str):
-                result.add(item["luluvid_url"])
+            if item.get("status") in {"complete", "duplicate"} and isinstance(item.get("page_url") or item.get("luluvid_url"), str):
+                result.add(item.get("page_url") or item["luluvid_url"])
     return result
 
 

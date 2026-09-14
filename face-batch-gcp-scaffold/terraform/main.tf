@@ -8,6 +8,7 @@ locals {
     "cloudkms.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
+    "iamcredentials.googleapis.com",
     "iap.googleapis.com",
     "logging.googleapis.com",
     "monitoring.googleapis.com",

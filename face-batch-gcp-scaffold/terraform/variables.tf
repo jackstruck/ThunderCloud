@@ -221,3 +221,9 @@ variable "gallery_repair_min_similarity" {
     error_message = "Gallery repair similarity must be between zero and one."
   }
 }
+
+variable "source_merges_apply_enabled" {
+  description = "Enable explicitly reviewed source groups after the initial proposal review. No unattended application is implemented."
+  type        = bool
+  default     = false
+}

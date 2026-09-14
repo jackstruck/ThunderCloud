@@ -189,6 +189,145 @@
     renderSelection(); panel.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
 
+  function sourceMergePanel(root, sourceIds) {
+    const panel = el('details', null, 'source-merge-panel correction-panel');
+    const summary = el('summary', 'Matching groups');
+    panel.append(summary, el('p', 'Review each group as one person. Select the groups you want to merge, then choose which subject to keep.', 'hint'));
+    const label = el('label', 'Reviewed cosine threshold'), threshold = el('input'); threshold.type = 'number'; threshold.min = '-1'; threshold.max = '1'; threshold.step = 'any'; label.append(threshold);
+    const message = el('p', '', 'inline-message'), results = el('div');
+    const failures = new Map();
+    const plans = new Map(), cacheKey = 'source-merge-review-v1';
+    let saved = {}, applying = false, applicationEnabled = false;
+    const applicationStatus = el('p', 'Checking whether merging is enabled…', 'hint');
+    const selectionSummary = el('p', '', 'merge-selection-summary'); selectionSummary.setAttribute('aria-live', 'polite');
+    function updateSelection() {
+      const chosen = [...plans.values()].flatMap(p => p.groups.filter(g => g.selected && g.outcome?.status !== 'merged'));
+      const members = chosen.reduce((n, g) => n + g.members.length, 0);
+      selectionSummary.textContent = chosen.length ? `${chosen.length} groups selected · ${members} subjects → ${chosen.length} subjects` : 'No groups selected. Review a group, then check Include group.';
+      apply.disabled = applying || !chosen.length || !applicationEnabled;
+    }
+    try { saved = JSON.parse(sessionStorage.getItem(cacheKey) || '{}'); } catch (_) { /* Empty review workspace. */ }
+    const persist = () => { for (const [id, plan] of plans) saved[id] = plan; sessionStorage.setItem(cacheKey, JSON.stringify(saved)); };
+    function render() {
+      results.replaceChildren();
+      for (const [id, plan] of plans) {
+        const section = el('section', null, 'source-merge-result'), sourceHeading = sourceLink(id); sourceHeading.textContent = `Source ${id}`; sourceHeading.className = 'subject-id'; section.append(sourceHeading);
+        section.append(el('h3', `${plan.groups.length} matching groups`), el('p', 'Each group merges separately. Groups may still represent the same person and can be reviewed again afterward.', 'hint'));
+        const scanDetails = el('details', null, 'merge-scan-details'); scanDetails.append(el('summary', 'Matching settings and exclusions'), el('p', `Cosine threshold ${plan.threshold} · ${plan.algorithm}. Similarity is a score, not an identity probability.`, 'hint'));
+        section.append(scanDetails);
+        section.append(button('Select all groups', () => { plan.groups.forEach(g => { if (!g.pending && !g.outcome && !g.manual_handling_required) g.selected = true; }); persist(); render(); }), button('Clear group selection', () => { plan.groups.forEach(g => { if (!g.pending && !g.outcome) g.selected = false; }); persist(); render(); }));
+        if (plan.model_partitions) scanDetails.append(el('p', 'Model partitions: ' + plan.model_partitions.map(p => `${p.model_version}: ${p.subject_count} subjects`).join('; '), 'hint'));
+        if (plan.skipped.length) scanDetails.append(el('p', 'Excluded: ' + plan.skipped.map(s => `${s.subject_id}: ${s.reason}`).join('; '), 'subject-id'));
+        if (plan.dismissed_pairs.length) scanDetails.append(el('p', `${plan.dismissed_pairs.length} currently dismissed pairs excluded.`, 'hint'));
+        for (const [groupIndex, group] of plan.groups.entries()) {
+          const memberName = m => m.display_name && !/^Unnamed subject/i.test(m.display_name) ? m.display_name : `Subject ${group.members.indexOf(m) + 1}`;
+          const card = el('article', null, 'merge-group subject-card');
+          const outcome = group.outcome;
+          const frozen = group.pending || !!outcome;
+          const selectLabel = el('label', 'Include group', 'subject-filter-inline'), include = el('input'); include.type = 'checkbox'; include.checked = group.selected; include.disabled = frozen || group.manual_handling_required;
+          include.onchange = () => { group.selected = include.checked; card.classList.toggle('is-selected', include.checked); persist(); updateSelection(); }; selectLabel.prepend(include);
+          card.classList.toggle('is-selected', !!group.selected);
+          const heading = el('div', null, 'merge-group-heading'), title = el('div'); title.append(el('h3', `Group ${groupIndex + 1}`), el('p', `${group.members.length} subjects → 1 subject`, 'merge-group-effect')); heading.append(title, selectLabel); card.append(heading);
+          card.append(el('p', `${group.edited ? 'Minimum similarity lower bound after exclusion' : 'Minimum similarity'}: ${group.minimum_similarity.toFixed(3)}`, 'hint merge-score'));
+          if (outcome) card.append(el('p', `${outcome.status}: ${outcome.message || outcome.result?.destination.subject_id || outcome.reason || ''}`, 'merge-outcome'));
+          if (group.pending || outcome?.code === 'operation_uncertain') card.append(el('p', 'Response unresolved. Retry the original operation before editing or rescanning this source.'));
+          if (outcome && outcome.status !== 'merged' && outcome.code !== 'operation_uncertain') card.append(el('p', 'Rescan this source for a new reviewed operation.'));
+          if (outcome?.status === 'merged') { const a = el('a', 'Open resulting subject / Separate a previous merge'); a.href = '/subjects/' + outcome.result.destination.subject_id; card.append(a); }
+          if (group.manual_handling_required) card.append(el('p', 'More than 50 subjects: manual handling required.'));
+          const keepLabel = el('label', 'Keep subject'), keep = el('select'); keep.disabled = frozen;
+          group.members.forEach(m => { const option = el('option', `${memberName(m)} · ${m.subject_id.slice(0, 8)}`); option.value = m.subject_id; keep.append(option); }); keep.value = group.survivor_id; keepLabel.append(keep); keepLabel.className = 'merge-keep-field';
+          const details = el('p', '', 'subject-id');
+          const showIdentity = () => { const m = group.members.find(m => m.subject_id === group.survivor_id); details.textContent = `Keeps ${m ? memberName(m) : ''}${m?.external_identity_ref ? ' · ' + m.external_identity_ref : ''}. All examples in this group move to this subject.`; };
+          keep.onchange = () => { group.survivor_id = keep.value; group.review_identity_conflicts = false; persist(); render(); }; showIdentity(); details.className = 'hint merge-keep-description';
+          if (group.identity_conflicts.length) {
+            const reviewLabel = el('label', `I reviewed conflicting ${group.identity_conflicts.join(', ')} and the identity to keep`, 'subject-filter-inline'), review = el('input'); review.type = 'checkbox'; review.checked = group.review_identity_conflicts; review.disabled = frozen; review.onchange = () => { group.review_identity_conflicts = review.checked; persist(); }; reviewLabel.prepend(review); card.append(reviewLabel);
+          }
+          const members = el('div', null, 'merge-group-members');
+          group.members.forEach(m => {
+            const member = el('div', null, 'merge-group-member');
+            member.classList.toggle('is-survivor', m.subject_id === group.survivor_id);
+            member.append(el('strong', memberName(m)), gallery({...m, representative_faces: (m.representative_faces || []).slice(0, 1)}));
+            if (m.subject_id === group.survivor_id) member.append(el('span', 'Keeping this subject', 'merge-survivor-badge'));
+            const identity = el('details', null, 'merge-member-details'), identityLink = el('a', 'Open subject'); identityLink.href = `/subjects/${m.subject_id}`;
+            identity.append(el('summary', `ID ${m.subject_id.slice(0, 8)}…`), el('code', m.subject_id, 'subject-id'), el('p', m.display_name || 'Unnamed subject', 'hint'), el('p', m.external_identity_ref || 'No external reference', 'hint'), identityLink); member.append(identity);
+            const span = m.source_time_range; member.append(el('p', span.start_ms == null ? 'Time span unavailable' : `${(span.start_ms / 1000).toFixed(1)}–${(span.end_ms / 1000).toFixed(1)} seconds`));
+            const exclude = button('Exclude member', () => { group.edited = true; group.members = group.members.filter(other => other !== m); if (group.survivor_id === m.subject_id) group.survivor_id = group.members[0]?.subject_id; group.selected = false; group.review_identity_conflicts = false; group.identity_conflicts = ['display_name', 'external_identity_ref'].filter(f => new Set(group.members.map(x => x[f]).filter(Boolean)).size > 1); persist(); render(); }); exclude.disabled = frozen || group.members.length <= 2; member.append(exclude); members.append(member);
+          }); card.append(members, keepLabel, details);
+          if (!frozen) {
+            const correction = el('details', null, 'merge-correction'); correction.append(el('summary', 'Fix a mismatch'), el('p', 'If two subjects are different people, choose them below. This excludes that pair from matching groups. Rescan afterward.', 'hint'));
+            const pairLabel = el('div', null, 'merge-pair-fields'), left = el('select'), right = el('select'); left.setAttribute('aria-label', 'First subject'); right.setAttribute('aria-label', 'Second subject');
+            group.members.forEach(m => { for (const select of [left, right]) { const option = el('option', `${memberName(m)} · ${m.subject_id.slice(0, 8)}`); option.value = m.subject_id; select.append(option); } }); right.selectedIndex = 1; const firstLabel = el('label', 'First subject'), secondLabel = el('label', 'Second subject'); firstLabel.append(left); secondLabel.append(right); pairLabel.append(firstLabel, secondLabel); correction.append(pairLabel); card.append(correction);
+            correction.append(button('These are different people', async () => {
+              try {
+                if (left.value === right.value) throw new Error('Choose two different subjects.');
+                const a = group.members.find(m => m.subject_id === left.value), b = group.members.find(m => m.subject_id === right.value);
+                await mutate(`/api/subjects/${a.subject_id}/potential-matches/${b.subject_id}/dismissal`, 'PUT', {version: a.version, target_version: b.version});
+                group.selected = false; group.outcome = {status: 'stale', message: 'Pair dismissed. Rescan this source.'}; persist(); render();
+              } catch (e) { errorAt(message, e); }
+            }));
+          }
+          section.append(card);
+        }
+        results.append(section);
+      }
+      for (const [id, message] of failures) { const failure = el('p', `${id}: ${message}`, 'subject-id'); failure.setAttribute('role', 'alert'); results.append(failure); }
+      if (applying) results.querySelectorAll('button, input, select').forEach(control => { control.disabled = true; });
+      updateSelection();
+    }
+    const scan = button('Find matching groups', async () => {
+      const ids = [...sourceIds()]; if (!ids.length) { errorAt(message, new Error('Select one or more sources.')); return; }
+      if (!threshold.value || !threshold.checkValidity()) { errorAt(message, new Error('Enter a reviewed cosine threshold from -1 to 1.')); return; }
+      scan.disabled = true;
+      try {
+        for (const id of ids) {
+          if (saved[id]?.groups.some(g => g.pending || g.outcome?.code === 'operation_uncertain')) { plans.set(id, saved[id]); message.textContent = 'Resolve the saved operation before rescanning.'; render(); continue; }
+          message.textContent = `Scanning source ${ids.indexOf(id) + 1}/${ids.length}: ${id}`;
+          try { const plan = (await api(`/api/sources/${id}/merge-proposals`, {method: 'POST', body: JSON.stringify({threshold: Number(threshold.value)})})).body; plans.set(id, plan); failures.delete(id); persist(); render(); }
+          catch (e) { failures.set(id, e.message); render(); }
+        }
+        message.textContent = 'Source scans finished. Review each group before selecting it.';
+      } finally { scan.disabled = false; }
+    });
+    const apply = button('Merge selected groups', async () => {
+      applying = true; apply.disabled = true; scan.disabled = true;
+      const submitted = [...plans.values()].flatMap(p => p.groups.filter(g => g.selected && g.outcome?.status !== 'merged'));
+      try {
+        for (const [id, plan] of plans) {
+          const groups = plan.groups.filter(g => g.selected && g.outcome?.status !== 'merged');
+          if (!groups.length) continue;
+          if (groups.some(g => g.identity_conflicts.length && !g.review_identity_conflicts)) throw new Error('Review the conflicting identity details and the survivor before applying.');
+          groups.forEach(g => { g.pending = true; }); persist(); render();
+          for (const group of groups) {
+            try {
+              const response = (await api(`/api/sources/${id}/merge-proposals/apply`, {method: 'POST', body: JSON.stringify({...plan, groups: [group]})})).body;
+              group.pending = false; group.outcome = response.outcomes[0]; if (group.outcome.status !== 'merged' && group.outcome.code !== 'operation_uncertain') group.selected = false;
+            } catch (e) { group.pending = false; group.outcome = {status: 'failed', code: e.status && e.status < 500 ? 'request_failed' : 'operation_uncertain', message: e.message}; }
+            persist(); render();
+          }
+        }
+        message.textContent = 'Application finished. Merged, skipped, stale, and failed outcomes are shown per group. Retry unresolved operations with their original IDs; rescan stale groups.';
+        if (submitted.length && submitted.every(g => g.outcome?.status === 'merged')) {
+          summary.textContent = `Matching groups · ${submitted.length} ${submitted.length === 1 ? 'group' : 'groups'} merged`;
+          panel.open = false;
+          summary.focus();
+        }
+      } catch (e) { errorAt(message, e); }
+      finally { applying = false; scan.disabled = false; render(); }
+    }, 'primary');
+    const scanControls = el('div', null, 'merge-scan-controls'); scanControls.append(label, scan);
+    const actionBar = el('div', null, 'merge-action-bar'); actionBar.append(selectionSummary, apply);
+    panel.append(scanControls, message, applicationStatus, actionBar, results); root.append(panel);
+    for (const id of sourceIds()) if (saved[id]) plans.set(id, saved[id]);
+    render();
+    api('/api/features').then(({ body }) => {
+      applicationEnabled = body.source_merges_apply_enabled === true;
+      applicationStatus.textContent = applicationEnabled ? '' : 'Proposal review only. Operator application is not enabled.';
+      updateSelection();
+    }).catch(() => {
+      applicationStatus.textContent = 'Could not check whether merging is enabled. Reload this page to try again; your review is saved.';
+    });
+  }
+
   async function loadSources() {
     const requestId = ++detailRequest; show('subject');
     const root = document.querySelector('#subject-detail');
@@ -197,6 +336,7 @@
     const label = el('label', 'Source ID or page URL'), input = el('input'); input.type = 'search'; input.value = params.get('q') || ''; label.append(input);
     const filter = el('label', 'Multiple subjects', 'subject-filter-inline'), multiple = el('input'); multiple.type = 'checkbox'; multiple.checked = params.get('multiple_subjects') === 'true'; filter.prepend(multiple);
     const cards = el('div', null, 'subject-grid'), message = el('p', '', 'inline-message'), pages = el('div', null, 'pagination');
+    const chosenSources = new Set();
     let cursor = params.get('cursor'), prior = [], serial = 0;
     async function search(reset = true) {
       const current = ++serial; if (reset) { cursor = null; prior = []; }
@@ -208,6 +348,7 @@
         history.replaceState({}, '', '/sources' + (query.size ? `?${query}` : ''));
         data.sources.forEach(source => {
           const card = el('article', null, 'subject-card');
+          const selectionLabel = el('label', 'Select source for matching', 'subject-filter-inline'), selection = el('input'); selection.type = 'checkbox'; selection.checked = chosenSources.has(source.source_id); selection.onchange = () => selection.checked ? chosenSources.add(source.source_id) : chosenSources.delete(source.source_id); selectionLabel.prepend(selection); card.append(selectionLabel);
           card.append(el('code', source.source_id, 'subject-id'), el('strong', `${source.subject_count} subjects · ${source.example_count} examples`));
           if (source.page_url) { const pages = sourceLinks([source.page_url]); const link = pages.querySelector('a'); if (link) { link.textContent = source.page_url; link.style.overflowWrap = 'anywhere'; } card.append(pages); }
           const open = sourceLink(source.source_id); open.textContent = `Open Source (${source.subject_count} subjects)`; card.append(open); cards.append(card);
@@ -218,7 +359,7 @@
       } catch (e) { if (current === serial && requestId === detailRequest) errorAt(message, e); }
     }
     multiple.addEventListener('change', () => search()); input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
-    root.append(label, filter, button('Search Sources', () => search(), 'subject-search-button'), message, cards, pages); await search(false);
+    root.append(label, filter, button('Search Sources', () => search(), 'subject-search-button'), message, cards, pages); sourceMergePanel(root, () => chosenSources); await search(false);
   }
 
   async function loadSource(sourceId) {
@@ -242,7 +383,8 @@
       selected.forEach(subject => { const option = el('option', `${name(subject)} · ${subject.subject_id}`); option.value = subject.subject_id; survivor.append(option); });
       if (selected.has(previous)) survivor.value = previous; keepField.hidden = selected.size < 2;
     }
-    root.append(browser, message);
+    sourceMergePanel(root, () => [sourceId]);
+    root.append(el('h2', 'Manual subject selection'), browser, message);
     browser.classList.add('source-subject-browser');
     lookup(browser, null, { load: true, sourceId, selection: selected, selectionTools: tools, onSelection: selectionChanged, onCard: async (card, subject) => {
       try {

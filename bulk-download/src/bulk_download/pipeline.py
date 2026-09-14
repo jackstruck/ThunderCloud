@@ -4,7 +4,6 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config
 from .fetch import Fetcher
 from .resolvers import anchor_links, player_referer, video_url
 from .urls import UnsafeUrl, luluvid_fetch_url, require_stage
@@ -18,6 +17,11 @@ class Discovery:
     media_url: str
     uid: str
     media_referer: str | None = None
+
+
+    @property
+    def page_url(self) -> str:
+        return self.luluvid_url
 
 
 class DiscoveryFailure(RuntimeError):
