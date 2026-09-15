@@ -1,6 +1,7 @@
 # Platform architecture
 
-This describes the consolidated release deployed on 2026-09-10, using schema 024.
+This describes the consolidated framework with schema 026. The original cutover
+used schema 024; subsequent releases added exact-content reuse and exclusions.
 See [cutover results and acceptance status](docs/platform-cutover-review.md).
 
 ## Inputs and processing
@@ -20,10 +21,12 @@ this release.
 SCRFD detection, ByteTrack tracking, and fixed AdaFace embeddings produce face
 tracks and aggregate embeddings. These are inference operations, not model training.
 Search compares compatible subjects and records similarity-ranked snapshots.
-Enrollment creates new subjects from manually selected groups or, for unattended
+For new content, enrollment creates subjects from manually selected groups or, for unattended
 `all_tracks` selection, one subject per detected track. Stable assignment IDs and
 unique example origins prevent duplicate enrollment after retries. Similarity does
 not decide enrollment ownership; explicit corrections move examples or merge subjects.
+Verified exact-content repeats reuse existing enrollment across source URLs; the
+first enrollment selection remains authoritative.
 
 ## Ownership and evidence
 
@@ -35,7 +38,9 @@ Runtime membership and model resolution use the normalized example directly.
 
 `subject` holds derived counts and canonical embeddings, optional identity labels,
 row versions, and merge redirects. Representations normalize each contributing
-example, sum the vectors, then normalize the aggregate. Galleries link to examples
+active example, sum the vectors, then normalize the aggregate. Disabled examples
+retain their evidence but do not contribute; excluded subjects are omitted from
+new matching. Galleries link to examples
 and exact object generations. Corrections change example ownership and recalculate
 affected subjects transactionally. Browsing, edits, moves, merges, and the correction
 CLI share the subject-management service, version checks, and idempotent correction

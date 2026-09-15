@@ -74,8 +74,9 @@ The worker uses the developer IAM database user after bootstrap; it does not use
 
 `scripts/run_local.sh` delegates to `data-submit`; it accepts the same `prepare`
 and `submit` arguments shown below. The optional container wrapper uses the same
-receipt CLI and developer ADC. Keep receipts in `private-receipts/` (or the explicit
-`DATA_RECEIPT_DIR` (legacy `FACE_RECEIPT_DIR` also works)) so the wrapper can write them durably. It submits work to the
+receipt CLI and developer ADC. Keep receipts in `private-receipts/` or set
+`DATA_RECEIPT_DIR` so the wrapper can write them durably; legacy `FACE_RECEIPT_DIR`
+also works. It submits work to the
 managed jobs; it does not run a separate archive enrollment writer.
 
 ## Ephemeral local probes
@@ -123,6 +124,78 @@ for the PostgreSQL and browser suite. Its fixtures require a disposable database
 checks do not establish acceptance. The release's completed validation is recorded
 in the cutover review.
 
+## Immutable archive uploads
+
+If another trusted ingestion system already wrote the object with the same CSEK, skip
+to the metadata requirements below. Otherwise, the following example uploads a local
+file without printing or passing the CSEK value in an argument or environment variable.
+It refuses to overwrite an existing object by requiring generation zero.
+
+Set only the non-secret source path and destination object name:
+
+```bash
+cd /workspaces/ThunderCloud/data-batch-gcp-scaffold
+. .venv/bin/activate
+export NEW_VIDEO_PATH=/absolute/path/to/new-video.mp4
+export NEW_VIDEO_OBJECT=videos/new-video.mp4
+```
+
+Run the upload. The script reads the existing local CSEK file directly and prints only
+non-secret provenance needed for enqueueing:
+
+```bash
+python - <<'PY'
+import hashlib
+import json
+import mimetypes
+import os
+from pathlib import Path
+
+from google.cloud import storage
+from worker.storage import has_customer_encryption, load_csek
+
+project = "teak-banner-dome"
+bucket_name = "teak-banner-dome-bulk-videos"
+source = Path(os.environ["NEW_VIDEO_PATH"]).resolve(strict=True)
+object_name = os.environ["NEW_VIDEO_OBJECT"]
+if not object_name.startswith("videos/") or object_name.endswith("/"):
+    raise ValueError("NEW_VIDEO_OBJECT must be a file under videos/")
+
+digest = hashlib.sha256()
+with source.open("rb") as handle:
+    for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+        digest.update(chunk)
+
+key = load_csek(Path("/workspaces/ThunderCloud/.secrets/gcs-csek.base64"))
+client = storage.Client(project=project)
+blob = client.bucket(bucket_name).blob(object_name, encryption_key=key)
+content_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+blob.upload_from_filename(
+    source,
+    content_type=content_type,
+    if_generation_match=0,
+)
+blob.reload()
+if not has_customer_encryption(blob):
+    raise RuntimeError("uploaded object does not report customer-supplied encryption")
+
+print(json.dumps({
+    "object": f"gs://{bucket_name}/{object_name}",
+    "sha256": digest.hexdigest(),
+    "bytes": int(blob.size),
+    "generation": int(blob.generation),
+    "content_type": blob.content_type,
+}, separators=(",", ":")))
+PY
+```
+
+Keep the printed provenance with the ingestion record. Treat the object as immutable;
+to replace content, upload it under a new object name and UID.
+
+Continue with [archive submission](#submit-archive-objects-through-the-common-run-framework)
+using the recorded provenance. Receipt retries, batch limits, and run monitoring are
+documented there.
+
 ## Submit archive objects through the common run framework
 
 These commands submit to the deployed common framework.
@@ -149,8 +222,9 @@ data-submit submit --receipt private-receipts/source.json
 Set `--page-url` when external attribution is available. Choose handling explicitly:
 `search_then_discard`, `enroll_only`, or `retain_and_enroll`. Choose `manual` for
 interactive selection or `all_tracks` for unattended processing; unattended enrollment
-creates one new subject per detected track. Original archive objects are preserved
-under every policy.
+creates one new subject per detected track for new content. Exact-content repeats
+reuse existing enrollment; see [duplicate handling](#exact-content-enrollment-reuse-and-alternate-urls).
+Original archive objects are preserved under every policy.
 
 If submission loses its acknowledgement, submit the same receipt again. Its stable
 request key resolves to the same run. Do not recreate the receipt. For a selected
@@ -167,8 +241,9 @@ PNG, or MP4 uploads. Enabled policies are `search_then_discard`, `retain_and_enr
 and `enroll_only`. Recent runs, run recovery, cancellation, retries, face selection,
 and subject-gallery views are available through the IAP-protected console.
 
-Current retention and security behavior is described in `ARCHITECTURE.md`. The initial
-Current cutover evidence is in `docs/platform-cutover-review.md`; dated release records remain under `docs/history/`.
+Retention and security design is in [Architecture](ARCHITECTURE.md).
+[Cutover evidence](docs/platform-cutover-review.md) and dated records under
+`docs/history/` describe completed releases.
 
 Apply the additive schema and grants before enabling the service:
 
@@ -200,10 +275,11 @@ Both enrollment policies publish representative gallery images, with up to five
 active images per subject. Apply the complete ordered migrations and shared grants;
 never initialize a current deployment from one historical migration alone.
 
-`enroll_only` creates new subjects and removes temporary media. `retain_and_enroll`
-records pre-enrollment candidates, creates new subjects, and retains the exact source
-under CSEK-encrypted `training-media/`. Similarity never assigns enrollment to an
-existing subject. Managed sources may later be tombstoned through
+For new content, `enroll_only` creates subjects and removes temporary media.
+`retain_and_enroll` also records pre-enrollment candidates and retains the source
+under CSEK-encrypted `training-media/`. Exact-content repeats reuse existing enrollment;
+see [duplicate handling](#exact-content-enrollment-reuse-and-alternate-urls).
+Similarity never assigns enrollment to an existing subject. Managed sources may later be tombstoned through
 `DELETE /api/sources/{source_id}` without removing derived lineage. Historical gallery
 repair is a separate deliberate maintenance operation.
 
@@ -229,9 +305,10 @@ historical repeat-mode execution is not part of normal operations. Preserve the
 append-only acquisition manifest, immutable image pins, Cloud SQL backups, Terraform
 state, CSEK material, and archive/gallery objects.
 
-Historical commands and selections are archived in `docs/history/`. Never replay the
-completed corpus selection as a new rollout. `FUTURE_VIDEOS.md` contains the detailed
-immutable upload and explicit enqueue procedure.
+Dated release evidence remains in `docs/history/`; removed historical selections
+remain in Git history and must not be replayed as new work. Use
+[immutable archive uploads](#immutable-archive-uploads) and
+[archive submission](#submit-archive-objects-through-the-common-run-framework) above.
 
 ## Delivery evidence
 
@@ -341,7 +418,7 @@ have been handed off; the ordinary processor finishes accepted runs independentl
 Acquisition failures are retained in the checkpoint for review rather than
 silently retried forever. New transfers respect the processor's 250 MiB media cap.
 
-The active batch checkpoint is
+The checkpoint for the September 14 batch is
 `gs://teak-banner-dome-bulk-videos/batch-control/hotscope-20260914/state.json`.
 It contains the selected URLs, acquisition manifest, stable submission receipts,
 explicit handling policy, operator principal, and status counters. It is encrypted

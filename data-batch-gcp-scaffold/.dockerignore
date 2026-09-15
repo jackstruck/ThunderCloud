@@ -1,11 +1,39 @@
+# Repository and infrastructure state
 .git
 .terraform
+**/.terraform
 *.tfstate*
+**/*.tfstate*
+*.tfplan
 terraform.tfvars
+**/terraform.tfvars
+
+# Local environments, credentials, and retained operator artifacts
 .env
+.env.*
 .venv
-__pycache__
-*.pyc
-tests
+.test-venv
+.local
+data
+private-receipts
 **/.secrets
 **/gcs-csek.base64
+
+# Regenerable build and test outputs
+build
+dist
+*.egg-info
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+__pycache__
+**/__pycache__
+*.pyc
+**/*.pyc
+*.log
+Screenshot*
+tests
+
+# Keep models/ and scripts/: the GPU image explicitly copies verified models.
+# Maintenance builds use a separately staged context containing their tests.

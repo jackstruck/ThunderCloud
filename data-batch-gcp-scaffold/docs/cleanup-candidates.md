@@ -1,67 +1,46 @@
-# Repository cleanup candidates
+# Repository cleanup record
 
-Reviewed 2026-09-15. Following user approval, the documentation and completed
-selection files in the table below were deleted, along with the ignored local
-acquisition plan. The Python scripts remain pending a separate code-removal decision. Evidence comes from tracked-file references, entry points,
-imports, and the current run framework. An absence of repository references does
-not prove a script is unused by an external operator.
+Reviewed and applied on 2026-09-15 with user approval. `.local/` and `data/`
+were excluded from cleanup; their contents and retention are unchanged.
 
-## Documentation removed and remaining code candidate
+## Removed
 
-| Paths (relative to this application) | Evidence | Suggested treatment |
-| --- | --- | --- |
-| `docs/history/IMPLEMENTATION_PLAN.md`, `docs/history/BULK_DOWNLOAD_BACKFILL_PLAN.md`, `docs/history/planning.md`, `docs/history/phase1-review.md` | The history index explicitly marks the original plans and review as historical, not current operating instructions. | Remove if Git history is sufficient; retain the index and useful release evidence. |
-| `docs/history/selections/cloud-run-controlled-r4.txt`, `cloud-run-remaining-20260902.txt`, `cloud-run-termination-test-r4.txt` (all in that same directory) | Completed historical selections, explicitly not to be replayed according to `selections/README.md`. No current code references found. | Remove together if their audit value is covered by Git history; update the selection/history indexes. |
-| `docs/history/source-split-20260909.py` | An archived one-off correction script. It imports `reconcile_gallery`, which is no longer defined in `worker.subject_management`. No current launcher or test references found. | Strong code-deletion candidate. Keep its historical narrative if needed; do not treat it as a supported tool. |
-| `docs/phase1-review.md` | A forwarding document containing only a link to the archived review and current guides. No incoming tracked references found. | Remove if preserving old external bookmarks is unnecessary. |
-| `commands.md` | A short forwarding page to `OPERATIONS.md` and `FUTURE_VIDEOS.md`. | Optional deletion; small navigation convenience rather than obsolete implementation. |
+| Files | Reason |
+| --- | --- |
+| `docs/history/IMPLEMENTATION_PLAN.md`, `BULK_DOWNLOAD_BACKFILL_PLAN.md`, `planning.md`, `phase1-review.md` (all under `docs/history/`) | Superseded plans and initial review. Tracked originals remain in Git history. |
+| The three `docs/history/selections/cloud-run-*.txt` lists | Completed historical selections, not current work queues. |
+| `docs/phase1-review.md`, `commands.md` | Redundant forwarding documents. |
+| The ignored root `docs/design/hotscope-acquisition.md` | Superseded local acquisition plan; it was not tracked in Git. |
+| `docs/history/source-split-20260909.py` | One-off archived script importing the removed `reconcile_gallery` helper. |
+| `scripts/select_remaining.py` | Historical selector using `processing_job` rather than current `media_run` records. No active repository caller, matching process, or user-cron reference found; remaining references were historical reports. |
+| `FUTURE_VIDEOS.md` | Its unique immutable-upload instructions moved to `OPERATIONS.md`; receipt submission, retries, and monitoring already existed there. |
+| `build/`, `thundercloud_face_batch.egg-info/`, `.pytest_cache/`, `.ruff_cache/` | Regenerable build outputs, obsolete package metadata, and caches. The current editable package metadata and environment were retained. |
 
-The suggested treatments above record the original review; documentation removal
-is now complete. The archived Python script was retained because this approval
-covered documentation.
+The absence of local callers cannot establish whether an external operator holds a
+copy of an old script. The removed tracked code remains recoverable from Git history.
+Historical release notes retain their original descriptions of these scripts.
 
-## Candidate requiring an operator check
+## Consolidated
 
-`scripts/select_remaining.py` compares manifest items against successful historical
-`processing_job` records. Current submissions use the common run framework, whose
-records live in `media_run`. The script has no tracked caller or tests and is not
-listed in the current operating guide. The historical table still exists, so this
-is not a broken-table claim; it can give an incomplete view of processing performed
-through the current framework. Confirm no external operator still uses it before
-removing it. Do not use it to decide whether current runs need to be replayed.
+- `README.md` is the starting point and links to the authoritative guides.
+- `OPERATIONS.md` owns installation, uploads, submission, deployment, and recovery.
+- `ARCHITECTURE.md` describes components, ownership, and current schema 026 behavior.
+- `ROADMAP.md` separates completed capabilities from remaining operational work;
+  duplicate enrollment and registry cleanup are no longer described as future work.
 
-## Historical evidence worth retaining selectively
+## Build context exclusions
 
-The dated `docs/history/2026-*.md` release notes are historical, but contain deployed
-image digests, verification results, cutover decisions, and rollback context.
-Keep the recent deployment/cutover records; older records can be pruned after deciding
-how much operational history should remain in the checkout. The current history
-index links the active architecture, operations, and roadmap documents.
+`.dockerignore` now excludes local virtual environments, generated package/build
+files, test caches, operator data and receipts, local environment files, and nested
+Terraform state. Required model files and verification scripts remain included for
+the GPU Dockerfile. Maintenance builds use their own explicitly staged context,
+including tests, and do not copy this `.dockerignore`.
 
-The ignored local `docs/design/hotscope-acquisition.md` plan was also deleted.
-It was not a runtime dependency. Unlike the tracked documents, this local plan
-is not recoverable from repository history.
+## Preserved
 
-## Keep: old names do not mean dead code
-
-- `migrations/001_*.sql` through `026_*.sql`, the bootstrap schema, migration tests,
-  and `maintenance/`: required for reproducible database setup, checksum validation,
-  upgrades, and preservation checks. Do not delete historical migrations.
-- `openapi/phase1.yaml`: the filename is old, but it is the linked API contract and
-  includes current matching-exclusion endpoints.
-- `worker/manifest.py`: still used by submission/acquisition code; the historical
-  selector being a deletion candidate does not make its dependencies obsolete.
-- `scripts/run_local.sh` and `scripts/run_local_container.sh`: current documented
-  wrappers. Short wrappers are not automatically dead code.
-- Model/provenance checks, integration tests, and database history tables: retain
-  until a separate dependency and retention review establishes a safe change.
-- Ignored `.env`, `.secrets`, Terraform state, models, manifests, private receipts,
-  and `data/history/`: operational or sensitive state, outside this deletion review.
-
-## Documentation drift found
-
-The main README and operations guide still described schema 024 as current; they
-now identify schema 026. The roadmap still contains older acceptance and rollout
-items, so it should be reconciled against current evidence before deleting it or
-using it as a current work queue. In particular, exact duplicate enrollment and
-registry cleanup are implemented in later releases.
+- `.local/`, `data/`, private receipts, manifests, models, keys, and Terraform state.
+- Database migrations, bootstrap schema, maintenance tooling, and migration tests.
+- `openapi/phase1.yaml`, which remains the current linked API contract.
+- Shared manifest parsing and the documented local submission wrappers.
+- Dated release/cutover records containing verification and rollback evidence.
+- Deployed cloud resource names, database identifiers, and application behavior.
