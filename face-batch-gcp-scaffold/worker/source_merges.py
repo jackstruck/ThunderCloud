@@ -109,7 +109,7 @@ class SourceMerges:
         cursor.execute('''SELECT s.subject_id,s.canonical_embedding::text,s.sample_count,s.model_version,
             s.row_version,s.merged_into_subject_id,
             count(DISTINCT e.source_id),bool_and(e.source_id=%s),
-            count(e.example_id),min(e.start_ms),max(e.end_ms),bool_and(e.model_version=s.model_version)
+            count(e.example_id) FILTER (WHERE e.disabled_at IS NULL),min(e.start_ms),max(e.end_ms),bool_and(e.model_version=s.model_version),s.matching_excluded
             FROM subject s LEFT JOIN subject_example e USING(subject_id)
             WHERE (%s::uuid[] IS NOT NULL AND s.subject_id=ANY(%s::uuid[])) OR
               (%s::uuid[] IS NULL AND s.merged_into_subject_id IS NULL AND EXISTS
@@ -122,11 +122,13 @@ class SourceMerges:
                                f'Source exceeds {MAX_SUBJECTS} subjects / {MAX_COMPARISONS} comparisons; a bounded background scan is required. Nothing was partially scanned.')
         members, skipped = [], []
         summaries = {m['subject_id']: m for m in self.subjects._summaries(cursor, [str(r[0]) for r in rows])}
-        for sid, embedding, samples, model, version, merged, sources, same, count, start, end, same_model in rows:
+        for sid, embedding, samples, model, version, merged, sources, same, count, start, end, same_model, excluded in rows:
             sid = str(sid)
             reason = None
             if merged is not None:
                 reason = 'subject_merged'
+            elif excluded:
+                reason = 'subject_excluded'
             elif sources != 1 or not same:
                 reason = 'multi_source' if sources > 1 else 'source_membership_changed'
             elif not same_model:

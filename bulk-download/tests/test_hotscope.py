@@ -16,7 +16,7 @@ from bulk_download.download import (
     _media_playlist,
     _validate_hls,
 )
-from bulk_download.hotscope import discover_users, resolve_video, user_name, video_id
+from bulk_download.hotscope import discover_videos, discover_users, resolve_video, user_name, video_id
 from bulk_download.manifest import append, completed_urls
 from bulk_download.storage import StorageAdapter
 
@@ -85,6 +85,54 @@ class HotscopeTests(unittest.TestCase):
         _, failures = discover_users(fetcher, ['alice', 'bob'], set(), None, 5)
         self.assertEqual(len(failures), 1)
         self.assertEqual(fetcher.html.call_count, 2)
+
+    def test_direct_links_deduplicate_resume_and_continue_after_failure(self):
+        fetcher = Mock()
+        fetcher.restricted_to.return_value = nullcontext()
+        fetcher.html.side_effect = [
+            (html([video('two', 'bob')]), 'https://hotscope.tv/video/two'),
+            (html([]), 'https://hotscope.tv/video/missing'),
+            (html([video('three', 'carol')]), 'https://hotscope.tv/video/three'),
+        ]
+        found, failures = discover_videos(fetcher,
+            ['one', 'https://hotscope.tv/video/two', 'two', 'missing', 'three'],
+            {'https://hotscope.tv/video/one'})
+        self.assertEqual([item.username for item in found], ['bob', 'carol'])
+        self.assertEqual([item.provider_id for item in found], ['two', 'three'])
+        self.assertEqual([failure.code for failure in failures], ['no_full_video'])
+        self.assertEqual(fetcher.html.call_count, 3)
+        self.assertTrue(all('/video/' in call.args[0] for call in fetcher.html.call_args_list))
+
+    def test_direct_video_rejects_conflicting_owners(self):
+        fetcher = Mock()
+        fetcher.html.return_value = (html([video(), video(username='bob')]),
+                                     'https://hotscope.tv/video/one')
+        with self.assertRaisesRegex(RuntimeError, 'conflicting'):
+            resolve_video(fetcher, 'one')
+
+    @patch('bulk_download.cli.load_config')
+    @patch('bulk_download.cli.Fetcher')
+    @patch('bulk_download.cli.discover_videos', return_value=([], []))
+    def test_cli_file_without_users_uses_direct_discovery(self, discover, fetcher, config):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'links.txt'
+            path.write_text('\ufeff# links\nhttps://hotscope.tv/video/one\n\n')
+            self.assertEqual(main(['discover', '--videos-file', str(path)]), 0)
+            self.assertEqual(discover.call_args.args[1], ['https://hotscope.tv/video/one'])
+            self.assertEqual(main(['discover', '--video-url', 'https://hotscope.tv/video/two']), 0)
+            self.assertEqual(discover.call_args.args[1], ['https://hotscope.tv/video/two'])
+
+    @patch('bulk_download.cli.load_config')
+    def test_invalid_or_empty_video_list_fails_before_storage(self, config):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'links'
+            for content in ['# empty\n', 'https://example.test/video/one\n']:
+                path.write_text(content)
+                with patch('bulk_download.cli.StorageAdapter') as storage:
+                    self.assertEqual(main(['run', '--videos-file', str(path)]), 2)
+                    storage.assert_not_called()
+                    self.assertEqual(main(['run', '--user', 'alice', '--videos-file', str(path)]), 2)
+                    storage.assert_not_called()
 
     def test_manifest_reads_legacy_and_new_completed_records(self):
         with tempfile.TemporaryDirectory() as root:

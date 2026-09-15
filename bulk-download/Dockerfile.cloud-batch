@@ -1,0 +1,7 @@
+FROM us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/console@sha256:34bc2ff7f78592d70904ae1fd06e808fbd925084189798b3e4bf12a255d66de8
+USER root
+COPY bulk-download /app/bulk-download
+RUN /opt/venv/bin/python -m pip install /app/bulk-download
+COPY acquisition_batch.py /app/worker/acquisition_batch.py
+USER console
+CMD ["/opt/venv/bin/python", "-u", "-m", "worker.acquisition_batch"]

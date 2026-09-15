@@ -182,22 +182,8 @@ class InteractiveProcessor:
             )
             enrollment_source = None
             if policy in {"retain_and_enroll", "enroll_only"}:
-                if policy == "retain_and_enroll":
-                    enrollment_source = self.repository.retained_source(claimed.sha256)
-                if enrollment_source is None:
-                    source_id = str(
-                        uuid.uuid5(uuid.NAMESPACE_URL, f"face-run:{run_id}")
-                    )
-                    enrollment_source = (
-                        (
-                            source_id,
-                            *self.storage.promote_temporary(
-                                source_id, claimed.object_name, claimed.generation
-                            ),
-                        )
-                        if policy == "retain_and_enroll"
-                        else (source_id, None, None, None)
-                    )
+                source_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"face-run:{run_id}"))
+                enrollment_source = (source_id, None, None, None)
             if enrollment_source is None:
                 return self.repository.complete_matching(
                     run_id, owner, groups, rankings
@@ -211,6 +197,11 @@ class InteractiveProcessor:
                 source_bucket=self.storage.bucket_name,
                 model_version=self.settings.embedding_model_version,
                 publish_representative=self._publish_representative,
+                promote_source=(
+                    lambda source_id: self.storage.promote_temporary(
+                        source_id, claimed.object_name, claimed.generation
+                    )
+                ) if policy == "retain_and_enroll" else None,
             )
         except (RuntimeError, ValueError, GoogleAPIError, OSError):
             self.repository.fail(run_id, "matching", "matching_failed", True)

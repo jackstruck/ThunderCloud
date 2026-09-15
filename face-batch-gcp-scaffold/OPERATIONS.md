@@ -291,3 +291,162 @@ No database migration or extra cloud service is required. Code-level verificatio
 includes the URL API, resolver, transport restrictions, generated HLS media,
 ingestion advancement, and a live acquisition of the previously tested Hotscope
 video; deployment and live processing are separate rollout steps.
+
+## Container image retention
+
+As of 2026-09-14, Artifact Registry deletes unprotected versions older than seven
+days (previously 30). KEEP rules take precedence: the newest five versions per
+image package and explicitly pinned deployed/rollback digests remain protected.
+The latest deployed console digest was added to the live keep list, and the
+previous ingestion digest remains a rollback pin in local Terraform inputs.
+
+Cleanup runs asynchronously, usually taking effect within about a day. Docker
+child manifests remain protected while referenced by a retained parent manifest;
+removing a parent can require another cleanup cycle before its children disappear.
+Shared layers mean manifest sizes cannot be summed to predict reclaimed storage.
+Check repository-size metrics after cleanup before reporting realized savings.
+
+On every deployment, update the live keep policy as well as the Terraform image
+pin. Updating a Cloud Run image alone does not update Artifact Registry retention.
+
+### Submit a specific link from a text list
+
+The New search page accepts individual HTTPS media or supported video-page URLs.
+Expand **Choose a link from a text file**, select a `.txt` export with one HTTPS
+URL per line, and choose the desired video from the list. The chosen URL fills
+the existing link form; choose the handling policy and press **Start link search**.
+Importing a list does not submit runs. Blank lines and `#` comments are ignored,
+duplicates are removed, and invalid lines are reported before any list is loaded.
+Lists are limited to 10,000 unique URLs and 2 MiB. The file is read in the browser;
+only the explicitly submitted URL is sent to the platform. Source validation and
+the existing per-user run limits still apply.
+
+For download-only acquisition into encrypted GCS storage, run from `bulk-download`:
+
+```bash
+.venv/bin/bulk-download run --videos-file input/hotscope_videos.txt
+```
+
+This CLI mode resolves specific videos without usernames and does not submit
+platform processing runs. Add `--user` or `--users-file` only when filtering a
+user's listing with the supplied video selection.
+
+### Cloud acquisition batch
+
+The `face-acquisition-batch` Cloud Run job runs explicit video acquisition and
+archive handoff without a local workspace. Its pinned image includes the bulk
+CLI and `worker.acquisition_batch`. The job has one CPU, 2 GiB RAM, one task,
+three task retries, and a seven-day timeout. It exits once all acquired sources
+have been handed off; the ordinary processor finishes accepted runs independently.
+Acquisition failures are retained in the checkpoint for review rather than
+silently retried forever. New transfers respect the processor's 250 MiB media cap.
+
+The active batch checkpoint is
+`gs://teak-banner-dome-bulk-videos/batch-control/hotscope-20260914/state.json`.
+It contains the selected URLs, acquisition manifest, stable submission receipts,
+explicit handling policy, operator principal, and status counters. It is encrypted
+with the same CSEK as the archive. The key comes from Secret Manager at runtime;
+neither the key nor the selected URLs are included in the image. Generation
+preconditions protect checkpoint writes. Do not start overlapping executions or
+restart the local writers after cloud cutover. Cloud task retries load the same
+checkpoint and reuse the original request keys; immutable archive objects are
+recovered if an upload finished before its checkpoint was saved.
+
+For monitoring, use the Cloud Run execution and Cloud Logging. Decrypt the exact
+checkpoint with the existing CSEK to inspect `status` or download updated manifests
+and receipts. Local `data/manifest.jsonl` and local dispatch status stop updating
+at cutover and must not be treated as the current cloud progress. On retries, use
+the existing state object rather than creating a new batch or new receipts.
+
+The cloud runner keeps the original operator principal for console visibility,
+uses `all_tracks` selection, and observes the existing three-active-run quota.
+It skips objects already present in the processor by bucket/object/generation.
+The runtime gains archive **create** permission and access to this batch's
+checkpoint prefix; it gains no new archive overwrite or delete permission.
+Terraform in `acquisition_batch.tf` manages the job and scoped permissions, and
+the registry cleanup policy protects the configured batch image.
+
+### Browse controls and privacy view
+
+Subjects support ID order, most sources, most examples, and newest first, plus
+single/multiple-source and named/unnamed filters. Sources support ID order, most
+subjects, most examples, and newest first, plus origin website filtering. Newest
+means the platform record's creation time. Website filters accept a hostname or
+URL, normalize case and the `www.` prefix, and match the exact normalized host.
+Existing multiple-subject and shared-source filters remain available.
+
+Sort/filter choices persist in the page URL. Changing them resets pagination;
+count/date sorts use a numeric value plus UUID tie-breaker in their cursor.
+The original ID cursor and older subject source-count cursors remain accepted.
+
+The eye icon left of the theme control toggles privacy view. Gallery images turn
+solid grey, including images loaded after the toggle. The preference is local to
+the browser and is applied from a small head script before galleries render.
+
+### Exact-content enrollment reuse and alternate URLs
+
+Both enrollment policies now check verified SHA-256 content under the enrollment
+transaction lock. If any examples already exist for the content, a new run reuses
+those subjects and creates no subjects, examples, or gallery images. This applies
+across policies and URLs, including concurrent submissions. Retain and enroll
+promotes media only when no active managed copy exists; it can add retention to a
+source previously enrolled without retaining the full media. The first enrollment's
+selection remains authoritative: submitting the same video with a different selection
+does not add tracks. Re-encoded content with different bytes is a separate source.
+Existing duplicate subjects are not automatically merged by this change.
+
+Migration 025 adds URL provenance by content hash and backfills source URLs and
+completed enrollment-run URLs. Sources and subjects expose all known links, and
+source URL/hostname searches include aliases. Duplicate run results explicitly show
+existing enrollment and follow current example membership after merges. Cloud bulk
+acquisition records every verified acquired URL even when an archived object is
+already handed off. Apply the migration and updated db_grants.sql before updating
+the console, GPU worker, ingest job, and acquisition job images.
+
+After matching-group application, source manual selection is cleared and reloaded
+from the server; source-list counts also refresh. Saved group outcomes remain
+available for review and uncertain-operation retries.
+
+### Potential-match query planning
+
+Potential-match searches load the origin's version, model and vector once in the
+same repeatable-read transaction, then rank candidates by cosine distance against
+those constant values. This permits the existing subject_embedding_hnsw index;
+a subject-to-subject join with descending `1 - distance` forced a full-library scan.
+Normal suggestions use pgvector's approximate HNSW search with ef_search=40 and
+strict ordered iterative scanning past filtered, merged, or dismissed candidates.
+UUIDs break equal-distance ties. The dismissed view keeps exact filtering/ranking
+so previously dismissed subjects remain visible even outside the nearest neighbors.
+
+On subject efab0ba9-c4cc-4566-aaca-f657413f89d2, the previous ranking query exceeded
+25 seconds and the UI hit its 30-second request timeout. The updated complete request
+returned ten candidates, galleries and URLs in 6.72 seconds through a public IAM SQL
+connection during validation. No database resizing or timeout increase was required.
+
+### Subject exclusions and disabled examples
+
+Migration 026 adds reversible subject matching exclusions and per-example disabling
+(Not a face / Unusable face). Excluded subjects are omitted from new matching,
+potential matches, source merge proposals, and default subject browsing. Use Include
+excluded in the subject library or source/manual subject picker to find them; direct
+subject URLs remain accessible. Restore matching clears only the explicit subject
+flag. A subject with zero active examples remains ineligible until an example is
+restored. No model training or media deletion occurs.
+
+On subject pages, individual examples offer Not a face / Unusable face / Restore
+example. Selected examples can be disabled/restored together (maximum 1,000). The
+whole example/track embedding is disabled, not merely its displayed crop. Recalculation
+uses only active examples; disabled examples retain their original embedding,
+provenance, preview, reason, actor and timestamp. Past-run scores and enrollment
+evidence remain unchanged; current candidate galleries omit disabled examples.
+
+The operations use subject-version checks, an audit record and idempotent operation
+IDs under the same transaction lock as enrollment and merges. Any excluded merge
+member makes the resulting subject excluded, regardless of the survivor. Moves and
+splits conservatively inherit exclusion; disabled flags travel with examples. Explicit
+restoration is needed to reactivate them. Duplicate-content enrollment does not
+reactivate disabled examples or excluded subjects. Maintenance invariants and
+preservation receipts now account for active examples and capture exclusion flags.
+
+Apply migration 026 before deploying the console and worker images. Existing values
+default to active/not excluded. Roll out processing workers before the new UI controls.

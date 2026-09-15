@@ -2313,3 +2313,258 @@ def test_source_merge_rolls_back_mutation_and_persists_definitive_failure(db):
     assert planner.apply(source, plan, 'tester') == result
     assert len(sql(db, 'SELECT * FROM subject_change_event WHERE operation_id=%s', (group['operation_id'],))) == 1
     assert service.merge_members(group['survivor_id'])['members'] == []
+
+
+def test_extended_browse_sorts_filters_and_tied_pagination(db):
+    service = SubjectManagement(db)
+    ids = [enroll(db, n)[0] for n in (2, 2, 1)]
+    sources = [service.sources(sid)['sources'][0]['source_id'] for sid in ids]
+    sql(db, "UPDATE subject SET created_at='2026-01-01' WHERE subject_id=ANY(%s::uuid[])", (ids,))
+    sql(db, "UPDATE subject SET created_at='2026-02-01' WHERE subject_id=%s", (ids[2],))
+    identity = sql(db, "INSERT INTO identity(display_name) VALUES ('Named example') RETURNING identity_id")[0][0]
+    sql(db, "UPDATE subject SET identity_id=%s WHERE subject_id=%s", (identity, ids[0]))
+    sql(db, "UPDATE source_asset SET created_at='2026-01-01',source_page_url='https://www.example.test/video' WHERE source_id=ANY(%s::uuid[])", (sources,))
+    sql(db, "UPDATE source_asset SET created_at='2026-02-01',source_page_url='https://other.test/video' WHERE source_id=%s", (sources[2],))
+    assert [r['subject_id'] for r in service.subjects(name_status='named')['subjects']] == [ids[0]]
+    assert {r['subject_id'] for r in service.subjects(name_status='unnamed')['subjects']} == set(ids[1:])
+    assert service.subjects(q=ids[0], name_status='unnamed')['subjects'] == []
+    assert len(service.subjects(source_scope='single')['subjects']) == 3
+    assert service.subjects(source_scope='multiple')['subjects'] == []
+    for fn, key, field, sorts in [(service.subjects,'subjects','subject_id',('id','sources','examples','newest')),
+                                 (service.browse_sources,'sources','source_id',('id','subjects','examples','newest'))]:
+        for sort in sorts:
+            full = fn(sort=sort)[key]
+            pages, cursor = [], None
+            while True:
+                page=fn(sort=sort,limit=1,after=cursor);pages+=page[key];cursor=page['next_cursor']
+                if not cursor: break
+                assert len(pages)<4
+            assert [r[field] for r in pages] == [r[field] for r in full]
+            assert len(pages)==3
+    assert service.subjects(sort='newest')['subjects'][0]['subject_id']==ids[2]
+    assert [r['example_count'] for r in service.subjects(sort='examples')['subjects']]==[2,2,1]
+    assert service.browse_sources(sort='newest')['sources'][0]['source_id']==sources[2]
+    for origin in ('example.test','WWW.EXAMPLE.TEST','https://www.example.test/a'):
+        assert {r['source_id'] for r in service.browse_sources(origin=origin)['sources']}==set(sources[:2])
+    assert service.browse_sources(origin='notexample.test')['sources']==[]
+    for fn,kwargs in [(service.subjects,{'name_status':'bad'}),(service.subjects,{'source_scope':'bad'}),
+                      (service.browse_sources,{'sort':'bad'}),(service.browse_sources,{'origin':'bad host'}),
+                      (service.subjects,{'sort':'newest','after':f'examples:2:{ids[0]}'})]:
+        with pytest.raises(SubjectError):fn(**kwargs)
+
+@pytest.mark.parametrize('first_policy,second_policy', [
+    ('enroll_only','enroll_only'),('enroll_only','retain_and_enroll'),
+    ('retain_and_enroll','enroll_only'),('retain_and_enroll','retain_and_enroll')])
+def test_duplicate_video_reuses_enrollment_and_all_source_urls(db,first_policy,second_policy):
+    sid, first, groups, _, storage = enroll(db,2,policy=first_policy)
+    digest = sql(db,'SELECT source_sha256 FROM media_run WHERE run_id=%s',(first,))[0][0]
+    source = sql(db,'SELECT retained_source_id FROM media_run WHERE run_id=%s',(first,))[0][0]
+    sql(db,"UPDATE source_asset SET source_page_url='https://first.example/video' WHERE source_id=%s",(source,))
+    second, selected = make_run(db,3,policy=second_policy)
+    sql(db,"UPDATE media_run SET source_sha256=%s,source_page_url='https://alias.example/other' WHERE run_id=%s",(digest,second))
+    repo = RunRepository(db)
+    repo.select(second,selected,1,[assignment(selected)])
+    worker, duplicate_storage = processor(db)
+    assert worker.match(second)
+    assert sql(db,'SELECT count(*) FROM subject')[0][0] == 1
+    assert sql(db,'SELECT count(*) FROM subject_example')[0][0] == 2
+    assert sql(db,'SELECT count(*) FROM source_asset')[0][0] == 1
+    assert not duplicate_storage.uploads
+    assert len(storage.promotions)+len(duplicate_storage.promotions) == (1 if 'retain_and_enroll' in (first_policy,second_policy) else 0)
+    results = repo.results(second)
+    assert results['enrollment_reused']
+    assert results['reused_enrollments'][0]['subject_id'] == sid
+    assert len(results['reused_enrollments'][0]['representative_faces']) == 2
+    assert all(g['enrollment'] is None for g in results['groups'])
+    service = SubjectManagement(db)
+    expected = ['https://alias.example/other','https://first.example/video']
+    assert service.browse_sources(q='alias.example')['sources'][0]['page_urls'] == expected
+    assert service.browse_sources(origin='alias.example')['sources'][0]['example_count'] == 2
+    assert service.subject(sid)['page_urls'] == expected
+    assert service.sources(sid)['sources'][0]['page_urls'] == expected
+    other, _, _, _, _ = enroll(db)
+    service.bulk_combine(other,{'operation_id':str(uuid.uuid4()),'version':service.subject(other)['version'],
+        'subjects':[{'subject_id':sid,'version':service.subject(sid)['version']}]},'tester')
+    reused = repo.results(second)['reused_enrollments']
+    assert [e['subject_id'] for e in reused] == [other]
+    assert len(reused[0]['representative_faces']) == 2
+
+
+def test_concurrent_duplicate_enrollment_creates_one_subject_and_retained_copy(db):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    repo=RunRepository(db)
+    first,g1=make_run(db,policy='retain_and_enroll')
+    second,g2=make_run(db,policy='retain_and_enroll')
+    digest=sql(db,'SELECT source_sha256 FROM media_run WHERE run_id=%s',(first,))[0][0]
+    sql(db,'UPDATE media_run SET source_sha256=%s WHERE run_id=%s',(digest,second))
+    repo.select(first,g1,1,[assignment(g1)])
+    repo.select(second,g2,1,[assignment(g2)])
+    workers=[processor(db),processor(db)]
+    barrier=Barrier(2)
+    def match(index,run):
+        barrier.wait(timeout=10)
+        return workers[index][0].match(run)
+    with ThreadPoolExecutor(2) as pool:
+        jobs=[pool.submit(match,0,first),pool.submit(match,1,second)]
+        assert all(job.result(timeout=30) for job in jobs)
+    assert sql(db,'SELECT count(*) FROM subject')[0][0]==1
+    assert sql(db,'SELECT count(*) FROM subject_example')[0][0]==1
+    assert sum(len(storage.promotions) for _,storage in workers)==1
+    assert sql(db,'SELECT count(*) FROM media_run WHERE enrollment_reused')[0][0]==1
+
+
+def test_same_url_with_different_content_still_enrolls(db):
+    first,g1=make_run(db)
+    second,g2=make_run(db)
+    repo=RunRepository(db)
+    for run,groups in [(first,g1),(second,g2)]:
+        sql(db,"UPDATE media_run SET source_page_url='https://media.example/shared' WHERE run_id=%s",(run,))
+        repo.select(run,groups,1,[assignment(groups)])
+        worker,_=processor(db)
+        assert worker.match(run)
+        assert not repo.results(run)['enrollment_reused']
+    assert sql(db,'SELECT count(*) FROM subject')[0][0]==2
+
+
+def test_potential_matches_can_use_vector_index_and_fill_filtered_results(db):
+    origin=enroll(db)[0]
+    # More than the default HNSW search window of closer, incompatible subjects.
+    for i in range(60):
+        sql(db,"INSERT INTO subject(subject_id,model_version,sample_count,canonical_embedding) VALUES (%s,'other',1,%s::vector)",
+            (str(uuid.uuid4()),pgvector(vector(0))))
+    eligible=[enroll(db,angle=.1)[0] for _ in range(12)]
+    plans=[]
+    class PlanCursor:
+        def __init__(self,cursor):self.cursor=cursor
+        def execute(self,query,args=()):
+            if 'SELECT candidate.subject_id' in query:
+                self.cursor.execute('SET LOCAL enable_seqscan=off')
+                self.cursor.execute('SET LOCAL enable_sort=off')
+                self.cursor.execute('EXPLAIN (FORMAT JSON) '+query,args)
+                plans.append(json.dumps(self.cursor.fetchone()[0]))
+            return self.cursor.execute(query,args)
+        def __getattr__(self,key):return getattr(self.cursor,key)
+    class PlanConnection:
+        def __init__(self,c):self.c=c
+        def cursor(self):return PlanCursor(self.c.cursor())
+        def __getattr__(self,key):return getattr(self.c,key)
+    class PlanDatabase:
+        def connect(self):return PlanConnection(db.connect())
+    result=SubjectManagement(PlanDatabase()).potential_matches(origin)
+    assert 'subject_embedding_hnsw' in plans[0]
+    assert len(result['candidates'])==10
+    assert {c['subject_id'] for c in result['candidates']} <= set(eligible)
+    assert [c['subject_id'] for c in result['candidates']] == sorted(eligible)[:10]
+
+    far=enroll(db,angle=1.3)[0]
+    service=SubjectManagement(db)
+    service.suggestion_dismissal(origin,far,{'operation_id':str(uuid.uuid4()),
+        'version':service.subject(origin)['version'],'target_version':service.subject(far)['version']},'tester')
+    assert [c['subject_id'] for c in service.potential_matches(origin,True)['candidates']]==[far]
+
+
+def set_excluded(service,sid,value=True,operation=None):
+    return service.matching_exclusion(sid,{'operation_id':operation or str(uuid.uuid4()),
+        'version':service.subject(sid)['version'],'excluded':value},'tester')
+
+
+def set_examples(service,sid,ids,reason):
+    return service.example_status(sid,{'operation_id':str(uuid.uuid4()),
+        'version':service.subject(sid)['version'],'example_ids':ids,'reason':reason},'tester')
+
+
+def test_subject_exclusion_filters_matching_and_library_and_survives_merges(db):
+    service=SubjectManagement(db)
+    origin=enroll(db)[0];target=enroll(db)[0]
+    payload={'operation_id':str(uuid.uuid4()),'version':service.subject(target)['version'],'excluded':True}
+    excluded=service.matching_exclusion(target,payload,'tester')
+    assert excluded['matching_excluded'] and not excluded['matching_eligible']
+    assert service.matching_exclusion(target,payload,'tester')['version']==excluded['version']
+    assert service.subjects(q=target)['subjects']==[]
+    assert service.subjects(q=target,include_excluded=True)['subjects'][0]['matching_excluded']
+    assert target not in [c['subject_id'] for c in service.potential_matches(origin)['candidates']]
+    assert service.potential_matches(target)['candidates']==[]
+    assert target not in [c.subject_id for c in db.search_subjects([vector()], 'model',10)[0]]
+    service.bulk_combine(origin,{'operation_id':str(uuid.uuid4()),'version':service.subject(origin)['version'],
+        'subjects':[{'subject_id':target,'version':excluded['version']}]},'tester')
+    assert service.subject(origin)['matching_excluded']
+    assert set_excluded(service,origin,False)['matching_eligible']
+    with pytest.raises(SubjectError):
+        service.matching_exclusion(target,{'operation_id':str(uuid.uuid4()),'version':excluded['version'],'excluded':False},'tester')
+
+
+def test_disabled_examples_recalculate_and_restore_without_deleting_history(db):
+    from maintenance.preservation import representation_errors
+    sid,run,groups,_,_=enroll(db)
+    other,_,other_groups,_,_=enroll(db,angle=1.0)
+    service=SubjectManagement(db)
+    service.combine(sid,{'operation_id':str(uuid.uuid4()),'version':service.subject(sid)['version'],
+        'other_subject_id':other,'target_version':service.subject(other)['version']},'tester')
+    ids=[groups[0],other_groups[0]]
+    before=sql(db,'SELECT canonical_embedding::text FROM subject WHERE subject_id=%s',(sid,))[0][0]
+    result=set_examples(service,sid,[ids[1]],'not_face')
+    assert result['example_count']==2 and result['active_example_count']==1 and result['matching_eligible']
+    assert len(result['representative_faces'])==1
+    after=json.loads(sql(db,'SELECT canonical_embedding::text FROM subject WHERE subject_id=%s',(sid,))[0][0])
+    assert after==pytest.approx(vector())
+    examples=service.examples(sid)['examples'];disabled=next(e for e in examples if e['example_id']==ids[1])
+    assert disabled['disabled_reason']=='not_face' and disabled['preview_url'] and disabled['disabled_by']=='tester'
+    assert RunRepository(db).results(run)['groups'] # historical enrollment remains.
+    assert sql(db,'SELECT count(*) FROM subject_representative_face')[0][0]==2
+    assert set_examples(service,sid,ids,'unusable_face')['active_example_count']==0
+    assert service.subject(sid)['matching_eligible'] is False
+    assert db.search_subjects([vector()], 'model',10)[0]==[]
+    assert service.coverage()['count_mismatches']==0
+    with service.transaction() as cursor: assert representation_errors(cursor)==0
+    restored=set_examples(service,sid,ids,None)
+    assert restored['active_example_count']==2 and restored['matching_eligible']
+    assert json.loads(sql(db,'SELECT canonical_embedding::text FROM subject WHERE subject_id=%s',(sid,))[0][0])==pytest.approx(json.loads(before))
+    set_excluded(service,sid)
+    set_examples(service,sid,ids,'not_face');set_examples(service,sid,ids,None)
+    assert service.subject(sid)['matching_excluded']
+
+
+def test_example_status_replay_stale_membership_and_disabled_merge_persistence(db):
+    sid,_,_,_,_=enroll(db,2);other=enroll(db)[0];service=SubjectManagement(db)
+    ids=[e['example_id'] for e in service.examples(sid)['examples']]
+    data={'operation_id':str(uuid.uuid4()),'version':service.subject(sid)['version'],'example_ids':[ids[0]],'reason':'not_face'}
+    first=service.example_status(sid,data,'tester')
+    assert service.example_status(sid,data,'tester')['version']==first['version']
+    with pytest.raises(SubjectError) as stale:
+        service.example_status(sid,{**data,'operation_id':str(uuid.uuid4())},'tester')
+    assert stale.value.code=='stale_subject'
+    foreign=service.examples(other)['examples'][0]['example_id']
+    with pytest.raises(SubjectError):set_examples(service,sid,[ids[1],foreign],'not_face')
+    assert next(e for e in service.examples(sid)['examples'] if e['example_id']==ids[1])['disabled_reason'] is None
+    service.combine(other,{'operation_id':str(uuid.uuid4()),'version':service.subject(other)['version'],
+        'other_subject_id':sid,'target_version':service.subject(sid)['version']},'tester')
+    assert next(e for e in service.examples(other)['examples'] if e['example_id']==ids[0])['disabled_reason']=='not_face'
+    assert service.subject(other)['active_example_count']==2
+
+
+def test_source_merge_skips_exclusions_but_uses_remaining_active_examples(db):
+    from worker.source_merges import SourceMerges
+    sid,_,groups,_,_=enroll(db,2);service=SubjectManagement(db)
+    source=service.sources(sid)['sources'][0]['source_id']
+    set_examples(service,sid,[groups[0]],'not_face')
+    with service.transaction() as cursor:
+        members,skipped,_=SourceMerges(service)._load(cursor,source)
+    assert len(members)==1 and not skipped
+    set_excluded(service,sid)
+    with service.transaction() as cursor:
+        members,skipped,_=SourceMerges(service)._load(cursor,source)
+    assert not members and skipped==[{'subject_id':sid,'reason':'subject_excluded'}]
+
+
+def test_duplicate_submission_does_not_reactivate_disabled_or_excluded_content(db):
+    sid,first,groups,_,_=enroll(db);service=SubjectManagement(db)
+    set_excluded(service,sid);set_examples(service,sid,groups,'not_face')
+    digest=sql(db,'SELECT source_sha256 FROM media_run WHERE run_id=%s',(first,))[0][0]
+    second,selection=make_run(db,policy='retain_and_enroll')
+    sql(db,'UPDATE media_run SET source_sha256=%s WHERE run_id=%s',(digest,second))
+    RunRepository(db).select(second,selection,1,[assignment(selection)])
+    worker,_=processor(db);assert worker.match(second)
+    assert sql(db,'SELECT count(*) FROM subject')[0][0]==1
+    assert service.subject(sid)['matching_excluded'] and service.subject(sid)['active_example_count']==0
+    assert service.examples(sid)['examples'][0]['disabled_reason']=='not_face'

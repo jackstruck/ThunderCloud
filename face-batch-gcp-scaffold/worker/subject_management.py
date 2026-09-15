@@ -5,6 +5,7 @@ import json
 import math
 import uuid
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 from .db import pgvector
 
@@ -13,6 +14,48 @@ class SubjectError(ValueError):
     def __init__(self, status, code, message):
         super().__init__(message)
         self.status, self.code, self.message = status, code, message
+
+
+def browse_cursor(value, sort):
+    if not value:
+        return None, None
+    try:
+        if sort == "id":
+            return None, str(uuid.UUID(value))
+        parts = value.split(":")
+        if len(parts) == 2 and sort == "sources":  # retain existing subject bookmarks
+            metric, ident = parts
+        else:
+            cursor_sort, metric, ident = parts
+            if cursor_sort != sort:
+                raise ValueError()
+        metric = int(metric)
+        if not 0 <= metric <= 9223372036854775807:
+            raise ValueError()
+        return metric, str(uuid.UUID(ident))
+    except (ValueError, TypeError, AttributeError):
+        raise SubjectError(422, "invalid_cursor", "Refresh the search to reset pagination.") from None
+
+
+def next_browse_cursor(sort, metric, ident):
+    return str(ident) if sort == "id" else f"{sort}:{int(metric)}:{ident}"
+
+
+def origin_hostname(value):
+    if not isinstance(value, str) or len(value) > 253:
+        raise SubjectError(422, "invalid_search", "Use a website hostname or HTTPS URL.")
+    if not value.strip():
+        return ""
+    try:
+        parsed = urlsplit(value.strip() if "://" in value else "//" + value.strip())
+        host = (parsed.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
+        if not host or parsed.username or parsed.password or any(c.isspace() for c in host) or parsed.port not in (None, 443):
+            raise ValueError()
+        if any(not label or not all(c.isalnum() or c == "-" for c in label) for label in host.split(".")):
+            raise ValueError()
+        return host.removeprefix("www.")
+    except (ValueError, UnicodeError):
+        raise SubjectError(422, "invalid_search", "Use a website hostname or HTTPS URL.") from None
 
 
 def subject_uuid(value):
@@ -70,7 +113,7 @@ def recalculate_subjects(cursor, subject_ids):
         """SELECT e.subject_id,e.embedding::text,
                   e.model_version
            FROM subject_example e
-           WHERE e.subject_id=ANY(%s::uuid[]) ORDER BY e.subject_id,e.example_id""",
+           WHERE e.subject_id=ANY(%s::uuid[]) AND e.disabled_at IS NULL ORDER BY e.subject_id,e.example_id""",
         (ids,),
     )
     contributing_models = {}
@@ -145,7 +188,7 @@ class SubjectManagement:
             """SELECT s.subject_id,s.identity_id,s.model_version,s.sample_count,s.row_version,
                                  i.display_name,i.external_identity_ref,i.row_version,s.created_at,s.updated_at,
                                  (SELECT count(DISTINCT source_id) FROM subject_example WHERE subject_id=s.subject_id),
-                                 (SELECT count(*) FROM subject_example WHERE subject_id=s.subject_id)
+                                 (SELECT count(*) FROM subject_example WHERE subject_id=s.subject_id),s.matching_excluded
                           FROM subject s LEFT JOIN identity i USING(identity_id) WHERE s.subject_id=%s""",
             (sid,),
         )
@@ -165,6 +208,7 @@ class SubjectManagement:
                     "updated_at",
                     "source_count",
                     "observation_count",
+                    "matching_excluded",
                 ),
                 row,
             )
@@ -176,10 +220,12 @@ class SubjectManagement:
         result["requested_subject_id"] = requested
         result["resolved_from"] = requested if requested != sid else None
         result["example_count"] = result["observation_count"]
+        result["active_example_count"] = result["sample_count"]
+        result["matching_eligible"] = not result["matching_excluded"] and result["sample_count"] > 0
         cursor.execute(
             """SELECT r.representative_id,r.quality_score,r.source_timestamp_ms
                           FROM subject_representative_face r JOIN subject_example e USING(example_id)
-                          WHERE e.subject_id=%s AND r.active
+                          WHERE e.subject_id=%s AND e.disabled_at IS NULL AND r.active
                           ORDER BY r.quality_score DESC NULLS LAST,r.representative_id LIMIT 5""",
             (sid,),
         )
@@ -193,9 +239,9 @@ class SubjectManagement:
             for r in cursor.fetchall()
         ]
         cursor.execute(
-            """SELECT DISTINCT sa.source_page_url AS url
-                          FROM subject_example e JOIN source_asset sa USING(source_id)
-                          WHERE e.subject_id=%s AND sa.source_page_url IS NOT NULL ORDER BY url""",
+            """SELECT DISTINCT sa.page_url AS url
+                          FROM subject_example e JOIN source_page_link sa USING(source_id)
+                          WHERE e.subject_id=%s AND sa.page_url IS NOT NULL ORDER BY url""",
             (sid,),
         )
         result["page_urls"] = [r[0] for r in cursor.fetchall()]
@@ -211,38 +257,18 @@ class SubjectManagement:
             return self._detail(cursor, subject_id)
 
     def subjects(self, q="", after=None, limit=24, multiple_sources=False, sort="id",
-                 shared_source=False, source_id=None):
-        if (
-            not isinstance(q, str)
-            or len(q) > 200
-            or type(limit) is not int
-            or not 1 <= limit <= 100
-            or type(multiple_sources) is not bool
-            or type(shared_source) is not bool
-            or sort not in {"id", "sources"}
-        ):
-            raise SubjectError(
-                422,
-                "invalid_search",
-                "Use a valid search, source filter, sort, and page size from 1 to 100.",
-            )
+                 shared_source=False, source_id=None, source_scope="all", name_status="all", include_excluded=False):
+        if (not isinstance(q, str) or len(q) > 200 or type(limit) is not int
+            or not 1 <= limit <= 100 or type(multiple_sources) is not bool
+            or type(shared_source) is not bool or type(include_excluded) is not bool or sort not in {"id", "sources", "examples", "newest"}
+            or source_scope not in {"all", "single", "multiple"} or name_status not in {"all", "named", "unnamed"}
+            or (multiple_sources and source_scope == "single")):
+            raise SubjectError(422, "invalid_search", "Use a valid search, filters, sort, and page size from 1 to 100.")
+        if multiple_sources:
+            source_scope = "multiple"
         q = q.strip()
         source_id = subject_uuid(source_id) if source_id else None
-        after_count, after_id = None, None
-        if after:
-            if sort == "sources":
-                try:
-                    count, raw_id = after.split(":", 1)
-                    after_count = int(count)
-                    if after_count < 0:
-                        raise ValueError()
-                    after_id = subject_uuid(raw_id)
-                except (ValueError, AttributeError):
-                    raise SubjectError(
-                        422, "invalid_cursor", "Refresh the search to reset pagination."
-                    ) from None
-            else:
-                after_id = subject_uuid(after)
+        after_metric, after_id = browse_cursor(after, sort)
         with self.transaction() as cursor:
             try:
                 exact = str(uuid.UUID(q))
@@ -259,67 +285,38 @@ class SubjectManagement:
                           AND s.merged_into_subject_id IS NULL)))""",
                     (detail['subject_id'], source_id, source_id, shared_source))
                 included = cursor.fetchone()[0] if source_id or shared_source else True
-                return {
-                    "subjects": [detail]
-                    if included and (not multiple_sources or detail["source_count"] > 1)
-                    else [],
-                    "next_cursor": None,
-                }
-            pattern = (
-                "%"
-                + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                + "%"
-            )
-            order = "sources DESC,subject_id" if sort == "sources" else "subject_id"
-            cursor.execute(
-                f"""WITH counts AS (
-                      SELECT subject_id,count(DISTINCT source_id) AS sources FROM subject_example GROUP BY subject_id
-                    ), listed AS (
-                      SELECT s.subject_id,COALESCE(c.sources,0) AS sources
-                      FROM subject s LEFT JOIN identity i USING(identity_id) LEFT JOIN counts c USING(subject_id)
-                      WHERE s.merged_into_subject_id IS NULL
-                        AND (%s='' OR lower(i.display_name) LIKE lower(%s))
-                        AND (NOT %s OR COALESCE(c.sources,0)>1)
-                        AND (%s::uuid IS NULL OR EXISTS (
-                            SELECT 1 FROM subject_example e WHERE e.subject_id=s.subject_id AND e.source_id=%s::uuid))
-                        AND (NOT %s OR EXISTS (
-                            SELECT 1 FROM subject_example e JOIN subject_example other ON other.source_id=e.source_id
-                            JOIN subject other_subject ON other_subject.subject_id=other.subject_id
-                            WHERE e.subject_id=s.subject_id AND other.subject_id<>s.subject_id
-                              AND other_subject.merged_into_subject_id IS NULL))
-                    ) SELECT subject_id,sources FROM listed
-                    WHERE (%s::uuid IS NULL OR
-                      (%s='id' AND subject_id>%s::uuid) OR
-                      (%s='sources' AND (sources<%s OR (sources=%s AND subject_id>%s::uuid))))
-                    ORDER BY {order} LIMIT %s""",
-                (
-                    q,
-                    pattern,
-                    multiple_sources,
-                    source_id,
-                    source_id,
-                    shared_source,
-                    after_id,
-                    sort,
-                    after_id,
-                    sort,
-                    after_count,
-                    after_count,
-                    after_id,
-                    limit + 1,
-                ),
-            )
+                named = bool((detail.get("display_name") or "").strip())
+                included = included and (source_scope == "all" or (source_scope == "single" and detail["source_count"] == 1) or (source_scope == "multiple" and detail["source_count"] > 1))
+                included = included and (name_status == "all" or (name_status == "named") == named)
+                included = included and (include_excluded or not detail["matching_excluded"])
+                return {"subjects": [detail] if included else [], "next_cursor": None}
+            pattern = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            metric = {"id":"0::bigint", "sources":"COALESCE(c.sources,0)", "examples":"COALESCE(c.examples,0)",
+                      "newest":"(extract(epoch FROM s.created_at)*1000000)::bigint"}[sort]
+            cursor.execute(f"""WITH counts AS (
+                    SELECT subject_id,count(DISTINCT source_id) AS sources,count(*) AS examples
+                    FROM subject_example GROUP BY subject_id
+                ), listed AS (
+                    SELECT s.subject_id,{metric} AS metric
+                    FROM subject s LEFT JOIN identity i USING(identity_id) LEFT JOIN counts c USING(subject_id)
+                    WHERE s.merged_into_subject_id IS NULL
+                      AND (%s OR NOT s.matching_excluded)
+                      AND (%s='' OR lower(i.display_name) LIKE lower(%s))
+                      AND (%s='all' OR (%s='single' AND COALESCE(c.sources,0)=1) OR (%s='multiple' AND COALESCE(c.sources,0)>1))
+                      AND (%s='all' OR (%s='named' AND btrim(COALESCE(i.display_name,''))<>'') OR (%s='unnamed' AND btrim(COALESCE(i.display_name,''))=''))
+                      AND (%s::uuid IS NULL OR EXISTS (SELECT 1 FROM subject_example e WHERE e.subject_id=s.subject_id AND e.source_id=%s::uuid))
+                      AND (NOT %s OR EXISTS (
+                        SELECT 1 FROM subject_example e JOIN subject_example other ON other.source_id=e.source_id
+                        JOIN subject other_subject ON other_subject.subject_id=other.subject_id
+                        WHERE e.subject_id=s.subject_id AND other.subject_id<>s.subject_id AND other_subject.merged_into_subject_id IS NULL))
+                ) SELECT subject_id,metric FROM listed
+                WHERE (%s::uuid IS NULL OR metric<%s OR (metric=%s AND subject_id>%s::uuid))
+                ORDER BY metric DESC,subject_id LIMIT %s""",
+                (include_excluded,q,pattern,source_scope,source_scope,source_scope,name_status,name_status,name_status,
+                 source_id,source_id,shared_source,after_id,after_metric or 0,after_metric or 0,after_id,limit+1))
             rows = cursor.fetchall()
-            next_cursor = None
-            if len(rows) > limit:
-                sid, count = rows[limit - 1]
-                next_cursor = f"{count}:{sid}" if sort == "sources" else str(sid)
-            return {
-                "subjects": self._summaries(
-                    cursor, [str(row[0]) for row in rows[:limit]]
-                ),
-                "next_cursor": next_cursor,
-            }
+            next_cursor = next_browse_cursor(sort, rows[limit-1][1], rows[limit-1][0]) if len(rows)>limit else None
+            return {"subjects":self._summaries(cursor,[str(row[0]) for row in rows[:limit]]),"next_cursor":next_cursor}
 
     def _summaries(self, cursor, ids):
         if not ids:
@@ -328,7 +325,7 @@ class SubjectManagement:
             """SELECT s.subject_id,s.identity_id,s.model_version,s.sample_count,s.row_version,
                                  i.display_name,i.external_identity_ref,i.row_version,
                                  (SELECT count(DISTINCT source_id) FROM subject_example WHERE subject_id=s.subject_id),
-                                 (SELECT count(*) FROM subject_example WHERE subject_id=s.subject_id)
+                                 (SELECT count(*) FROM subject_example WHERE subject_id=s.subject_id),s.matching_excluded
                           FROM subject s LEFT JOIN identity i USING(identity_id)
                           WHERE s.subject_id=ANY(%s::uuid[])""",
             (ids,),
@@ -345,6 +342,7 @@ class SubjectManagement:
             "identity_version",
             "source_count",
             "example_count",
+            "matching_excluded",
         )
         for row in cursor.fetchall():
             item = dict(zip(fields, row, strict=True))
@@ -353,6 +351,8 @@ class SubjectManagement:
                 str(item["identity_id"]) if item["identity_id"] else None
             )
             item["observation_count"] = item["example_count"]
+            item["active_example_count"] = item["sample_count"]
+            item["matching_eligible"] = not item["matching_excluded"] and item["sample_count"] > 0
             item["representative_faces"], item["page_urls"] = [], []
             result[item["subject_id"]] = item
         cursor.execute(
@@ -360,7 +360,7 @@ class SubjectManagement:
                           SELECT e.subject_id,r.representative_id,r.quality_score,r.source_timestamp_ms,
                             row_number() OVER (PARTITION BY e.subject_id ORDER BY r.quality_score DESC NULLS LAST,r.representative_id) AS position
                           FROM subject_representative_face r JOIN subject_example e USING(example_id)
-                          WHERE e.subject_id=ANY(%s::uuid[]) AND r.active) ranked
+                          WHERE e.subject_id=ANY(%s::uuid[]) AND e.disabled_at IS NULL AND r.active) ranked
                           WHERE position<=5 ORDER BY subject_id,position""",
             (ids,),
         )
@@ -374,9 +374,9 @@ class SubjectManagement:
                 }
             )
         cursor.execute(
-            """SELECT DISTINCT e.subject_id,sa.source_page_url AS url
-                          FROM subject_example e JOIN source_asset sa USING(source_id)
-                          WHERE e.subject_id=ANY(%s::uuid[]) AND sa.source_page_url IS NOT NULL
+            """SELECT DISTINCT e.subject_id,sa.page_url AS url
+                          FROM subject_example e JOIN source_page_link sa USING(source_id)
+                          WHERE e.subject_id=ANY(%s::uuid[]) AND sa.page_url IS NOT NULL
                           ORDER BY e.subject_id,url""",
             (ids,),
         )
@@ -388,7 +388,8 @@ class SubjectManagement:
         sid = subject_uuid(subject_id)
         with self.transaction() as cursor:
             cursor.execute(
-                "SELECT row_version,merged_into_subject_id FROM subject WHERE subject_id=%s",
+                """SELECT row_version,merged_into_subject_id,model_version,canonical_embedding::text,sample_count,matching_excluded
+                   FROM subject WHERE subject_id=%s""",
                 (sid,),
             )
             subject = cursor.fetchone()
@@ -400,15 +401,27 @@ class SubjectManagement:
                     "subject_merged",
                     "This subject was combined. Open the surviving subject.",
                 )
+            if subject[3] is None or subject[4] <= 0 or subject[5]:
+                return {"subject_id": sid, "version": subject[0], "dismissed": dismissed, "candidates": []}
+            # Constant origin values allow an ordered HNSW scan. A subject-to-subject
+            # join sorts the whole library and repeatedly loads both TOASTed vectors.
+            # Iterative scans continue past excluded/merged candidates to fill the page.
+            if not dismissed:
+                cursor.execute("SET LOCAL hnsw.iterative_scan = 'strict_order'")
+                cursor.execute("SET LOCAL hnsw.ef_search = 40")
+            order = "similarity DESC, candidate.subject_id" if dismissed else (
+                "candidate.canonical_embedding <=> origin.canonical_embedding, candidate.subject_id"
+            )
             cursor.execute(
-                """SELECT candidate.subject_id,
+                f"""SELECT candidate.subject_id,
                           1 - (candidate.canonical_embedding <=> origin.canonical_embedding) AS similarity
-                   FROM subject origin JOIN subject candidate
+                   FROM (VALUES (%s::uuid,%s::bigint,%s::text,%s::vector))
+                     AS origin(subject_id,row_version,model_version,canonical_embedding)
+                   JOIN subject candidate
                      ON candidate.model_version=origin.model_version
-                   WHERE origin.subject_id=%s AND candidate.subject_id<>origin.subject_id
-                     AND origin.canonical_embedding IS NOT NULL AND origin.sample_count>0
+                   WHERE candidate.subject_id<>origin.subject_id
                      AND candidate.canonical_embedding IS NOT NULL AND candidate.sample_count>0
-                     AND candidate.merged_into_subject_id IS NULL
+                     AND candidate.merged_into_subject_id IS NULL AND NOT candidate.matching_excluded
                      AND EXISTS (
                        SELECT 1 FROM subject_suggestion_dismissal d
                        WHERE d.subject_low=LEAST(origin.subject_id,candidate.subject_id)
@@ -419,8 +432,8 @@ class SubjectManagement:
                              THEN candidate.row_version ELSE origin.row_version END
                          AND d.restored_at IS NULL
                      ) = %s
-                   ORDER BY similarity DESC, candidate.subject_id LIMIT 10""",
-                (sid, dismissed),
+                   ORDER BY {order} LIMIT 10""",
+                (sid, subject[0], subject[2], subject[3], dismissed),
             )
             ranked = [(str(row[0]), float(row[1])) for row in cursor.fetchall()]
             summaries = self._summaries(cursor, [candidate for candidate, _ in ranked])
@@ -526,23 +539,33 @@ class SubjectManagement:
             )
             return result
 
-    def browse_sources(self, q="", after=None, limit=24, multiple_subjects=False):
-        if not isinstance(q, str) or len(q) > 200 or type(limit) is not int or not 1 <= limit <= 100 or type(multiple_subjects) is not bool:
-            raise SubjectError(422, "invalid_search", "Use a valid source search and page size from 1 to 100.")
-        after = subject_uuid(after) if after else None
-        pattern = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    def browse_sources(self, q="", after=None, limit=24, multiple_subjects=False, sort="id", origin=""):
+        if (not isinstance(q,str) or len(q)>200 or type(limit) is not int or not 1<=limit<=100
+            or type(multiple_subjects) is not bool or sort not in {"id","subjects","examples","newest"}):
+            raise SubjectError(422,"invalid_search","Use a valid search, filters, sort, and page size from 1 to 100.")
+        after_metric, after_id = browse_cursor(after,sort)
+        origin = origin_hostname(origin)
+        pattern = "%" + q.strip().replace("\\","\\\\").replace("%","\\%").replace("_","\\_") + "%"
+        metric = {"id":"0::bigint","subjects":"subjects","examples":"examples","newest":"created"}[sort]
         with self.transaction() as cursor:
-            cursor.execute("""SELECT e.source_id,sa.source_page_url,count(DISTINCT e.subject_id),count(*)
+            cursor.execute(f"""WITH grouped AS (
+                SELECT e.source_id,sa.source_page_url,count(DISTINCT e.subject_id) AS subjects,count(*) AS examples,
+                       (extract(epoch FROM sa.created_at)*1000000)::bigint AS created
                 FROM subject_example e JOIN subject s USING(subject_id) JOIN source_asset sa USING(source_id)
                 WHERE s.merged_into_subject_id IS NULL
-                  AND (%s::uuid IS NULL OR e.source_id>%s::uuid)
-                  AND (e.source_id::text ILIKE %s OR sa.source_page_url ILIKE %s)
-                GROUP BY e.source_id,sa.source_page_url
+                  AND (e.source_id::text ILIKE %s OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=e.source_id AND p.page_url ILIKE %s))
+                  AND (%s='' OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=e.source_id AND regexp_replace(lower(split_part(split_part(p.page_url,'://',2),'/',1)), '^www\\.|:443$', '', 'g')=%s))
+                GROUP BY e.source_id,sa.source_page_url,sa.created_at
                 HAVING NOT %s OR count(DISTINCT e.subject_id)>1
-                ORDER BY e.source_id LIMIT %s""", (after, after, pattern, pattern, multiple_subjects, limit + 1))
-            rows = cursor.fetchall()
-            return {"sources": [{"source_id": str(r[0]), "page_url": r[1], "subject_count": r[2], "example_count": r[3]} for r in rows[:limit]],
-                    "next_cursor": str(rows[limit - 1][0]) if len(rows) > limit else None}
+                ), listed AS (SELECT *,{metric} AS metric FROM grouped)
+                SELECT source_id,source_page_url,subjects,examples,metric,
+                  ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=listed.source_id ORDER BY p.page_url) FROM listed
+                WHERE (%s::uuid IS NULL OR metric<%s OR (metric=%s AND source_id>%s::uuid))
+                ORDER BY metric DESC,source_id LIMIT %s""",
+                (pattern,pattern,origin,origin,multiple_subjects,after_id,after_metric or 0,after_metric or 0,after_id,limit+1))
+            rows=cursor.fetchall()
+            return {"sources":[{"source_id":str(r[0]),"page_url":r[1],"page_urls":list(r[5]),"subject_count":r[2],"example_count":r[3]} for r in rows[:limit]],
+                    "next_cursor":next_browse_cursor(sort,rows[limit-1][4],rows[limit-1][0]) if len(rows)>limit else None}
 
     def sources(self, subject_id):
         with self.transaction() as cursor:
@@ -555,7 +578,8 @@ class SubjectManagement:
                 """SELECT e.source_id,count(*),sa.source_page_url,
                               (SELECT count(DISTINCT other.subject_id) FROM subject_example other
                                JOIN subject current_subject ON current_subject.subject_id=other.subject_id
-                               WHERE other.source_id=e.source_id AND current_subject.merged_into_subject_id IS NULL)
+                               WHERE other.source_id=e.source_id AND current_subject.merged_into_subject_id IS NULL),
+                              ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=e.source_id ORDER BY p.page_url)
                               FROM subject_example e JOIN source_asset sa USING(source_id)
                               WHERE e.subject_id=%s GROUP BY e.source_id,sa.source_page_url ORDER BY e.source_id""",
                 (sid,),
@@ -564,7 +588,7 @@ class SubjectManagement:
                 "subject_id": sid,
                 "version": version,
                 "sources": [
-                    {"source_id": str(r[0]), "example_count": r[1], "page_url": r[2], "subject_count": r[3]}
+                    {"source_id": str(r[0]), "example_count": r[1], "page_url": r[2], "subject_count": r[3], "page_urls": list(r[4])}
                     for r in cursor.fetchall()
                 ],
             }
@@ -591,7 +615,7 @@ class SubjectManagement:
                                      sa.source_page_url,
                                      (SELECT r.representative_id FROM subject_representative_face r
                                       WHERE r.example_id=e.example_id AND r.active ORDER BY r.representative_id LIMIT 1),
-                                     e.face_track_id,e.submission_group_id
+                                     e.face_track_id,e.submission_group_id,e.disabled_reason,e.disabled_at,e.disabled_by
                               FROM subject_example e LEFT JOIN face_track ft ON ft.track_id=e.face_track_id
                               LEFT JOIN submission_face_group g ON g.group_id=e.submission_group_id
                               JOIN source_asset sa ON sa.source_id=e.source_id
@@ -620,6 +644,7 @@ class SubjectManagement:
                         "preview_url": f"/api/gallery/faces/{r[10]}" if r[10] else None,
                         "face_track_id": None if r[11] is None else str(r[11]),
                         "submission_group_id": None if r[12] is None else str(r[12]),
+                        "disabled_reason": r[13], "disabled_at": r[14], "disabled_by": r[15],
                     }
                 )
             return {
@@ -673,6 +698,58 @@ class SubjectManagement:
                 json.dumps(result, default=str),
             ),
         )
+
+    def matching_exclusion(self, subject_id, data, actor):
+        sid = subject_uuid(subject_id)
+        if set(data) != {"operation_id", "version", "excluded"} or type(data["excluded"]) is not bool:
+            raise SubjectError(422, "invalid_exclusion", "Provide the subject version and excluded true or false.")
+        with self.transaction(write=True) as cursor:
+            operation, fingerprint, replay = self._operation(cursor, sid, "set_matching_exclusion", data, actor)
+            if replay is not None:
+                return replay
+            before = self._detail(cursor, sid)
+            if before["subject_id"] != sid:
+                raise SubjectError(409, "subject_merged", "Open the surviving subject before changing exclusion.")
+            self._version(before["version"], data["version"])
+            cursor.execute("""UPDATE subject SET matching_excluded=%s,row_version=row_version+1,updated_at=now()
+                              WHERE subject_id=%s""", (data["excluded"], sid))
+            result = self._detail(cursor, sid)
+            self._record(cursor, operation, actor, "set_matching_exclusion", fingerprint, before, result)
+            return result
+
+    def example_status(self, subject_id, data, actor):
+        sid = subject_uuid(subject_id)
+        if set(data) != {"operation_id", "version", "example_ids", "reason"}:
+            raise SubjectError(422, "invalid_example_status", "Provide selected examples, a reason, and the subject version.")
+        reason = data["reason"]
+        ids = data["example_ids"]
+        if reason not in (None, "not_face", "unusable_face") or not isinstance(ids, list) or not 1 <= len(ids) <= 1000:
+            raise SubjectError(422, "invalid_example_status", "Choose 1–1,000 examples and Not a face, Unusable face, or restore.")
+        ids = [subject_uuid(value) for value in ids]
+        if len(set(ids)) != len(ids):
+            raise SubjectError(422, "invalid_example_status", "Choose each example once.")
+        with self.transaction(write=True) as cursor:
+            operation, fingerprint, replay = self._operation(cursor, sid, "set_example_status", data, actor)
+            if replay is not None:
+                return replay
+            before = self._detail(cursor, sid)
+            if before["subject_id"] != sid:
+                raise SubjectError(409, "subject_merged", "Open the surviving subject before changing examples.")
+            self._version(before["version"], data["version"])
+            cursor.execute("""SELECT example_id,disabled_reason,disabled_at,disabled_by FROM subject_example
+                              WHERE subject_id=%s AND example_id=ANY(%s::uuid[]) ORDER BY example_id FOR UPDATE""", (sid, ids))
+            rows = cursor.fetchall()
+            if len(rows) != len(ids):
+                raise SubjectError(409, "examples_changed", "Some examples moved. Refresh the subject and select them again.")
+            cursor.execute("""UPDATE subject_example SET disabled_reason=%s,
+                              disabled_at=CASE WHEN %s::text IS NULL THEN NULL ELSE now() END,
+                              disabled_by=CASE WHEN %s::text IS NULL THEN NULL ELSE %s END
+                              WHERE subject_id=%s AND example_id=ANY(%s::uuid[])""", (reason,reason,reason,actor,sid,ids))
+            recalculate_subjects(cursor, [sid])
+            result = self._detail(cursor, sid)
+            self._record(cursor, operation, actor, "set_example_status", fingerprint,
+                         {"subject": before, "examples": rows}, result)
+            return result
 
     def edit(self, subject_id, data, actor):
         sid = subject_uuid(subject_id)
@@ -844,6 +921,9 @@ class SubjectManagement:
                     "UPDATE subject SET merged_into_subject_id=%s WHERE subject_id=%s",
                     (destination, source),
                 )
+            cursor.execute("""UPDATE subject SET matching_excluded=true WHERE subject_id=%s
+                AND EXISTS (SELECT 1 FROM subject WHERE subject_id=%s AND matching_excluded)""",
+                (destination, source))
             recalculate_subjects(cursor, ids)
             result = {
                 "subject": self._detail(cursor, sid),
@@ -910,6 +990,9 @@ class SubjectManagement:
             member_id = group['subject']['subject_id']
             cursor.execute('UPDATE subject_example SET subject_id=%s WHERE subject_id=%s', (sid, member_id))
             cursor.execute('UPDATE subject SET merged_into_subject_id=%s WHERE subject_id=%s', (sid, member_id))
+        cursor.execute("""UPDATE subject SET matching_excluded=true WHERE subject_id=%s
+            AND EXISTS(SELECT 1 FROM subject WHERE subject_id=ANY(%s::uuid[]) AND matching_excluded)""",
+            (sid,list(versions)))
         recalculate_subjects(cursor, [sid, *versions])
         result = {'destination': self._detail(cursor, sid), 'operation_id': operation,
                   'merged_subject_ids': sorted(versions)}
@@ -979,7 +1062,7 @@ class SubjectManagement:
             member = next((m for m in self._merge_members(row[0]) if m['subject']['subject_id'] == member_id), None)
             if member is None or not self._can_separate(cursor, sid, member):
                 raise SubjectError(409, 'examples_changed', 'These examples have changed. Select the examples to separate manually.')
-            cursor.execute('UPDATE subject SET merged_into_subject_id=NULL WHERE subject_id=%s', (member_id,))
+            cursor.execute('UPDATE subject SET merged_into_subject_id=NULL,matching_excluded=matching_excluded OR %s WHERE subject_id=%s', (before['matching_excluded'],member_id))
             cursor.execute('UPDATE subject_example SET subject_id=%s WHERE subject_id=%s AND example_id=ANY(%s::uuid[])',
                            (member_id, sid, member['example_ids']))
             recalculate_subjects(cursor, [sid, member_id])
@@ -1026,7 +1109,7 @@ class SubjectManagement:
                 (SELECT count(*) FROM subject_example e JOIN subject s USING(subject_id)
                  WHERE e.model_version<>s.model_version),
                 (SELECT count(*) FROM subject_example),
-                (SELECT count(*) FROM subject s WHERE merged_into_subject_id IS NULL AND sample_count<>(SELECT count(*) FROM subject_example e WHERE e.subject_id=s.subject_id))""")
+                (SELECT count(*) FROM subject s WHERE merged_into_subject_id IS NULL AND sample_count<>(SELECT count(*) FROM subject_example e WHERE e.subject_id=s.subject_id AND e.disabled_at IS NULL))""")
             report = dict(
                 zip(
                     (

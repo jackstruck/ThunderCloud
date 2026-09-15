@@ -16,7 +16,7 @@ resource "google_artifact_registry_repository" "worker" {
       tag_state = "ANY"
       # Artifact Registry limits each version prefix to 64 characters.
       version_name_prefixes = [for version in distinct(concat(
-        [for image in compact([var.cloud_run_worker_image, var.interactive_gpu_image, var.console_image]) : split("@", image)[1]],
+        [for image in compact([var.cloud_run_worker_image, var.interactive_gpu_image, var.console_image, var.acquisition_batch_image]) : split("@", image)[1]],
         var.rollback_image_versions,
       )) : substr(version, 0, 64)]
     }
@@ -30,12 +30,13 @@ resource "google_artifact_registry_repository" "worker" {
     }
   }
 
+  # Seven days of unpinned build history; deployed and rollback KEEP rules win.
   cleanup_policies {
     id     = "delete-unreferenced-history"
     action = "DELETE"
     condition {
       tag_state  = "ANY"
-      older_than = "2592000s"
+      older_than = "604800s"
     }
   }
 

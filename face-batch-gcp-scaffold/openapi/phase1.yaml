@@ -285,12 +285,14 @@ paths:
   /api/sources:
     get:
       operationId: browseSources
-      description: Browse sources with current enrolled subjects, ordered by source ID.
+      description: Browse sources with current enrolled subjects; newest means platform creation time.
       parameters:
       - {name: q, in: query, schema: {type: string, maxLength: 200}, description: Source ID or page URL substring.}
-      - {name: cursor, in: query, schema: {type: string, format: uuid}}
+      - {name: cursor, in: query, schema: {type: string}, description: Opaque cursor returned for the selected sort.}
       - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 24}}
       - {name: multiple_subjects, in: query, schema: {type: boolean, default: false}}
+      - {name: sort, in: query, schema: {type: string, enum: [id, subjects, examples, newest], default: id}}
+      - {name: origin, in: query, schema: {type: string, maxLength: 253}, description: Website hostname or URL; www and non-www variants match together.}
       responses:
         '200':
           description: Sources with current subject and example counts.
@@ -316,6 +318,7 @@ paths:
   /api/subjects:
     get:
       operationId: listSubjects
+      description: Excluded subjects are hidden by default but remain directly accessible by their detail URL.
       responses:
         '200':
           description: Current result, or the result of an identical operation replay.
@@ -345,6 +348,7 @@ paths:
         '503':
           $ref: '#/components/responses/Error'
       parameters:
+      - {name: include_excluded, in: query, schema: {type: boolean, default: false}}
       - name: q
         in: query
         description: Exact subject UUID or case-insensitive display-name text. Merged UUIDs resolve to the
@@ -372,7 +376,13 @@ paths:
         schema: {type: string, format: uuid}
       - name: sort
         in: query
-        schema: {type: string, enum: [id, sources], default: id}
+        schema: {type: string, enum: [id, sources, examples, newest], default: id}
+      - name: source_scope
+        in: query
+        schema: {type: string, enum: [all, single, multiple], default: all}
+      - name: name_status
+        in: query
+        schema: {type: string, enum: [all, named, unnamed], default: all}
   /api/features:
     get:
       operationId: getFeatures
@@ -402,6 +412,58 @@ paths:
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/Error'
+  /api/subjects/{subject_id}/matching:
+    parameters:
+      - {name: subject_id, in: path, required: true, schema: {type: string, format: uuid}}
+    put:
+      operationId: setSubjectMatchingExclusion
+      description: Reversibly exclude or restore a current subject. Exclusion survives merges; restoration requires an explicit request. Version conflicts return 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, version, excluded]
+              properties:
+                operation_id: {type: string, format: uuid}
+                version: {type: integer, minimum: 1}
+                excluded: {type: boolean}
+      responses:
+        '200':
+          description: Updated subject or idempotent replay.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Subject'}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/subjects/{subject_id}/examples/matching:
+    parameters:
+      - {name: subject_id, in: path, required: true, schema: {type: string, format: uuid}}
+    put:
+      operationId: setExampleMatchingStatus
+      description: Disable selected examples or restore them with reason null. Recomputes matching from active examples without deleting originals or changing historical scores.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, version, example_ids, reason]
+              properties:
+                operation_id: {type: string, format: uuid}
+                version: {type: integer, minimum: 1}
+                example_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  uniqueItems: true
+                  items: {type: string, format: uuid}
+                reason: {type: [string, 'null'], enum: [not_face, unusable_face, null]}
+      responses:
+        '200':
+          description: Updated subject or idempotent replay.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Subject'}}}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/subjects/{subject_id}/examples:
     parameters:
     - name: subject_id
@@ -671,7 +733,7 @@ paths:
       - {name: subject_id, in: path, required: true, schema: {type: string, format: uuid}}
     get:
       operationId: findPotentialMatches
-      description: Read-only current comparison. Excludes self, merged, empty and incompatible subjects, and applies versioned dismissals before the ten-result limit. Scores are similarity, not identity probability.
+      description: Read-only current comparison using approximate indexed nearest-neighbor search with ordered iterative scanning. Excludes self, merged, empty and incompatible subjects, and applies versioned dismissals before the ten-result limit. The dismissed view uses exact ranking of eligible dismissals. Scores are similarity, not identity probability.
       parameters:
         - {name: dismissed, in: query, schema: {type: boolean, default: false}}
       responses:
@@ -989,6 +1051,25 @@ components:
       properties:
         run_id: {type: string, format: uuid}
         handling_policy: {type: string, enum: [search_then_discard, retain_and_enroll, enroll_only]}
+        enrollment_reused:
+          type: boolean
+          description: Exact file content already has enrolled examples; no new subjects or examples were created.
+        reused_enrollments:
+          type: array
+          description: Current subjects and galleries for previously enrolled identical content, following manual corrections.
+          items:
+            type: object
+            properties:
+              subject_id: {type: string, format: uuid}
+              source_id: {type: string, format: uuid}
+              decision: {const: reused}
+              representative_faces:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    representative_id: {type: string, format: uuid}
+                    url: {type: string}
         groups:
           type: array
           items:
@@ -1018,6 +1099,20 @@ components:
                   required: [subject_id, rank, similarity, source_count, observation_count, page_urls, representative_faces, compared_subject_version, subject_version_status]
                   properties:
                     subject_id: {type: string, format: uuid}
+                    resolved_subject_id:
+                      type: string
+                      format: uuid
+                      description: Current surviving subject used for gallery and navigation; original subject_id, rank and similarity remain historical.
+                    sources:
+                      type: array
+                      description: Current platform sources for the resolved subject.
+                      items:
+                        type: object
+                        required: [source_id, page_url]
+                        properties:
+                          source_id: {type: string, format: uuid}
+                          page_url: {type: [string, 'null']}
+                          page_urls: {type: array, items: {type: string, format: uri}, description: All known URLs for this exact content.}
                     display_name: {type: [string, 'null']}
                     compared_subject_version: {type: [integer, 'null'], minimum: 1}
                     subject_version_status:
@@ -1054,6 +1149,9 @@ components:
       - page_urls
       - representative_faces
       properties:
+        matching_excluded: {type: boolean}
+        matching_eligible: {type: boolean, description: Requires at least one active example and no explicit exclusion.}
+        active_example_count: {type: integer, minimum: 0}
         subject_id:
           type: string
           format: uuid
@@ -1299,6 +1397,9 @@ components:
     SubjectExample:
       type: object
       properties:
+        disabled_reason: {type: [string, 'null'], enum: [not_face, unusable_face, null]}
+        disabled_at: {type: [string, 'null']}
+        disabled_by: {type: [string, 'null']}
         example_id:
           type:
           - string

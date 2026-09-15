@@ -62,7 +62,7 @@ class Database:
                FROM subject s
                LEFT JOIN identity i ON i.identity_id = s.identity_id
                WHERE s.canonical_embedding IS NOT NULL AND s.model_version = %s
-                 AND s.merged_into_subject_id IS NULL
+                 AND s.merged_into_subject_id IS NULL AND NOT s.matching_excluded
                ORDER BY s.canonical_embedding <=> %s::vector, s.subject_id
                LIMIT %s""",
             (vector, embedding_model_version, vector, top_k),
@@ -77,7 +77,7 @@ class Database:
                    LEFT JOIN face_track ft ON ft.track_id=e.face_track_id
                    LEFT JOIN processing_job pj ON pj.job_id=ft.processing_job_id
                    LEFT JOIN submission_face_group se ON se.group_id=e.submission_group_id
-                   WHERE e.subject_id=%s
+                   WHERE e.subject_id=%s AND e.disabled_at IS NULL
                    ORDER BY e.created_at,e.example_id""",
                 (subject_id,),
             )
@@ -97,10 +97,10 @@ class Database:
                 for row in cursor.fetchall()
             )
             cursor.execute(
-                """SELECT DISTINCT source_page_url
-                   FROM source_asset WHERE source_id IN (
+                """SELECT DISTINCT page_url
+                   FROM source_page_link WHERE source_id IN (
                      SELECT source_id FROM subject_example WHERE subject_id=%s
-                   ) AND source_page_url IS NOT NULL
+                   ) AND page_url IS NOT NULL
                    ORDER BY 1""",
                 (subject_id,),
             )
@@ -125,6 +125,7 @@ class Database:
         cursor = connection.cursor()
         try:
             cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            cursor.execute("SET LOCAL hnsw.iterative_scan = 'strict_order'")
             return [
                 self.rank_subjects(cursor, embedding, embedding_model_version, top_k)
                 for embedding in embeddings

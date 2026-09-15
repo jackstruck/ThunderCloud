@@ -336,3 +336,52 @@ def test_hotscope_profile_is_rejected_as_a_single_video_source():
     response = post_run(client(), {'kind': 'url', 'url': 'https://hotscope.tv/user/alice'})
     assert response.status_code == 422
     assert response.json['code'] == 'invalid_url'
+
+
+def test_video_list_import_assets_are_served():
+    http = client()
+    page = http.get('/', headers=AUTH)
+    assert page.status_code == 200
+    assert b'id="video-links-file"' in page.data
+    assert b'HTTPS media or video link' in page.data
+    script = http.get('/video-links.js', headers=AUTH)
+    assert script.status_code == 200
+    assert b'parseVideoLinks' in script.data
+
+
+def test_browse_filters_are_forwarded_and_privacy_script_is_served():
+    from unittest.mock import Mock
+    subjects = Mock()
+    subjects.subjects.return_value = {'subjects': [], 'next_cursor': None}
+    subjects.browse_sources.return_value = {'sources': [], 'next_cursor': None}
+    app = create_app(Repository(), allowed_origin=ORIGIN, subject_service=subjects,
+                     subject_management_enabled=True, enrollment_enabled=True)
+    http = app.test_client()
+    assert http.get('/api/subjects?sort=examples&source_scope=single&name_status=unnamed', headers=AUTH).status_code == 200
+    assert subjects.subjects.call_args.kwargs['sort'] == 'examples'
+    assert subjects.subjects.call_args.kwargs['source_scope'] == 'single'
+    assert subjects.subjects.call_args.kwargs['name_status'] == 'unnamed'
+    assert http.get('/api/sources?sort=subjects&origin=example.test', headers=AUTH).status_code == 200
+    assert subjects.browse_sources.call_args.kwargs == {'sort':'subjects', 'origin':'example.test'}
+    response = http.get('/privacy.js', headers=AUTH)
+    assert response.status_code == 200 and b'privateGallery' in response.data
+
+
+def test_matching_exclusion_and_example_status_routes_require_origin_and_forward_versions():
+    from unittest.mock import Mock
+    subjects=Mock()
+    subjects.matching_exclusion.return_value={'subject_id':SUBJECT_ID,'version':2,'matching_excluded':True}
+    subjects.example_status.return_value={'subject_id':SUBJECT_ID,'version':3,'active_example_count':0}
+    subjects.subjects.return_value={'subjects':[],'next_cursor':None}
+    http=create_app(Repository(),allowed_origin=ORIGIN,subject_service=subjects,
+        subject_management_enabled=True,enrollment_enabled=True).test_client()
+    body={'operation_id':str(uuid.uuid4()),'version':1,'excluded':True}
+    assert http.put(f'/api/subjects/{SUBJECT_ID}/matching',json=body,headers=AUTH).status_code==200
+    subjects.matching_exclusion.assert_called_once_with(SUBJECT_ID,body,'member@example.test')
+    status={'operation_id':str(uuid.uuid4()),'version':2,'example_ids':[GROUP_ID],'reason':'not_face'}
+    assert http.put(f'/api/subjects/{SUBJECT_ID}/examples/matching',json=status,headers=AUTH).status_code==200
+    subjects.example_status.assert_called_once_with(SUBJECT_ID,status,'member@example.test')
+    assert http.put(f'/api/subjects/{SUBJECT_ID}/matching',json=body,headers={**AUTH,'Origin':'https://untrusted.test'}).status_code==403
+    assert http.get('/api/subjects?include_excluded=true',headers=AUTH).status_code==200
+    assert subjects.subjects.call_args.kwargs['include_excluded'] is True
+    assert http.get('/api/subjects?include_excluded=invalid',headers=AUTH).status_code==422

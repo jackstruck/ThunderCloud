@@ -285,6 +285,7 @@ class InteractiveRepository:
         *,
         enrollment_source=None,
         publish_representative=None,
+        promote_source=None,
         model_version: str | None = None,
         source_bucket: str | None = None,
     ) -> bool:
@@ -338,65 +339,57 @@ class InteractiveRepository:
                 if model_version is None or publish_representative is None:
                     raise ValueError("enrollment configuration is required")
                 cursor.execute("SELECT pg_advisory_xact_lock(8675309)")
-                source_id, retained_name, retained_generation, retained_bytes = (
-                    enrollment_source
-                )
+                source_id, retained_name, retained_generation, retained_bytes = enrollment_source
                 cursor.execute(
-                    "SELECT source_sha256 FROM media_run WHERE run_id=%s",
+                    "SELECT source_sha256,source_page_url,content_type FROM media_run WHERE run_id=%s",
                     (run_id,),
                 )
-                source_row = cursor.fetchone()
-                source_sha256 = str(source_row[0])
-                if retained_name is None:
+                source_sha256, page_url, content_type = cursor.fetchone()
+                # The same lock protects the lookup, optional promotion and enrollment.
+                # Concurrent duplicate runs therefore cannot publish extra subjects or copies.
+                cursor.execute(
+                    """SELECT s.source_id,s.storage_kind,s.object_name,s.object_generation,s.object_bytes
+                       FROM source_asset s WHERE s.source_sha256=%s AND s.deleted_at IS NULL
+                       ORDER BY (s.storage_kind='managed') DESC,
+                         EXISTS(SELECT 1 FROM subject_example e WHERE e.source_id=s.source_id) DESC,
+                         s.created_at,s.source_id LIMIT 1""",
+                    (source_sha256,),
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    source_id = str(existing[0])
+                cursor.execute(
+                    """SELECT EXISTS(SELECT 1 FROM subject_example e JOIN source_asset s USING(source_id)
+                       WHERE s.source_sha256=%s)""", (source_sha256,),
+                )
+                reused = bool(cursor.fetchone()[0])
+                if promote_source is not None and (not existing or existing[1] != 'managed'):
+                    retained_name, retained_generation, retained_bytes = promote_source(source_id)
+                if not existing:
                     cursor.execute(
-                        """INSERT INTO source_asset
-                             (source_id, external_source_ref, source_sha256, source_page_url,
-                              content_type)
-                           VALUES (%s,%s,%s,
-                                   (SELECT source_page_url FROM media_run WHERE run_id=%s),
-                                   (SELECT content_type FROM media_run WHERE run_id=%s))
-                           ON CONFLICT (external_source_ref, source_sha256)
-                           DO UPDATE SET source_page_url=EXCLUDED.source_page_url
-                           RETURNING source_id""",
-                        (
-                            source_id,
-                            f"submission:{run_id}",
-                            source_sha256,
-                            run_id,
-                            run_id,
-                        ),
+                        """INSERT INTO source_asset(source_id,external_source_ref,source_sha256,
+                           source_page_url,content_type) VALUES (%s,%s,%s,%s,%s)""",
+                        (source_id,f"submission:{run_id}",source_sha256,page_url,content_type),
                     )
-                else:
+                if retained_name is not None:
                     if not source_bucket:
                         raise ValueError("Retained source bucket is required")
                     cursor.execute(
-                        """INSERT INTO source_asset
-                         (source_id, external_source_ref, source_sha256, source_page_url,
-                          object_bucket, object_name, object_generation, object_bytes, content_type,
-                          encryption_mode, storage_kind)
-                       VALUES (%s,%s,%s,
-                               (SELECT source_page_url FROM media_run WHERE run_id=%s),
-                               %s,%s,%s,%s,
-                               (SELECT content_type FROM media_run WHERE run_id=%s),'CSEK','managed')
-                       ON CONFLICT (source_sha256) WHERE storage_kind='managed' AND deleted_at IS NULL
-                       DO UPDATE SET source_sha256=EXCLUDED.source_sha256
-                       RETURNING source_id""",
-                        (
-                            source_id,
-                            f"submission:{run_id}",
-                            source_sha256,
-                            run_id,
-                            source_bucket,
-                            retained_name,
-                            retained_generation,
-                            retained_bytes,
-                            run_id,
-                        ),
+                        """UPDATE source_asset SET object_bucket=%s,object_name=%s,
+                           object_generation=%s,object_bytes=%s,encryption_mode='CSEK',storage_kind='managed'
+                           WHERE source_id=%s""",
+                        (source_bucket,retained_name,retained_generation,retained_bytes,source_id),
                     )
-                effective_source_id = str(cursor.fetchone()[0])
-                targets = enrollment_targets(cursor, run_id, model_version)
+                if page_url:
+                    cursor.execute(
+                        """INSERT INTO source_url(source_sha256,page_url) VALUES (%s,%s)
+                           ON CONFLICT DO NOTHING""", (source_sha256,page_url),
+                    )
+                effective_source_id = source_id
+                # Do not even allocate assignment subjects for a duplicate video.
+                targets = {} if reused else enrollment_targets(cursor, run_id, model_version)
                 affected_subjects = set()
-                for group, ranked in zip(groups, rankings, strict=True):
+                for group, ranked in zip([] if reused else groups, [] if reused else rankings, strict=True):
                     if group.group_id not in targets:
                         raise ValueError("Selected track has no enrollment assignment")
                     subject_id = targets[group.group_id]
@@ -468,9 +461,9 @@ class InteractiveRepository:
                 recalculate_subjects(cursor, affected_subjects)
                 cursor.execute(
                     """UPDATE media_run SET retained_source_id=%s,
-                              enrollment_completed_at=now()
+                              enrollment_completed_at=now(),enrollment_reused=%s
                        WHERE run_id=%s""",
-                    (effective_source_id, run_id),
+                    (effective_source_id, reused, run_id),
                 )
             cursor.execute(
                 """UPDATE media_run SET state = 'succeeded', outcome = 'candidates',

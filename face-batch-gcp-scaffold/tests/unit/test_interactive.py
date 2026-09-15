@@ -164,7 +164,7 @@ def test_matching_uses_model_compatible_read_only_ranker():
     assert repository.match_completed[0:2] == (RUN_ID, "owner")
 
 
-def test_retained_matching_promotes_before_enrollment_commit():
+def test_retained_matching_defers_promotion_until_locked_enrollment():
     data = jpeg()
     repository = Repository(data)
     repository.claim_matching = lambda _run_id: MatchWork(
@@ -184,6 +184,8 @@ def test_retained_matching_promotes_before_enrollment_commit():
         settings(), repository, storage, Detector(), Embedder()
     )
     assert processor.match(RUN_ID)
+    assert not hasattr(storage, "promoted")
+    calls[0]["promote_source"]("source")
     assert storage.promoted[1:] == ("submissions-temporary/run/source.jpg", 3)
     assert "threshold_version" not in calls[0]
     assert "threshold" not in calls[0]

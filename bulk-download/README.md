@@ -55,18 +55,25 @@ on retry and check existing submissions before processing historical objects.
 Keep configuration, keys, credentials, manifests, and temporary media out of Git.
 The resolver uses static pages; unsupported or unavailable sources remain failures.
 
-## Hotscope user downloads
+## Hotscope downloads
 
 Use the same config, CSEK, and GCS bucket as the existing downloader:
 
 ```bash
+# From the bulk-download directory: download only the listed videos, without usernames.
+bulk-download discover --videos-file input/hotscope_videos.txt
+bulk-download run --videos-file input/hotscope_videos.txt
+bulk-download run --video-url https://hotscope.tv/video/VIDEO_ID
+
 bulk-download discover --user USERNAME --max-videos-per-user 5
 bulk-download run --user USER_A --user USER_B --max-videos-per-user 5
 bulk-download run --users-file input/hotscope_users.txt --videos-file input/hotscope_videos.txt
 ```
 
+With only `--videos-file`, `--video-url`, or `--video-id`, each specific video is resolved directly; no profile listings are fetched. Duplicate IDs are collapsed in file order, completed entries are skipped on reruns, and failed links are recorded while the remaining links continue. An empty or invalid list fails before storage access.
+
 Repeat `--user` or provide one username/profile URL per line in `--users-file`.
-Select individual videos with repeated `--video-id ID` or a `--videos-file`
+When users are supplied, filter their listings with repeated `--video-id ID` or a `--videos-file`
 containing IDs or Hotscope video-page URLs. Blank lines and `#` comments are
 ignored. Without a selection/count limit, all videos listed for the supplied
 users are selected. `--max-pages` defaults to 100 per user; unfinished pagination

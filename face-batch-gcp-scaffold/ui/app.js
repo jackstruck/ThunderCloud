@@ -41,10 +41,12 @@ async function results(){const request=state.runRequest;try{const data=(await ap
 const sourceLinks=urls=>{const wrap=document.createElement('div');wrap.className='source-links';(urls||[]).forEach((url,index)=>{const link=document.createElement('a');if(!/^https:\/\//i.test(url))return;link.href=url;link.target='_blank';link.rel='noopener noreferrer';link.textContent=`Source page ${index+1}`;wrap.append(link)});return wrap};
 function renderResults(){
  const root=document.querySelector('#candidate-groups');root.replaceChildren();
- const enrollments=new Map();
- state.results.groups.forEach(g=>{
-  if(!g.enrollment)return;
-  const e=g.enrollment;
+ const enrollments=new Map(),enrollmentSources=new Map();
+ if(state.results.enrollment_reused){const notice=document.createElement('p');notice.className='matching-status';notice.textContent='This video was already enrolled. Existing subjects are shown below; no new subjects or examples were created.';root.append(notice);}
+ [...state.results.groups.map(g=>g.enrollment),...(state.results.reused_enrollments||[])].forEach(e=>{
+  if(!e)return;
+  if(!enrollmentSources.has(e.subject_id))enrollmentSources.set(e.subject_id,new Set());
+  if(e.source_id)enrollmentSources.get(e.subject_id).add(e.source_id);
   if(!enrollments.has(e.subject_id))enrollments.set(e.subject_id,new Map());
   (e.representative_faces||[]).forEach(f=>enrollments.get(e.subject_id).set(f.representative_id,f));
  });
@@ -53,13 +55,15 @@ function renderResults(){
  if(enrollments.size)root.append(enrolledGrid);
  enrollments.forEach((faces,subjectId)=>{
   const section=document.createElement('section');section.className='enrolled-subject';
-  const h=document.createElement('h3');h.textContent=`Enrolled ${subjectId}`;
+  const h=document.createElement('h3');h.textContent=`${state.results.enrollment_reused?'Existing subject':'Enrolled'} ${subjectId}`;
   const link=document.createElement('a');link.href=`/subjects/${subjectId}`;link.textContent='View Subject';link.className='button-link secondary';
   const gallery=document.createElement('div');gallery.className='representatives';
   faces.forEach(f=>{const img=document.createElement('img');img.src=f.url;img.alt='Enrolled face from this run';img.loading='lazy';gallery.append(img);});
-  section.append(h,gallery);
+  const actions=document.createElement('div');actions.className='result-actions';actions.append(link);
+  enrollmentSources.get(subjectId).forEach(sourceId=>{const source=document.createElement('a');source.href=`/sources/${sourceId}`;source.textContent='View Source';source.className='button-link secondary';actions.append(source);});
+  section.append(h,actions,gallery);
   if(!faces.size){const p=document.createElement('p');p.textContent='No gallery images are available for this enrollment.';section.append(p);}
-  section.append(link);enrolledGrid.append(section);
+  enrolledGrid.append(section);
  });
  if(state.results.handling_policy==='enroll_only'){
   const p=document.createElement('p');p.className='matching-status';p.textContent='Enroll Only: matching against existing subjects was not run. Open the enrolled subject to view potential matches.';root.append(p);
@@ -74,10 +78,12 @@ function renderResults(){
    const score=document.createElement('p');score.textContent=`${(c.similarity*100).toFixed(1)}% similarity · rank ${c.rank}`;
    const gallery=document.createElement('div');gallery.className='representatives';
    c.representative_faces.forEach(f=>{const img=document.createElement('img');img.src=f.url;img.alt='Representative face';gallery.append(img);});
-   const link=document.createElement('a');link.className='subject-result-link';link.href=`/subjects/${c.subject_id}`;link.textContent=`View subject · ${c.subject_id}`;
+   const link=document.createElement('a');link.className='button-link secondary';link.href=`/subjects/${c.resolved_subject_id||c.subject_id}`;link.textContent='View Subject';link.title=c.subject_id;
+   const actions=document.createElement('div');actions.className='result-actions';actions.append(sourceLinks(c.page_urls),link);
+   (c.sources||[]).forEach((source,index)=>{const button=document.createElement('a');button.href=`/sources/${source.source_id}`;button.className='button-link secondary';button.textContent=c.sources.length>1?`View Source ${index+1}`:'View Source';button.title=source.page_url||source.source_id;actions.append(button);});
    copy.append(name,score);
-   if(c.subject_version_status==='changed'||c.subject_version_status==='unavailable'){const version=document.createElement('p');version.className='subject-version-note';version.textContent=c.subject_version_status==='changed'?'Subject changed since this search':'Prior subject version is unavailable';copy.append(version);}
-   copy.append(gallery,sourceLinks(c.page_urls),link);a.append(copy);root.append(a);
+   if(c.subject_version_status==='changed'||c.subject_version_status==='unavailable'){const version=document.createElement('p');version.className='subject-version-note';version.textContent=c.resolved_subject_id&&c.resolved_subject_id!==c.subject_id?'Merged since this search · showing the current subject':c.subject_version_status==='changed'?'Subject changed since this search':'Prior subject version is unavailable';copy.append(version);}
+   copy.append(gallery,actions);a.append(copy);root.append(a);
   });
  });show('results');
 }

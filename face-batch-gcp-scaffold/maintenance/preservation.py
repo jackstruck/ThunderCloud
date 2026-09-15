@@ -13,12 +13,14 @@ from maintenance.migrations import MigrationError
 PROJECTIONS = {
     "examples": """SELECT e.example_id,e.subject_id,e.source_id,e.face_track_id,e.submission_group_id,
         e.embedding::text,COALESCE(v.verified_model_version,e.model_version) AS model_version,
-        e.start_ms,e.end_ms,e.quality_score,e.created_at
+        e.start_ms,e.end_ms,e.quality_score,e.created_at,
+        to_jsonb(e)->>'disabled_reason',to_jsonb(e)->>'disabled_at',to_jsonb(e)->>'disabled_by'
         FROM subject_example e LEFT JOIN face_track t ON t.track_id=e.face_track_id
         LEFT JOIN verified_embedding_model v ON v.processing_job_id=t.processing_job_id
           AND v.reported_model_version=e.model_version ORDER BY e.example_id""",
     "subjects": """SELECT subject_id,identity_id,canonical_embedding::text,model_version,
-        sample_count,metadata,created_at,updated_at,row_version,merged_into_subject_id
+        sample_count,metadata,created_at,updated_at,row_version,merged_into_subject_id,
+        COALESCE((to_jsonb(subject)->>'matching_excluded')::boolean,false)
         FROM subject ORDER BY subject_id""",
     "identities": "SELECT * FROM identity ORDER BY identity_id",
     "sources": """SELECT (to_jsonb(s)-'metadata'-'source_page_url'-'object_bucket'-'object_name'-'object_generation'-'storage_kind') || jsonb_build_object(
@@ -59,7 +61,7 @@ INVARIANTS = {
     "merged_subject_members": """SELECT count(*) FROM subject_example e JOIN subject s USING(subject_id)
         WHERE s.merged_into_subject_id IS NOT NULL""",
     "subject_counts": """SELECT count(*) FROM subject s WHERE sample_count <>
-        (SELECT count(*) FROM subject_example e WHERE e.subject_id=s.subject_id)""",
+        (SELECT count(*) FROM subject_example e WHERE e.subject_id=s.subject_id AND to_jsonb(e)->>'disabled_at' IS NULL)""",
     "empty_representations": """SELECT count(*) FROM subject WHERE
         (sample_count=0) <> (canonical_embedding IS NULL)""",
     "model_provenance": """SELECT count(*) FROM subject_example e JOIN subject s USING(subject_id)
@@ -142,7 +144,7 @@ def representation_errors(cursor, heartbeat=None):
         )
 
     query = """SELECT e.subject_id,e.embedding::text,s.canonical_embedding::text
-        FROM subject_example e JOIN subject s USING(subject_id) ORDER BY e.subject_id,e.example_id"""
+        FROM subject_example e JOIN subject s USING(subject_id) WHERE to_jsonb(e)->>'disabled_at' IS NULL ORDER BY e.subject_id,e.example_id"""
     for subject, embedding, canonical in stream(cursor, query, heartbeat):
         if subject != previous:
             if previous is not None:

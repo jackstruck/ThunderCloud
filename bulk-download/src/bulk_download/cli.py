@@ -12,7 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .config import ConfigError, load_config, load_csek
 from .download import download_video
 from .fetch import Fetcher, FetchError
-from .hotscope import HOSTS, discover_users, read_list, user_name, video_id
+from .hotscope import HOSTS, discover_users, discover_videos, read_list, user_name, video_id
 from .manifest import append, completed_hashes, completed_urls
 from .pipeline import (
     DiscoveryFailure,
@@ -49,7 +49,7 @@ def _parser() -> argparse.ArgumentParser:
             child.add_argument("--provider", choices=("legacy", "hotscope"), default="legacy")
             child.add_argument("--user", action="append", default=[], help="Hotscope username or profile URL; repeatable")
             child.add_argument("--users-file", help="one username or profile URL per line")
-            child.add_argument("--video-id", action="append", default=[], help="select a video ID or page URL; repeatable")
+            child.add_argument("--video-id", "--video-url", action="append", default=[], help="select a video ID or page URL; repeatable")
             child.add_argument("--videos-file", help="selected video IDs or page URLs, one per line")
             child.add_argument("--max-videos-per-user", type=int, help="take the first N videos in provider order")
             child.add_argument("--max-pages", type=int, default=100, help="maximum listing pages per user")
@@ -62,8 +62,11 @@ def _parser() -> argparse.ArgumentParser:
 def _discover_all(config, input_stage: str = "all", options=None, done=None) -> tuple[list, list]:
     if options is not None and options.provider == "hotscope":
         users = list(dict.fromkeys(user_name(v) for v in options.user + read_list(options.users_file)))
-        selected = {video_id(v) for v in options.video_id + read_list(options.videos_file)}
+        selections = options.video_id + read_list(options.videos_file)
+        selected = {video_id(v) for v in selections}
         with Fetcher(config.http) as fetcher:
+            if not users:
+                return discover_videos(fetcher, selections, done)
             return discover_users(fetcher, users, selected, options.max_videos_per_user, options.max_pages, done)
     successes, failures = [], []
     heylink_inputs = load_inputs(config.input_file, "heylink") if input_stage in {"all", "heylink"} else []
@@ -218,19 +221,25 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(Path(args.config))
         if args.command == "doctor":
             return doctor(config)
-        if args.user or args.users_file:
+        if args.user or args.users_file or args.video_id or args.videos_file:
             args.provider = "hotscope"
         if args.provider == "hotscope":
-            if not (args.user or read_list(args.users_file)):
-                raise ConfigError("Hotscope requires --user or --users-file")
+            users = args.user + read_list(args.users_file)
+            selections = args.video_id + read_list(args.videos_file)
+            if args.videos_file and not selections:
+                raise ConfigError("video selection file contains no videos")
+            if not (users or selections):
+                raise ConfigError("provide at least one user or video")
+            if not users and args.max_videos_per_user is not None:
+                raise ConfigError("--max-videos-per-user requires users")
             if args.input_stage != "all":
                 raise ConfigError("--input-stage applies only to legacy inputs")
             if args.max_pages <= 0 or (args.max_videos_per_user is not None and args.max_videos_per_user <= 0):
                 raise ConfigError("Hotscope page and video limits must be positive")
             # Validate the entire selection before connecting to GCS or the provider.
-            for value in args.user + read_list(args.users_file):
+            for value in users:
                 user_name(value)
-            for value in args.video_id + read_list(args.videos_file):
+            for value in selections:
                 video_id(value)
         elif args.video_id or args.videos_file or args.max_videos_per_user:
             raise ConfigError("video selection requires Hotscope users")

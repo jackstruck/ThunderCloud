@@ -505,7 +505,19 @@ class RunRepository:
         try:
             cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             cursor.execute(
-                """SELECT face.group_id, rc.subject_id, rc.rank, rc.similarity,
+                """WITH RECURSIVE subject_resolution AS (
+                     SELECT s.subject_id AS original_id, s.subject_id, s.merged_into_subject_id
+                     FROM subject s WHERE s.subject_id IN (
+                       SELECT subject_id FROM run_candidate WHERE run_id=%s)
+                     UNION
+                     SELECT previous.original_id, s.subject_id, s.merged_into_subject_id
+                     FROM subject_resolution previous
+                     JOIN subject s ON s.subject_id=previous.merged_into_subject_id
+                   ), resolved_subject AS (
+                     SELECT original_id, subject_id FROM subject_resolution
+                     WHERE merged_into_subject_id IS NULL
+                   )
+                   SELECT face.group_id, rc.subject_id, rc.rank, rc.similarity,
                           rc.display_name_snapshot, rc.source_count,
                           rc.observation_count, gallery.representative_id,
                           gallery.quality_score, gallery.source_timestamp_ms
@@ -528,21 +540,22 @@ class RunRepository:
                                   OR event.details->'shared_identity_subject_ids' ? rc.subject_id::text)
                             ) THEN 'changed'
                             ELSE 'unavailable'
-                          END AS subject_version_status
+                          END AS subject_version_status, resolved.subject_id
                    FROM submission_face_group face
                    LEFT JOIN run_candidate rc
                      ON rc.run_id = face.run_id AND rc.group_id = face.group_id
                    LEFT JOIN subject current_subject ON current_subject.subject_id=rc.subject_id
+                   LEFT JOIN resolved_subject resolved ON resolved.original_id=rc.subject_id
                    LEFT JOIN LATERAL (
                      SELECT r.* FROM subject_representative_face r
                      JOIN subject_example e USING(example_id)
-                     WHERE e.subject_id=rc.subject_id AND r.active
+                     WHERE e.subject_id=COALESCE(resolved.subject_id,rc.subject_id) AND e.disabled_at IS NULL AND r.active
                      ORDER BY r.quality_score DESC NULLS LAST,r.representative_id LIMIT 5
                    ) gallery ON true
                    WHERE face.run_id = %s AND face.selected
                    ORDER BY rc.group_id, rc.rank, gallery.quality_score DESC NULLS LAST,
                             gallery.representative_id""",
-                (run_id,),
+                (run_id, run_id),
             )
             groups: dict[str, dict[str, dict[str, Any]]] = {}
             for row in cursor.fetchall():
@@ -563,6 +576,7 @@ class RunRepository:
                         "page_urls": list(row[10] or []),
                         "compared_subject_version": row[11],
                         "subject_version_status": row[12],
+                        "resolved_subject_id": str(row[13]) if row[13] else subject_id,
                         "representative_faces": [],
                     },
                 )
@@ -577,9 +591,29 @@ class RunRepository:
                             "source_timestamp_ms": row[9],
                         }
                     )
+            subject_ids = sorted({candidate["resolved_subject_id"] for candidates in groups.values() for candidate in candidates.values()})
+            sources_by_subject = {}
+            if subject_ids:
+                cursor.execute(
+                    """SELECT DISTINCT e.subject_id, e.source_id, sa.source_page_url,
+                         ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=e.source_id ORDER BY p.page_url)
+                       FROM subject_example e JOIN source_asset sa USING(source_id)
+                       WHERE e.subject_id = ANY(%s::uuid[])
+                       ORDER BY e.subject_id, e.source_id""",
+                    (subject_ids,),
+                )
+                for sid, source_id, page_url, page_urls in cursor.fetchall():
+                    sources_by_subject.setdefault(str(sid), []).append({
+                        "source_id": str(source_id), "page_url": page_url, "page_urls": list(page_urls)})
+            for candidates in groups.values():
+                for sid, candidate in candidates.items():
+                    candidate["sources"] = sources_by_subject.get(candidate["resolved_subject_id"], [])
+                    candidate["page_urls"] = sorted(set(candidate["page_urls"]) | {
+                        url for source in candidate["sources"] for url in source["page_urls"]})
             return {
                 "run_id": run_id,
                 "handling_policy": run["handling_policy"],
+                **self._reused_enrollment(cursor, run_id),
                 "groups": [
                     {
                         "group_id": group_id,
@@ -597,6 +631,34 @@ class RunRepository:
             connection.rollback()
             cursor.close()
             connection.close()
+
+    @staticmethod
+    def _reused_enrollment(cursor, run_id):
+        cursor.execute("SELECT enrollment_reused,retained_source_id FROM media_run WHERE run_id=%s", (run_id,))
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            return {"enrollment_reused": False, "reused_enrollments": []}
+        source_id = str(row[1])
+        cursor.execute(
+            """SELECT DISTINCT e.subject_id FROM subject_example e JOIN source_asset s USING(source_id)
+               WHERE s.source_sha256=(SELECT source_sha256 FROM media_run WHERE run_id=%s)
+               ORDER BY e.subject_id""", (run_id,),
+        )
+        subjects = [str(r[0]) for r in cursor.fetchall()]
+        enrollments = []
+        for subject_id in subjects:
+            cursor.execute(
+                """SELECT r.representative_id FROM subject_representative_face r
+                   JOIN subject_example e USING(example_id) JOIN source_asset s USING(source_id)
+                   WHERE e.subject_id=%s AND e.disabled_at IS NULL AND r.active
+                     AND s.source_sha256=(SELECT source_sha256 FROM media_run WHERE run_id=%s)
+                   ORDER BY r.quality_score DESC NULLS LAST,r.representative_id LIMIT 5""",
+                (subject_id,run_id),
+            )
+            enrollments.append({"subject_id":subject_id,"source_id":source_id,"decision":"reused",
+                "representative_faces":[{"representative_id":str(r[0]),
+                    "url":f"/api/gallery/faces/{r[0]}"} for r in cursor.fetchall()]})
+        return {"enrollment_reused":True,"reused_enrollments":enrollments}
 
     @staticmethod
     def _enrollment_for_group(cursor, run_id: str, group_id: str):

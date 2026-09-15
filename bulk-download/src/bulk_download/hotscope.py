@@ -63,7 +63,7 @@ def read_list(path: str | None) -> list[str]:
     if path is None:
         return []
     try:
-        return [line.strip() for line in Path(path).read_text().splitlines()
+        return [line.strip() for line in Path(path).read_text(encoding="utf-8-sig").splitlines()
                 if line.strip() and not line.lstrip().startswith("#")]
     except OSError as exc:
         raise ValueError(f"cannot read selection file: {path}") from exc
@@ -137,7 +137,7 @@ def _action(fetcher: Fetcher, html: str, page: str) -> str:
     raise FetchError("unsupported_profile", "public user listing action was not found")
 
 
-def resolve_video(fetcher: Fetcher, ident: str, username: str) -> HotscopeDiscovery:
+def resolve_video(fetcher: Fetcher, ident: str, username: str | None = None) -> HotscopeDiscovery:
     page = f"https://hotscope.tv/video/{ident}"
     html, final = fetcher.html(page)
     if video_id(final) != ident:
@@ -145,18 +145,20 @@ def resolve_video(fetcher: Fetcher, ident: str, username: str) -> HotscopeDiscov
     candidates = [obj for obj in _page_objects(html) if obj.get("id") == ident and "playlist" in obj]
     if not candidates:
         raise FetchError("no_full_video", "requested video's full playlist was not found")
-    playlists = set()
+    playlists, owners = set(), set()
     for obj in candidates:
-        if obj.get("uploader", {}).get("username", "").casefold() != username.casefold():
+        owner = user_name(obj["uploader"]["username"])
+        owners.add(owner)
+        if username is not None and owner.casefold() != username.casefold():
             raise FetchError("identity_mismatch", "video does not belong to the selected user")
         media = canonicalize(obj["playlist"])
         parts = urlsplit(media)
         if parts.hostname != "cdn.hotscope.tv" or parts.path != f"/videos/{ident}/playlist.m3u8":
             raise FetchError("no_full_video", "unexpected full-video descriptor")
         playlists.add(media)
-    if len(playlists) != 1:
+    if len(playlists) != 1 or len({owner.casefold() for owner in owners}) != 1:
         raise FetchError("identity_mismatch", "conflicting playback descriptors")
-    return HotscopeDiscovery(page, page, ident, username, playlists.pop(),
+    return HotscopeDiscovery(page, page, ident, username or sorted(owners)[0], playlists.pop(),
                              str(uuid.uuid5(uuid.NAMESPACE_URL, f"hotscope:video:{ident}")), page)
 
 
@@ -218,4 +220,22 @@ def discover_users(fetcher: Fetcher, users: list[str], selected: set[str],
     for ident in sorted(selected - matched):
         failures.append(DiscoveryFailure("selection_not_found", "selected video was not found for the supplied users",
                                         {"provider": "hotscope", "provider_id": ident}))
+    return found, failures
+
+
+def discover_videos(fetcher: Fetcher, selected: list[str], done: set[str] | None = None):
+    """Resolve explicit videos without fetching profiles or enumerating other videos."""
+    identifiers = list(dict.fromkeys(video_id(value) for value in selected))
+    found, failures = [], []
+    with fetcher.restricted_to(HOSTS):
+        for ident in identifiers:
+            page = f"https://hotscope.tv/video/{ident}"
+            if page in (done or set()):
+                continue
+            try:
+                found.append(resolve_video(fetcher, ident))
+            except (FetchError, UnsafeUrl, ValueError, TypeError, KeyError, AttributeError) as exc:
+                failures.append(DiscoveryFailure(getattr(exc, "code", "invalid_provider_data"),
+                    "could not resolve selected video", {"provider": "hotscope", "requested_url": page,
+                    "page_url": page, "provider_id": ident}))
     return found, failures

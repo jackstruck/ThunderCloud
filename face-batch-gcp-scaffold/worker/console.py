@@ -316,14 +316,16 @@ def create_app(
         if multiple not in {"true", "false"}:
             raise SubjectError(422, "invalid_search", "Use true or false for the source filter.")
         return jsonify(subject_service.browse_sources(
-            request.args.get("q", ""), request.args.get("cursor"), page_size(24), multiple == "true"))
+            request.args.get("q", ""), request.args.get("cursor"), page_size(24), multiple == "true",
+            sort=request.args.get("sort", "id"), origin=request.args.get("origin", "")))
 
     @app.get("/api/subjects")
     def list_subjects():
         subjects_available()
         multiple = request.args.get("multiple_sources", "false")
         shared = request.args.get("shared_source", "false")
-        if multiple not in {"true", "false"} or shared not in {"true", "false"}:
+        include_excluded = request.args.get("include_excluded", "false")
+        if multiple not in {"true", "false"} or shared not in {"true", "false"} or include_excluded not in {"true", "false"}:
             raise SubjectError(
                 422, "invalid_search", "Use true or false for the source filter."
             )
@@ -336,8 +338,21 @@ def create_app(
                 sort=request.args.get("sort", "id"),
                 shared_source=shared == "true",
                 source_id=request.args.get("source_id"),
+                source_scope=request.args.get("source_scope", "all"),
+                name_status=request.args.get("name_status", "all"),
+                include_excluded=include_excluded == "true",
             )
         )
+
+    @app.put("/api/subjects/<subject_id>/matching")
+    def subject_matching_exclusion(subject_id):
+        subjects_available()
+        return jsonify(subject_service.matching_exclusion(subject_id, _json_object(), g.principal))
+
+    @app.put("/api/subjects/<subject_id>/examples/matching")
+    def subject_example_status(subject_id):
+        subjects_available()
+        return jsonify(subject_service.example_status(subject_id, _json_object(), g.principal))
 
     @app.get("/api/subjects/<subject_id>/examples")
     def subject_examples(subject_id):
@@ -634,6 +649,18 @@ def create_app(
     def styles():
         return send_from_directory(
             os.path.join(os.path.dirname(__file__), "..", "ui"), "styles.css"
+        )
+
+    @app.get("/privacy.js")
+    def privacy_javascript():
+        return send_from_directory(
+            os.path.join(os.path.dirname(__file__), "..", "ui"), "privacy.js"
+        )
+
+    @app.get("/video-links.js")
+    def video_links_js():
+        return send_from_directory(
+            os.path.join(os.path.dirname(__file__), "..", "ui"), "video-links.js"
         )
 
     @app.get("/app.js")
