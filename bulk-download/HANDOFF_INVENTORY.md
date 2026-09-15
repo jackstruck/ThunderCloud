@@ -26,7 +26,7 @@ future handoff, existing submissions would need checking by exact source identit
 The principal and policies remain undecided. A real preparation step would create
 a separate durable receipt and idempotency key; an accepted submission would supply
 a run ID. This inventory is not a submission receipt and is not accepted directly
-by `face-submit`.
+by `data-submit`.
 
 To extend the inventory, add one entry per completed immutable source using the
 exact manifest metadata. Deduplicate by bucket, object name, and generation. A

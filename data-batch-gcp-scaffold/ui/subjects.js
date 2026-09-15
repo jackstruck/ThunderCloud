@@ -1,0 +1,890 @@
+/* Subject management shares the existing console's authenticated API and theme. */
+(() => {
+  const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== null && text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
+  const button = (text, onClick, cls = 'secondary') => { const n = el('button', text, cls); n.type = 'button'; n.addEventListener('click', onClick); return n; };
+  const errorAt = (root, error) => { root.textContent = error.message; root.setAttribute('role', 'alert'); };
+  const name = s => s.display_name || 'Unnamed subject';
+  const features = api('/api/features').then(r => r.body).catch(() => ({ subject_management: false, enrollment_grouping: false }));
+  let detailRequest = 0, lookupId = 0;
+  const operations = new Map();
+  async function mutate(url, method, body) {
+    delete body.operation_id;
+    const key = JSON.stringify([url, method, body]);
+    if (!operations.has(key)) operations.set(key, crypto.randomUUID());
+    const controls = [...document.querySelectorAll('#subject-detail button, #subject-detail input, #subject-detail select')].filter(n => !n.disabled);
+    controls.forEach(n => { n.disabled = true; });
+    try { const response = await api(url, { method, body: JSON.stringify({ ...body, operation_id: operations.get(key) }) }); operations.delete(key); return response; }
+    finally { controls.forEach(n => { if (n.isConnected) n.disabled = false; }); }
+  }
+
+  function gallery(subject) {
+    const root = el('div', null, 'representatives');
+    (subject.representative_faces || []).forEach(f => { const img = el('img'); img.src = f.url; img.alt = `Representative of ${name(subject)}`; img.loading = 'lazy'; root.append(img); });
+    if (!root.children.length) root.append(el('p', 'No gallery images available.', 'hint'));
+    return root;
+  }
+  function subjectCard(subject, pick) {
+    const root = el('article', null, 'subject-card');
+    root.append(gallery(subject), el('strong', name(subject)));
+    const id = el('code', subject.subject_id, 'subject-id'), idRow = el('div', null, 'subject-id-row');
+    const copy = button('⧉', async () => { try { await navigator.clipboard.writeText(subject.subject_id); copy.textContent = '✓'; copy.setAttribute('aria-label', 'ID copied'); } catch (_) { copy.title = 'Could not copy. Select the ID to copy manually.'; } }, 'link copy-id');
+    copy.setAttribute('aria-label', 'Copy ID'); copy.title = 'Copy ID'; idRow.append(id, copy); root.append(idRow);
+    root.append(el('p', `${subject.source_count} sources · ${subject.example_count ?? subject.observation_count} examples`, 'hint'));
+    if (subject.matching_excluded) root.append(el('p', 'Excluded from matching', 'matching-status'));
+    if (subject.active_example_count !== undefined) root.append(el('p', `${subject.active_example_count} active examples`, 'hint'));
+    if (subject.active_example_count === 0) root.append(el('p', 'No active examples — ineligible for matching', 'matching-status'));
+    if (subject.resolved_from) root.append(el('p', `Combined from ${subject.resolved_from}`, 'hint'));
+    if (pick) root.append(button('Choose subject', () => pick(subject)));
+    else { const a = el('a', 'Open subject'); a.href = `/subjects/${subject.subject_id}`; a.dataset.subjectRoute = 'true'; root.append(a); }
+    if (!pick && subject.source_count) {
+      const actions = el('div', null, 'subject-card-actions'); actions.append(root.querySelector('a[data-subject-route]')); root.append(actions);
+      const links = el('div', null, 'source-card-links'); actions.append(links);
+      api(`/api/subjects/${subject.subject_id}/sources`).then(({ body }) => {
+        body.sources.forEach(source => {
+          const link = sourceLink(source.source_id);
+          link.textContent = `Open Source (${source.subject_count} subjects)`;
+          link.title = source.page_url || source.source_id;
+          const line = el('p'); line.append(link); links.append(line);
+        });
+      }).catch(() => { links.append(button('Reload source links', () => { const replacement = subjectCard(subject, pick); root.replaceWith(replacement); })); });
+    }
+    return root;
+  }
+
+  function rangeSelection(selection, changed, message, limit = 50) {
+    let anchor = null;
+    const rows = [];
+    const sync = () => rows.forEach(({ checkbox, subject }) => { checkbox.checked = selection.has(subject.subject_id); });
+    const apply = (subjects, checked) => {
+      const size = new Set([...selection.keys(), ...subjects.map(s => s.subject_id)]).size;
+      if (checked && size > limit) { errorAt(message, new Error(`Select at most ${limit} subjects. Narrow your search or clear the selection.`)); sync(); return; }
+      subjects.forEach(s => checked ? selection.set(s.subject_id, s) : selection.delete(s.subject_id));
+      sync(); changed?.();
+    };
+    return { apply, add(checkbox, subject, label) {
+      const index = rows.length; rows.push({ checkbox, subject });
+      const toggle = (event, checked) => {
+        const range = event.shiftKey && anchor !== null ? rows.slice(Math.min(anchor, index), Math.max(anchor, index) + 1) : [rows[index]];
+        apply(range.map(r => r.subject), checked);
+        if (!event.shiftKey || anchor === null) anchor = index;
+      };
+      checkbox.addEventListener('click', event => toggle(event, checkbox.checked));
+      // Label-generated checkbox clicks can lose Shift. Handle the original
+      // label click and cancel its forwarded click so selection changes once.
+      label.addEventListener('click', event => {
+        if (event.target === checkbox || event.target.closest('a,button,select')) return;
+        event.preventDefault();
+        toggle(event, !selection.has(subject.subject_id));
+      });
+    } };
+  }
+
+  function lookup(root, pick, options = {}) {
+    root.replaceChildren();
+    const label = el('label', 'Subject ID or display name');
+    const input = el('input'); input.type = 'search'; input.placeholder = 'Paste a subject UUID or enter a display name'; input.value = options.query || ''; label.append(input);
+    const filter = el('label', 'Source count'), sourceScope = el('select'); sourceScope.setAttribute('aria-label', 'Source count');
+    [['all','Any number of sources'],['single','Single-source only'],['multiple','Multiple sources']].forEach(([value,text])=>{const option=el('option',text);option.value=value;sourceScope.append(option);});
+    sourceScope.value = options.sourceScope || (options.multipleSources ? 'multiple' : 'all'); filter.append(sourceScope);
+    const excludedLabel = el('label', 'Include excluded', 'subject-filter-inline'), includeExcluded = el('input');
+    includeExcluded.type = 'checkbox'; includeExcluded.checked = !!options.includeExcluded; excludedLabel.prepend(includeExcluded);
+    const nameFilter = el('label', 'Subject name'), nameStatus = el('select'); nameStatus.setAttribute('aria-label', 'Subject name');
+    [['all','Named and unnamed'],['named','Named only'],['unnamed','Unnamed only']].forEach(([value,text])=>{const option=el('option',text);option.value=value;nameStatus.append(option);});
+    nameStatus.value = options.nameStatus || 'all'; nameFilter.append(nameStatus);
+    const sharedFilter = el('label', 'Multiple Subjects per Source', 'subject-filter-inline'), shared = el('input'); shared.type = 'checkbox'; shared.checked = !!options.sharedSource; sharedFilter.prepend(shared);
+    const order = el('select');
+    order.id = `subject-sort-${++lookupId}`;
+    const orderText = el('label', 'Sort subjects'); orderText.htmlFor = order.id;
+    // Separate label and select let the control shrink without wrapping its label.
+    const orderControl = el('div', null, 'subject-sort-inline'); orderControl.append(orderText, order);
+    [['id', 'Subject ID'], ['sources', 'Most sources first'], ['examples', 'Most examples first'], ['newest', 'Newest first']].forEach(([value, text]) => { const option = el('option', text); option.value = value; order.append(option); });
+    order.value = options.sort || 'id';
+    const message = el('p', '', 'inline-message'); const cards = el('div', null, 'subject-grid'); const pages = el('div', null, 'pagination');
+    let next = null, prior = [], cursor = options.cursor || null, serial = 0;
+    let appliedParams = null;
+    const selectAll = button('Select all', async () => {
+      if (!appliedParams) return;
+      const selectionSerial = serial; selectAll.disabled = true;
+      try {
+        const params = new URLSearchParams(appliedParams); params.delete('cursor'); params.set('limit', '100');
+        const data = (await api(`/api/subjects?${params}`)).body;
+        if (selectionSerial !== serial || !root.isConnected) return;
+        const subjects = data.subjects.filter(s => s.subject_id !== options.exclude);
+        const limit = options.exclude ? 49 : 50;
+        if (data.next_cursor || new Set([...options.selection.keys(), ...subjects.map(s => s.subject_id)]).size > limit) throw new Error(`Select at most ${limit} subjects. Narrow your search or clear the selection.`);
+        subjects.forEach(s => options.selection.set(s.subject_id, s));
+        cards.querySelectorAll('input[data-merge-id]').forEach(c => { c.checked = options.selection.has(c.dataset.mergeId); }); options.onSelection?.();
+      } catch (e) { if (selectionSerial === serial) errorAt(message, e); }
+      finally { if (selectionSerial === serial) selectAll.disabled = false; }
+    }); selectAll.disabled = true;
+    async function search(reset = true) {
+      const requestId = ++serial;
+      if (reset) { cursor = null; prior = []; }
+      const params = new URLSearchParams({ q: input.value.trim(), limit: '12' });
+      if (options.filters) { params.set('source_scope', sourceScope.value); params.set('name_status', nameStatus.value); params.set('shared_source', String(shared.checked)); params.set('sort', order.value); } if (cursor) params.set('cursor', cursor);
+      if (includeExcluded.checked) params.set('include_excluded','true');
+      if (options.sourceId) params.set('source_id', options.sourceId);
+      appliedParams = null; selectAll.disabled = true;
+      cards.replaceChildren(); pages.replaceChildren(); message.textContent = 'Loading subjects…';
+      try {
+        const data = (await api(`/api/subjects?${params}`)).body;
+        if (requestId !== serial) return;
+        cards.replaceChildren(); next = data.next_cursor; appliedParams = params; selectAll.disabled = !data.subjects.length;
+        const range = rangeSelection(options.selection, options.onSelection, message, options.exclude ? 49 : 50);
+        data.subjects.filter(s => s.subject_id !== options.exclude).forEach(s => {
+          const card = subjectCard(s, pick);
+          if (options.selection) {
+            const label = el('label', 'Select for merge', 'subject-filter-inline'), checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.dataset.mergeId = s.subject_id; checkbox.checked = options.selection.has(s.subject_id);
+            range.add(checkbox, s, label); label.prepend(checkbox); card.prepend(label);
+          }
+          cards.append(card); options.onCard?.(card, s);
+        });
+        message.textContent = cards.children.length ? '' : 'No subjects found.';
+        pages.replaceChildren();
+        if (prior.length || cursor) pages.append(button('Previous', () => { cursor = prior.pop() || null; search(false); }));
+        if (next) pages.append(button('Next', () => { prior.push(cursor); cursor = next; search(false); }, 'secondary pagination-next'));
+        options.onSearch?.(input.value.trim(), cursor, sourceScope.value === 'multiple', order.value, shared.checked, sourceScope.value, nameStatus.value, includeExcluded.checked);
+      } catch (e) { if (requestId === serial) { cards.replaceChildren(); errorAt(message, e); } }
+    }
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
+    includeExcluded.addEventListener('change', () => { options.selection?.clear(); options.onSelection?.(); search(); });
+    root.append(excludedLabel);
+    if (!options.hideSearch) root.append(label);
+    if (options.filters) { const filters=el('div',null,'browse-filters');filters.append(filter,nameFilter);root.append(filters,sharedFilter,orderControl); shared.addEventListener('change', () => search()); sourceScope.addEventListener('change', () => search()); nameStatus.addEventListener('change', () => search()); order.addEventListener('change', () => search()); }
+    if (!options.hideSearch) root.append(button('Search Subjects', () => search(), 'subject-search-button'));
+    if (options.selection) {
+      const tools = options.selectionTools || el('div', null, 'merge-tools');
+      tools.append(selectAll, el('span', 'Select all matching results · Shift-click to select a range on this page.', 'hint selection-hint')); root.append(tools);
+    }
+    root.append(message, cards, pages);
+    if (options.load) search(false);
+    return { search, input };
+  }
+
+  function sourceLink(sourceId) {
+    const link = el('a', 'View Source');
+    link.href = `/sources/${sourceId}`; return link;
+  }
+
+  async function reviewBulkMerge(subjects, defaultId, message, contextSource = null) {
+    if (subjects.length < 2 || subjects.length > 50) { errorAt(message, new Error('Select between 2 and 50 subjects.')); return; }
+    try {
+      const sources = await Promise.all(subjects.map(s => api(`/api/subjects/${s.subject_id}/sources`).then(r => r.body)));
+      if (sources.some((s, i) => s.subject_id !== subjects[i].subject_id || s.version !== subjects[i].version)) throw new Error('A selected subject changed. Refresh the selection before merging.');
+      const contents = el('div'), field = el('label', 'Keep this subject and its identity details'), survivor = el('select');
+      subjects.forEach(s => { const option = el('option', `${name(s)} · ${s.subject_id}`); option.value = s.subject_id; survivor.append(option); });
+      survivor.value = defaultId; field.append(survivor); contents.append(field);
+      const allSources = new Set(sources.flatMap(s => s.sources.map(r => r.source_id)));
+      contents.append(el('p', `${subjects.length} subjects selected. All ${subjects.reduce((n, s) => n + s.example_count, 0)} examples from ${allSources.size} distinct sources will be merged.`));
+      if (subjects.some(s => s.matching_excluded)) contents.append(el('p', 'The combined subject will remain excluded from matching until you explicitly restore it.'));
+      if (contextSource) contents.append(el('p', `This merges whole subjects, including ${[...allSources].filter(id => id !== contextSource).length} other sources.`));
+      const cards = el('div', null, 'subject-grid'); subjects.forEach(s => cards.append(subjectCard(s))); contents.append(cards);
+      if (!await confirmation('Merge selected subjects?', contents, 'Merge entire subjects')) return;
+      const destination = subjects.find(s => s.subject_id === survivor.value);
+      await mergeSubjects(subjects, destination);
+    } catch (error) { errorAt(message, error); }
+  }
+
+  async function mergeSubjects(subjects, destination) {
+      const result = (await mutate(`/api/subjects/${destination.subject_id}/bulk-combine`, 'POST', {
+        version: destination.version,
+        subjects: subjects.filter(s => s !== destination).map(s => ({ subject_id: s.subject_id, version: s.version })),
+      })).body;
+      await navigate(`/subjects/${result.destination.subject_id}`);
+  }
+
+  function bulkMergePanel(root, subject, initial = null) {
+    const panel = el('section', null, 'correction-panel'), chosen = new Map();
+    if (initial) chosen.set(initial.subject_id, initial);
+    panel.append(el('h3', 'Select subjects to merge'), el('p', 'Search or browse, select matching subjects, then review one merge.'));
+    const tray = el('div', null, 'selection-tools'), message = el('p', '', 'inline-message'), browser = el('div');
+    function renderSelection() {
+      tray.replaceChildren(el('strong', `${chosen.size} subjects selected to merge with this subject`));
+      chosen.forEach(s => tray.append(button(`Remove ${name(s)} · ${s.subject_id.slice(0, 8)}`, () => { chosen.delete(s.subject_id); renderSelection(); browser.querySelectorAll('input[data-merge-id]').forEach(c => { c.checked = chosen.has(c.dataset.mergeId); }); })));
+    }
+    const review = button('Review selected merge', async () => {
+      review.disabled = true;
+      try { await reviewBulkMerge([subject, ...chosen.values()], subject.subject_id, message); }
+      finally { review.disabled = false; }
+    }, 'primary');
+    panel.append(tray, browser, message, review, button('Close', () => panel.remove())); root.append(panel);
+    lookup(browser, null, { load: true, exclude: subject.subject_id, selection: chosen, onSelection: renderSelection });
+    renderSelection(); panel.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+
+  function sourceMergePanel(root, sourceIds, onApplied = null) {
+    const panel = el('details', null, 'source-merge-panel correction-panel');
+    const summary = el('summary', 'Matching groups');
+    panel.append(summary, el('p', 'Review each group as one person. Select the groups you want to merge, then choose which subject to keep.', 'hint'));
+    const label = el('label', 'Reviewed cosine threshold'), threshold = el('input'); threshold.type = 'number'; threshold.min = '-1'; threshold.max = '1'; threshold.step = 'any'; label.append(threshold);
+    const message = el('p', '', 'inline-message'), results = el('div');
+    const failures = new Map();
+    const plans = new Map(), cacheKey = 'source-merge-review-v1';
+    let saved = {}, applying = false, applicationEnabled = false;
+    const applicationStatus = el('p', 'Checking whether merging is enabled…', 'hint');
+    const selectionSummary = el('p', '', 'merge-selection-summary'); selectionSummary.setAttribute('aria-live', 'polite');
+    function updateSelection() {
+      const chosen = [...plans.values()].flatMap(p => p.groups.filter(g => g.selected && g.outcome?.status !== 'merged'));
+      const members = chosen.reduce((n, g) => n + g.members.length, 0);
+      selectionSummary.textContent = chosen.length ? `${chosen.length} groups selected · ${members} subjects → ${chosen.length} subjects` : 'No groups selected. Review a group, then check Include group.';
+      apply.disabled = applying || !chosen.length || !applicationEnabled;
+    }
+    try { saved = JSON.parse(sessionStorage.getItem(cacheKey) || '{}'); } catch (_) { /* Empty review workspace. */ }
+    const persist = () => { for (const [id, plan] of plans) saved[id] = plan; sessionStorage.setItem(cacheKey, JSON.stringify(saved)); };
+    function render() {
+      results.replaceChildren();
+      for (const [id, plan] of plans) {
+        const section = el('section', null, 'source-merge-result'), sourceHeading = sourceLink(id); sourceHeading.textContent = `Source ${id}`; sourceHeading.className = 'subject-id'; section.append(sourceHeading);
+        section.append(el('h3', `${plan.groups.length} matching groups`), el('p', 'Each group merges separately. Groups may still represent the same person and can be reviewed again afterward.', 'hint'));
+        const scanDetails = el('details', null, 'merge-scan-details'); scanDetails.append(el('summary', 'Matching settings and exclusions'), el('p', `Cosine threshold ${plan.threshold} · ${plan.algorithm}. Similarity is a score, not an identity probability.`, 'hint'));
+        section.append(scanDetails);
+        const groupSelection = el('div', null, 'group-selection-actions');
+        groupSelection.append(button('Select all groups', () => { plan.groups.forEach(g => { if (!g.pending && !g.outcome && !g.manual_handling_required) g.selected = true; }); persist(); render(); }), button('Clear group selection', () => { plan.groups.forEach(g => { if (!g.pending && !g.outcome) g.selected = false; }); persist(); render(); })); section.append(groupSelection);
+        if (plan.model_partitions) scanDetails.append(el('p', 'Model partitions: ' + plan.model_partitions.map(p => `${p.model_version}: ${p.subject_count} subjects`).join('; '), 'hint'));
+        if (plan.skipped.length) scanDetails.append(el('p', 'Excluded: ' + plan.skipped.map(s => `${s.subject_id}: ${s.reason}`).join('; '), 'subject-id'));
+        if (plan.dismissed_pairs.length) scanDetails.append(el('p', `${plan.dismissed_pairs.length} currently dismissed pairs excluded.`, 'hint'));
+        for (const [groupIndex, group] of plan.groups.entries()) {
+          const memberName = m => m.display_name && !/^Unnamed subject/i.test(m.display_name) ? m.display_name : `Subject ${group.members.indexOf(m) + 1}`;
+          const card = el('article', null, 'merge-group subject-card');
+          const outcome = group.outcome;
+          const frozen = group.pending || !!outcome;
+          const selectLabel = el('label', 'Include group', 'subject-filter-inline'), include = el('input'); include.type = 'checkbox'; include.checked = group.selected; include.disabled = frozen || group.manual_handling_required;
+          include.onchange = () => { group.selected = include.checked; card.classList.toggle('is-selected', include.checked); persist(); updateSelection(); }; selectLabel.prepend(include);
+          card.classList.toggle('is-selected', !!group.selected);
+          const heading = el('div', null, 'merge-group-heading'), title = el('div'); title.append(el('h3', `Group ${groupIndex + 1}`), el('p', `${group.members.length} subjects → 1 subject`, 'merge-group-effect')); heading.append(title, selectLabel); card.append(heading);
+          card.append(el('p', `${group.edited ? 'Minimum similarity lower bound after exclusion' : 'Minimum similarity'}: ${group.minimum_similarity.toFixed(3)}`, 'hint merge-score'));
+          if (outcome) card.append(el('p', `${outcome.status}: ${outcome.message || outcome.result?.destination.subject_id || outcome.reason || ''}`, 'merge-outcome'));
+          if (group.pending || outcome?.code === 'operation_uncertain') card.append(el('p', 'Response unresolved. Retry the original operation before editing or rescanning this source.'));
+          if (outcome && outcome.status !== 'merged' && outcome.code !== 'operation_uncertain') card.append(el('p', 'Rescan this source for a new reviewed operation.'));
+          if (outcome?.status === 'merged') { const a = el('a', 'Open resulting subject / Separate a previous merge'); a.href = '/subjects/' + outcome.result.destination.subject_id; card.append(a); }
+          if (group.manual_handling_required) card.append(el('p', 'More than 50 subjects: manual handling required.'));
+          const keepLabel = el('label', 'Keep subject'), keep = el('select'); keep.disabled = frozen;
+          group.members.forEach(m => { const option = el('option', `${memberName(m)} · ${m.subject_id.slice(0, 8)}`); option.value = m.subject_id; keep.append(option); }); keep.value = group.survivor_id; keepLabel.append(keep); keepLabel.className = 'merge-keep-field';
+          const details = el('p', '', 'subject-id');
+          const showIdentity = () => { const m = group.members.find(m => m.subject_id === group.survivor_id); details.textContent = `Keeps ${m ? memberName(m) : ''}${m?.external_identity_ref ? ' · ' + m.external_identity_ref : ''}. All examples in this group move to this subject.`; };
+          keep.onchange = () => { group.survivor_id = keep.value; group.review_identity_conflicts = false; persist(); render(); }; showIdentity(); details.className = 'hint merge-keep-description';
+          if (group.identity_conflicts.length) {
+            const reviewLabel = el('label', `I reviewed conflicting ${group.identity_conflicts.join(', ')} and the identity to keep`, 'subject-filter-inline'), review = el('input'); review.type = 'checkbox'; review.checked = group.review_identity_conflicts; review.disabled = frozen; review.onchange = () => { group.review_identity_conflicts = review.checked; persist(); }; reviewLabel.prepend(review); card.append(reviewLabel);
+          }
+          const members = el('div', null, 'merge-group-members');
+          group.members.forEach(m => {
+            const member = el('div', null, 'merge-group-member');
+            member.classList.toggle('is-survivor', m.subject_id === group.survivor_id);
+            member.append(el('strong', memberName(m)), gallery({...m, representative_faces: (m.representative_faces || []).slice(0, 1)}));
+            if (m.subject_id === group.survivor_id) member.append(el('span', 'Keeping this subject', 'merge-survivor-badge'));
+            const identity = el('details', null, 'merge-member-details'), identityLink = el('a', 'Open subject'); identityLink.href = `/subjects/${m.subject_id}`;
+            identity.append(el('summary', `ID ${m.subject_id.slice(0, 8)}…`), el('code', m.subject_id, 'subject-id'), el('p', m.display_name || 'Unnamed subject', 'hint'), el('p', m.external_identity_ref || 'No external reference', 'hint'), identityLink); member.append(identity);
+            const span = m.source_time_range; member.append(el('p', span.start_ms == null ? 'Time span unavailable' : `${(span.start_ms / 1000).toFixed(1)}–${(span.end_ms / 1000).toFixed(1)} seconds`));
+            const exclude = button('Exclude member', () => { group.edited = true; group.members = group.members.filter(other => other !== m); if (group.survivor_id === m.subject_id) group.survivor_id = group.members[0]?.subject_id; group.selected = false; group.review_identity_conflicts = false; group.identity_conflicts = ['display_name', 'external_identity_ref'].filter(f => new Set(group.members.map(x => x[f]).filter(Boolean)).size > 1); persist(); render(); }); exclude.disabled = frozen || group.members.length <= 2; member.append(exclude); members.append(member);
+          }); card.append(members, keepLabel, details);
+          if (!frozen) {
+            const correction = el('details', null, 'merge-correction'); correction.append(el('summary', 'Fix a mismatch'), el('p', 'If two subjects are different people, choose them below. This excludes that pair from matching groups. Rescan afterward.', 'hint'));
+            const pairLabel = el('div', null, 'merge-pair-fields'), left = el('select'), right = el('select'); left.setAttribute('aria-label', 'First subject'); right.setAttribute('aria-label', 'Second subject');
+            group.members.forEach(m => { for (const select of [left, right]) { const option = el('option', `${memberName(m)} · ${m.subject_id.slice(0, 8)}`); option.value = m.subject_id; select.append(option); } }); right.selectedIndex = 1; const firstLabel = el('label', 'First subject'), secondLabel = el('label', 'Second subject'); firstLabel.append(left); secondLabel.append(right); pairLabel.append(firstLabel, secondLabel); correction.append(pairLabel); card.append(correction);
+            correction.append(button('These are different people', async () => {
+              try {
+                if (left.value === right.value) throw new Error('Choose two different subjects.');
+                const a = group.members.find(m => m.subject_id === left.value), b = group.members.find(m => m.subject_id === right.value);
+                await mutate(`/api/subjects/${a.subject_id}/potential-matches/${b.subject_id}/dismissal`, 'PUT', {version: a.version, target_version: b.version});
+                group.selected = false; group.outcome = {status: 'stale', message: 'Pair dismissed. Rescan this source.'}; persist(); render();
+              } catch (e) { errorAt(message, e); }
+            }));
+          }
+          section.append(card);
+        }
+        results.append(section);
+      }
+      for (const [id, message] of failures) { const failure = el('p', `${id}: ${message}`, 'subject-id'); failure.setAttribute('role', 'alert'); results.append(failure); }
+      if (applying) results.querySelectorAll('button, input, select').forEach(control => { control.disabled = true; });
+      updateSelection();
+    }
+    const scan = button('Find matching groups', async () => {
+      const ids = [...sourceIds()]; if (!ids.length) { errorAt(message, new Error('Select one or more sources.')); return; }
+      if (!threshold.value || !threshold.checkValidity()) { errorAt(message, new Error('Enter a reviewed cosine threshold from -1 to 1.')); return; }
+      scan.disabled = true;
+      try {
+        for (const id of ids) {
+          if (saved[id]?.groups.some(g => g.pending || g.outcome?.code === 'operation_uncertain')) { plans.set(id, saved[id]); message.textContent = 'Resolve the saved operation before rescanning.'; render(); continue; }
+          message.textContent = `Scanning source ${ids.indexOf(id) + 1}/${ids.length}: ${id}`;
+          try { const plan = (await api(`/api/sources/${id}/merge-proposals`, {method: 'POST', body: JSON.stringify({threshold: Number(threshold.value)})})).body; plans.set(id, plan); failures.delete(id); persist(); render(); }
+          catch (e) { failures.set(id, e.message); render(); }
+        }
+        message.textContent = 'Source scans finished. Review each group before selecting it.';
+      } finally { scan.disabled = false; }
+    });
+    const apply = button('Merge selected groups', async () => {
+      applying = true; apply.disabled = true; scan.disabled = true;
+      const submitted = [...plans.values()].flatMap(p => p.groups.filter(g => g.selected && g.outcome?.status !== 'merged'));
+      try {
+        for (const [id, plan] of plans) {
+          const groups = plan.groups.filter(g => g.selected && g.outcome?.status !== 'merged');
+          if (!groups.length) continue;
+          if (groups.some(g => g.identity_conflicts.length && !g.review_identity_conflicts)) throw new Error('Review the conflicting identity details and the survivor before applying.');
+          groups.forEach(g => { g.pending = true; }); persist(); render();
+          for (const group of groups) {
+            try {
+              const response = (await api(`/api/sources/${id}/merge-proposals/apply`, {method: 'POST', body: JSON.stringify({...plan, groups: [group]})})).body;
+              group.pending = false; group.outcome = response.outcomes[0]; if (group.outcome.status !== 'merged' && group.outcome.code !== 'operation_uncertain') group.selected = false;
+            } catch (e) { group.pending = false; group.outcome = {status: 'failed', code: e.status && e.status < 500 ? 'request_failed' : 'operation_uncertain', message: e.message}; }
+            persist(); render();
+          }
+        }
+        message.textContent = 'Application finished. Merged, skipped, stale, and failed outcomes are shown per group. Retry unresolved operations with their original IDs; rescan stale groups.';
+        if (submitted.length && submitted.every(g => g.outcome?.status === 'merged')) {
+          summary.textContent = `Matching groups · ${submitted.length} ${submitted.length === 1 ? 'group' : 'groups'} merged`;
+          panel.open = false;
+          summary.focus();
+        }
+      } catch (e) { errorAt(message, e); }
+      finally {
+        if (submitted.length) {
+          try { await onApplied?.(); }
+          catch (e) { errorAt(message, new Error(`Refresh failed: ${e.message}. Reload this page before manually merging.`)); }
+        }
+        applying = false; scan.disabled = false; render();
+      }
+    }, 'primary');
+    const scanControls = el('div', null, 'merge-scan-controls'); scanControls.append(label, scan);
+    const actionBar = el('div', null, 'merge-action-bar'); actionBar.append(selectionSummary, apply);
+    panel.append(scanControls, message, applicationStatus, actionBar, results); root.append(panel);
+    for (const id of sourceIds()) if (saved[id]) plans.set(id, saved[id]);
+    render();
+    api('/api/features').then(({ body }) => {
+      applicationEnabled = body.source_merges_apply_enabled === true;
+      applicationStatus.textContent = applicationEnabled ? '' : 'Proposal review only. Operator application is not enabled.';
+      updateSelection();
+    }).catch(() => {
+      applicationStatus.textContent = 'Could not check whether merging is enabled. Reload this page to try again; your review is saved.';
+    });
+  }
+
+  async function loadSources() {
+    const requestId = ++detailRequest; show('subject');
+    const root = document.querySelector('#subject-detail');
+    root.replaceChildren(el('p', 'Library', 'eyebrow'), el('h1', 'Sources'), el('p', 'Browse videos and open a source to review or merge its subjects.', 'hint'));
+    const params = new URLSearchParams(location.search);
+    const label = el('label', 'Source ID or page URL'), input = el('input'); input.type = 'search'; input.value = params.get('q') || ''; label.append(input);
+    const filter = el('label', 'Multiple subjects', 'subject-filter-inline'), multiple = el('input'); multiple.type = 'checkbox'; multiple.checked = params.get('multiple_subjects') === 'true'; filter.prepend(multiple);
+    const orderLabel=el('label','Sort sources'), order=el('select'); order.setAttribute('aria-label','Sort sources');
+    [['id','Source ID'],['subjects','Most subjects first'],['examples','Most examples first'],['newest','Newest first']].forEach(([value,text])=>{const option=el('option',text);option.value=value;order.append(option);});
+    order.value=params.get('sort')||'id';orderLabel.append(order);
+    const originLabel=el('label','Origin website'), originInput=el('input');originInput.type='search';originInput.placeholder='example.com';originInput.maxLength=253;originInput.value=params.get('origin')||'';originLabel.append(originInput);
+    const filters=el('div',null,'browse-filters');filters.append(orderLabel,originLabel);
+    const cards = el('div', null, 'subject-grid'), message = el('p', '', 'inline-message'), pages = el('div', null, 'pagination');
+    const chosenSources = new Set();
+    let cursor = params.get('cursor'), prior = [], serial = 0;
+    async function search(reset = true) {
+      const current = ++serial; if (reset) { cursor = null; prior = []; }
+      cards.replaceChildren(); pages.replaceChildren(); message.textContent = 'Loading sources…';
+      const query = new URLSearchParams(); if (input.value.trim()) query.set('q', input.value.trim()); if (multiple.checked) query.set('multiple_subjects', 'true'); if(order.value!=='id')query.set('sort',order.value);if(originInput.value.trim())query.set('origin',originInput.value.trim()); if (cursor) query.set('cursor', cursor);
+      try {
+        const data = (await api(`/api/sources?${query}`)).body;
+        if (current !== serial || requestId !== detailRequest) return;
+        history.replaceState({}, '', '/sources' + (query.size ? `?${query}` : ''));
+        data.sources.forEach(source => {
+          const card = el('article', null, 'subject-card');
+          const selectionLabel = el('label', 'Select source for matching', 'subject-filter-inline'), selection = el('input'); selection.type = 'checkbox'; selection.checked = chosenSources.has(source.source_id); selection.onchange = () => selection.checked ? chosenSources.add(source.source_id) : chosenSources.delete(source.source_id); selectionLabel.prepend(selection); card.append(selectionLabel);
+          card.append(el('code', source.source_id, 'subject-id'), el('strong', `${source.subject_count} subjects · ${source.example_count} examples`));
+          if (source.page_urls?.length || source.page_url) {
+            const pages = sourceLinks(source.page_urls || [source.page_url]);
+            pages.querySelectorAll('a').forEach(link => { link.textContent = link.href; link.style.overflowWrap = 'anywhere'; }); card.append(pages);
+          }
+          const open = sourceLink(source.source_id); open.textContent = `Open Source (${source.subject_count} subjects)`; card.append(open); cards.append(card);
+        });
+        message.textContent = data.sources.length ? '' : 'No sources found.';
+        if (cursor) pages.append(button('Previous', () => { cursor = prior.pop() || null; search(false); }));
+        if (data.next_cursor) pages.append(button('Next', () => { prior.push(cursor); cursor = data.next_cursor; search(false); }, 'secondary pagination-next'));
+      } catch (e) { if (current === serial && requestId === detailRequest) errorAt(message, e); }
+    }
+    order.addEventListener('change',()=>search());originInput.addEventListener('change',()=>search());originInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();search();}});
+    multiple.addEventListener('change', () => search()); input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
+    root.append(label, filters, filter, button('Search Sources', () => search(), 'subject-search-button'), message, cards, pages); sourceMergePanel(root, () => chosenSources, () => search()); await search(false);
+  }
+
+  async function loadSource(sourceId) {
+    const requestId = ++detailRequest; show('subject');
+    const root = document.querySelector('#subject-detail');
+    const heading = el('div', null, 'source-heading'), title = el('h1', sourceId);
+    const origin = el('div', null, 'source-origin'); heading.append(title, origin);
+    root.replaceChildren(el('p', 'Source', 'eyebrow'), heading);
+    function showOrigin(pages) {
+      if (requestId !== detailRequest) return;
+      const urls = [...new Set((Array.isArray(pages) ? pages : [pages]).filter(Boolean))];
+      if (!urls.length) return;
+      origin.replaceChildren();
+      urls.forEach((page,index) => {
+        const link = sourceLinks([page]).querySelector('a');
+        if (!link) return;
+        link.textContent = index ? `Open ${index+1}` : 'Open';
+        link.setAttribute('aria-label', `Open source page ${index+1} in a new tab`);
+        link.className = 'button-link secondary'; link.title = page;
+        origin.append(link);
+      });
+    }
+    api(`/api/sources?${new URLSearchParams({q: sourceId, limit: '1'})}`).then(({body}) => {
+      const source = body.sources.find(source => source.source_id === sourceId);
+      showOrigin([source?.page_url,...(source?.page_urls || [])]);
+    }).catch(() => {});
+    const selected = new Map(), tools = el('div', null, 'merge-tools'), count = el('strong', '0 subjects selected'), message = el('p', '', 'inline-message'), browser = el('div');
+    const keepField = el('label', 'Keep subject'), survivor = el('select'); keepField.className = 'merge-destination'; keepField.append(survivor); survivor.setAttribute('aria-label', 'Keep subject'); keepField.hidden = true;
+    const merge = button('Merge', async () => {
+      const subjects = [...selected.values()], destination = selected.get(survivor.value);
+      if (subjects.length < 2 || !destination) return;
+      merge.disabled = true;
+      try { await mergeSubjects(subjects, destination); }
+      catch (error) { errorAt(message, error); }
+      finally { merge.disabled = selected.size < 2; }
+    }, 'primary'); merge.disabled = true;
+    tools.append(count, keepField, merge, button('Clear selection', () => { selected.clear(); selectionChanged(); browser.querySelectorAll('input[data-merge-id]').forEach(c => { c.checked = false; }); }));
+    tools.append(el('span', 'Merge combines all examples of the selected subjects, including other sources.', 'hint selection-hint'));
+    function selectionChanged() {
+      count.textContent = `${selected.size} subjects selected`; merge.disabled = selected.size < 2;
+      const previous = survivor.value; survivor.replaceChildren();
+      selected.forEach(subject => { const option = el('option', `${name(subject)} · ${subject.subject_id}`); option.value = subject.subject_id; survivor.append(option); });
+      if (selected.has(previous)) survivor.value = previous; keepField.hidden = selected.size < 2;
+    }
+    sourceMergePanel(root, () => [sourceId], async () => {
+      selected.clear(); selectionChanged(); message.textContent = '';
+      await manualBrowser.search();
+    });
+    root.append(el('h2', 'Manual subject selection'), browser, message);
+    browser.classList.add('source-subject-browser');
+    const manualBrowser = lookup(browser, null, { load: true, hideSearch: true, sourceId, selection: selected, selectionTools: tools, onSelection: selectionChanged, onCard: async (card, subject) => {
+      try {
+        const data = (await api(`/api/subjects/${subject.subject_id}/examples?source_id=${sourceId}&with_previews=true&limit=3`)).body;
+        if (requestId !== detailRequest || !card.isConnected) return;
+        const span = data.source_time_range;
+        if (span?.start_ms !== null && span?.start_ms !== undefined && span.end_ms !== null) card.append(el('p', `${(span.start_ms / 1000).toFixed(1)}–${(span.end_ms / 1000).toFixed(1)} seconds`, 'hint source-time-range'));
+        const pictures = card.querySelector('.representatives'); pictures.replaceChildren();
+        data.examples.filter(e => e.preview_url).forEach(e => { const img = el('img'); img.src = e.preview_url; img.alt = `Example from this source of ${name(subject)}`; pictures.append(img); });
+        if (!pictures.children.length) pictures.append(el('p', 'No preview available for this source.', 'hint'));
+        const page = data.examples.find(e => e.page_url)?.page_url;
+        if (!origin.children.length) showOrigin(page);
+      } catch (_) { /* The subject remains available when source previews expire. */ }
+    } });
+  }
+
+  function mergeRecovery(root, subject, actions) {
+    const panel = el('section', null, 'merge-recovery'), message = el('p', '', 'inline-message'), members = el('div');
+    const open = button('Undo merge', async () => {
+      open.disabled = true;
+      try {
+        const data = (await api(`/api/subjects/${subject.subject_id}/merge-members`)).body;
+        if (!panel.isConnected) return;
+        if (data.version !== subject.version) throw new Error('This subject changed. Refresh before separating.');
+        members.replaceChildren(); message.textContent = data.members.length ? 'Members from the latest 20 merges. You can also select examples below to separate them manually.' : 'No previous merge members available.';
+        data.members.forEach(member => {
+          const row = el('div', null, 'source-review-row');
+          row.append(el('span', `${member.display_name || 'Unnamed subject'} · ${member.subject_id} · ${member.example_count} examples`));
+          const separate = button('Separate back out', async () => {
+            separate.disabled = true;
+            try {
+              const detail = el('p', `Restore these ${member.example_count} examples to their previous subject, keeping their original source links.`);
+              if (!await confirmation('Separate this merge member?', detail, 'Separate subject')) return;
+              const result = (await mutate(`/api/subjects/${subject.subject_id}/separate-merge`, 'POST', { version: subject.version, merge_operation_id: member.operation_id, member_subject_id: member.subject_id })).body;
+              await navigate(`/subjects/${result.destination.subject_id}`);
+            } catch (error) { errorAt(message, error); } finally { separate.disabled = false; }
+          });
+          separate.disabled = !member.can_separate; row.append(separate);
+          if (!member.can_separate) row.append(el('p', 'Membership has changed; select examples below to separate manually.', 'hint'));
+          members.append(row);
+        });
+      } catch (error) { errorAt(message, error); } finally { open.disabled = false; }
+    });
+    open.title = 'Separate a previous merge'; open.setAttribute('aria-label', open.title);
+    actions.append(open); panel.append(message, members); root.append(panel);
+  }
+
+  function sourcePreview(subjectId, row) {
+    const line = el('div', null, 'source-review-row');
+    line.append(el('code', row.source_id, 'subject-id'), el('span', `${row.example_count} examples`), sourceLink(row.source_id));
+    if (row.page_urls?.length || row.page_url) line.append(sourceLinks(row.page_urls || [row.page_url]));
+    const examples = el('div'), message = el('p', '', 'hint'); let cursor = null;
+    const load = button('Review examples', async () => {
+      load.disabled = true; message.textContent = 'Loading examples…';
+      try {
+        const params = new URLSearchParams({ source_id: row.source_id, limit: '20' });
+        if (cursor) params.set('cursor', cursor);
+        const data = (await api(`/api/subjects/${subjectId}/examples?${params}`)).body;
+        data.examples.forEach(example => {
+          const item = el('div', null, 'review-example');
+          if (example.preview_url) { const img = el('img'); img.src = example.preview_url; img.alt = 'Source example'; img.loading = 'lazy'; item.append(img); }
+          item.append(el('code', example.example_id, 'subject-id'));
+          if (example.start_ms !== null) item.append(el('span', `${(example.start_ms / 1000).toFixed(1)}–${(example.end_ms / 1000).toFixed(1)} seconds`));
+          examples.append(item);
+        });
+        cursor = data.next_cursor; load.hidden = !cursor; load.textContent = 'Load more source examples'; message.textContent = '';
+      } catch (e) { errorAt(message, e); } finally { load.disabled = false; }
+    });
+    line.append(load, message, examples); return line;
+  }
+
+  function confirmation(title, contents, accept = 'Confirm') {
+    return new Promise(resolve => {
+      const dialog = el('dialog', null, 'subject-dialog');
+      dialog.append(el('h2', title), contents);
+      const actions = el('div', null, 'dialog-actions'); let confirmed = false;
+      actions.append(button('Cancel', () => dialog.close()), button(accept, () => { confirmed = true; dialog.close(); }, 'primary'));
+      dialog.append(actions); document.body.append(dialog);
+      dialog.addEventListener('close', () => { dialog.remove(); resolve(confirmed); }, { once: true });
+      dialog.showModal();
+    });
+  }
+  async function navigate(path, push = true) {
+    clearTimeout(state.poll);
+    ++detailRequest;
+    if (push) history.pushState({}, '', path);
+    if (location.pathname === '/subjects') {
+      show('subjects');
+      const params = new URLSearchParams(location.search);
+      lookup(document.querySelector('#subject-browser'), null, { load: true, filters: true, includeExcluded: params.get('include_excluded') === 'true', multipleSources: params.get('multiple_sources') === 'true', sourceScope: params.get('source_scope'), nameStatus: params.get('name_status'), sharedSource: params.get('shared_source') === 'true', sort: params.get('sort') || 'id', query: params.get('q') || '', cursor: params.get('cursor'), onSearch: (q, cursor, multiple, sort, shared, scope, nameStatus, includeExcluded) => {
+        if (location.pathname !== '/subjects') return;
+        const p = new URLSearchParams(); if (includeExcluded) p.set('include_excluded','true'); if (q) p.set('q', q); if (cursor) p.set('cursor', cursor); if (scope !== 'all') p.set('source_scope', scope); if (nameStatus !== 'all') p.set('name_status', nameStatus); if (shared) p.set('shared_source', 'true'); if (sort !== 'id') p.set('sort', sort);
+        history.replaceState({}, '', '/subjects' + (p.size ? `?${p}` : ''));
+      } });
+    } else if (location.pathname === '/sources') {
+      await loadSources();
+    } else {
+      const match = location.pathname.match(/^\/subjects\/([0-9a-f-]{36})$/i);
+      if (match) await loadSubject(match[1]);
+      else if (/^\/sources\/[0-9a-f-]{36}$/i.test(location.pathname)) await loadSource(location.pathname.split('/')[2]);
+      else if (location.pathname.startsWith('/runs/')) { openRun(location.pathname.split('/')[2]); }
+      else { show(new URLSearchParams(location.search).get('view') === 'check' ? 'check' : 'submit'); }
+    }
+  }
+
+  async function loadSubject(id) {
+    const requestId = ++detailRequest;
+    show('subject'); const root = document.querySelector('#subject-detail'); root.replaceChildren(el('p', 'Loading subject…'));
+    try {
+      const s = (await api(`/api/subjects/${id}`)).body;
+      if (requestId !== detailRequest) return;
+      if ((await features).subject_management) renderSubject(root, s);
+      else root.replaceChildren(subjectCard(s));
+    } catch (e) { if (requestId === detailRequest) { root.replaceChildren(); const p = el('p'); errorAt(p, e); root.append(p); } }
+  }
+
+  function renderSubject(root, subject) {
+    root.replaceChildren();
+    const heading = el('div', null, 'subject-heading'); heading.append(el('h1', name(subject)));
+    root.append(el('p', 'Subject', 'eyebrow'), heading, subjectCard(subject));
+    // The detail card already represents the open subject.
+    root.querySelector('.subject-card a')?.remove();
+    const message = el('p', '', 'inline-message'); root.append(message);
+    if (subject.resolved_from) root.append(el('p', `The requested subject ${subject.resolved_from} was combined into ${subject.subject_id}.`, 'hint'));
+    const form = el('form', null, 'subject-edit'); form.hidden = true; form.id = 'subject-identity-edit';
+    const edit = button('✎', () => { form.hidden = !form.hidden; edit.setAttribute('aria-expanded', String(!form.hidden)); if (!form.hidden) form.querySelector('input').focus(); }, 'link edit-identity');
+    edit.setAttribute('aria-label', 'Edit identity'); edit.setAttribute('aria-expanded', 'false'); edit.setAttribute('aria-controls', form.id); edit.title = 'Edit identity'; heading.append(edit);
+    const fields = {};
+    [['display_name', 'Display name'], ['external_identity_ref', 'External identity reference']].forEach(([key, text]) => {
+      const label = el('label', text); const input = el('input'); input.name = key; input.maxLength = 200; input.value = subject[key] || ''; label.append(input); form.append(label); fields[key] = input;
+    });
+    const save = el('button', 'Save details'); save.type = 'submit'; form.append(save);
+    form.addEventListener('submit', async e => {
+      e.preventDefault(); save.disabled = true;
+      try {
+        if (subject.shared_identity_subject_ids.length > 1) {
+          const contents = el('div'); contents.append(el('p', 'These identity details are shared by the following subjects:'));
+          const list = el('ul'); subject.shared_identity_subject_ids.forEach(sid => list.append(el('li', sid))); contents.append(list);
+          if (!await confirmation('Update shared identity details?', contents, 'Save for these subjects')) return;
+        }
+        const body = { operation_id: crypto.randomUUID(), version: subject.version, identity_version: subject.identity_version, display_name: fields.display_name.value, external_identity_ref: fields.external_identity_ref.value };
+        const result = (await mutate(`/api/subjects/${subject.subject_id}`, 'PATCH', body)).body;
+        renderSubject(root, result);
+      } catch (e) { errorAt(message, e); if (e.status === 409) message.append(button('Refresh subject', () => loadSubject(subject.subject_id))); } finally { save.disabled = false; }
+    });
+    root.append(form);
+    const exclusionControls = el('div', null, 'matching-controls');
+    const exclusion = button(subject.matching_excluded ? 'Restore matching' : 'Exclude from matching', async () => {
+      exclusion.disabled = true;
+      try {
+        const result = (await mutate(`/api/subjects/${subject.subject_id}/matching`, 'PUT', {version:subject.version, excluded:!subject.matching_excluded})).body;
+        renderSubject(root, result);
+      } catch (e) { errorAt(message,e); if (e.status===409) message.append(button('Refresh subject',()=>loadSubject(subject.subject_id))); }
+      finally { exclusion.disabled=false; }
+    });
+    exclusionControls.append(exclusion,el('span','Exclusion keeps this subject in the library but removes it from new matches and suggestions.','hint'));
+    root.append(exclusionControls);
+    const actions = el('div', null, 'management-actions subject-actions'); root.append(actions);
+    const mergeButton = button('Merge', () => chooseCorrection('combine')); mergeButton.title = 'Merge subjects'; actions.append(mergeButton);
+    const selected = new Set(), exampleRows = [], examplesRoot = el('div', null, 'subject-examples');
+    const move = button('Move examples', () => chooseCorrection('move')); move.disabled = true; move.title = 'Move selected examples to another subject'; actions.append(move);
+    const separate = button('New subject', () => chooseCorrection('move', null, true)); separate.disabled = true; separate.title = 'Separate selected examples into a new subject'; actions.append(separate);
+    mergeRecovery(root, subject, actions);
+    const suggestions = el('section', null, 'potential-matches');
+    suggestions.append(el('h2', 'Potential matches'), el('p', 'Similarity helps you choose subjects to review. It is not an identity probability.', 'hint'));
+    const suggestionControls = el('div', null, 'management-actions');
+    const suggestionStatus = el('p', '', 'inline-message'); suggestionStatus.setAttribute('aria-live', 'polite');
+    const suggestionSelection = el('div', null, 'selection-tools suggestion-selection-tools');
+    const suggestionCards = el('div', null, 'subject-grid');
+    let showingDismissed = false, suggestionRequest = 0;
+    const mergeCandidates = new Map();
+    const mergeMatches = button('Merge selected matches', async () => { mergeMatches.disabled = true; try { await reviewBulkMerge([subject, ...mergeCandidates.values()], subject.subject_id, suggestionStatus); } finally { mergeMatches.disabled = !mergeCandidates.size; } }); mergeMatches.disabled = true;
+    const findMatches = button('Find potential matches', () => { showingDismissed = false; fetchSuggestions(); }, 'find-potential-matches');
+    const showDismissed = button('Show dismissed', () => { showingDismissed = !showingDismissed; fetchSuggestions(); });
+    const matchingEligible = !subject.matching_excluded && subject.active_example_count !== 0;
+    findMatches.disabled = showDismissed.disabled = !matchingEligible;
+    if (!matchingEligible) suggestionStatus.textContent = 'Restore matching and at least one usable example to find potential matches.';
+    suggestionControls.append(findMatches, showDismissed, mergeMatches);
+    suggestions.append(suggestionControls, suggestionStatus, suggestionSelection, suggestionCards); root.append(suggestions);
+    async function refreshComparison() {
+      if (!suggestions.isConnected) return;
+      await loadSubject(subject.subject_id);
+      root.querySelector('.find-potential-matches')?.click();
+    }
+    async function fetchSuggestions() {
+      const request = ++suggestionRequest;
+      suggestionCards.replaceChildren(); suggestionSelection.replaceChildren(); mergeCandidates.clear(); mergeMatches.disabled = true; suggestionStatus.textContent = 'Loading potential matches…';
+      findMatches.disabled = true; showDismissed.disabled = true;
+      showDismissed.textContent = showingDismissed ? 'Show potential matches' : 'Show dismissed';
+      try {
+        const result = (await api(`/api/subjects/${subject.subject_id}/potential-matches?dismissed=${showingDismissed}`)).body;
+        if (request !== suggestionRequest || !suggestions.isConnected) return;
+        if (result.version !== subject.version) { await refreshComparison(); return; }
+        suggestionStatus.textContent = result.candidates.length ? (showingDismissed ? 'Dismissed pairs' : 'Up to ten candidates, ordered by similarity') : (showingDismissed ? 'No dismissed pairs at the current subject versions.' : 'No potential matches found.');
+        const range = rangeSelection(mergeCandidates, () => { mergeMatches.disabled = !mergeCandidates.size; }, suggestionStatus, 49);
+        if (result.candidates.length) suggestionSelection.append(button('Select all', () => range.apply(result.candidates, true)), button('Clear selection', () => range.apply(result.candidates, false)));
+        for (const candidate of result.candidates) {
+          const card = subjectCard(candidate);
+          card.append(el('p', `Similarity: ${candidate.similarity.toFixed(4)}`));
+          card.append(button('Review merge', () => chooseCorrection('combine', candidate)));
+          const selectLabel = el('label', 'Select for merge', 'subject-filter-inline'), select = el('input'); select.type = 'checkbox';
+          range.add(select, candidate, selectLabel); selectLabel.prepend(select); card.append(selectLabel);
+          const dismiss = button(showingDismissed ? 'Restore' : 'Dismiss', async () => {
+            try {
+              await mutate(`/api/subjects/${subject.subject_id}/potential-matches/${candidate.subject_id}/dismissal`, showingDismissed ? 'DELETE' : 'PUT', { version: result.version, target_version: candidate.version });
+              if (suggestions.isConnected) await fetchSuggestions();
+            } catch (error) {
+              if (!suggestions.isConnected) return;
+              if (error.status === 409) { await refreshComparison(); return; }
+              errorAt(suggestionStatus, error);
+            }
+          });
+          card.append(dismiss); suggestionCards.append(card);
+        }
+      } catch (error) {
+        if (request !== suggestionRequest || !suggestions.isConnected) return;
+        errorAt(suggestionStatus, error);
+        suggestionStatus.append(button('Retry', fetchSuggestions));
+      } finally {
+        if (request === suggestionRequest && suggestions.isConnected) { findMatches.disabled = false; showDismissed.disabled = false; }
+      }
+    }
+    const exampleStatusControls = el('div',null,'example-status-controls');
+    const reasonLabel=el('label','Disable reason'), reasonSelect=el('select');reasonSelect.setAttribute('aria-label','Disable reason');
+    [['not_face','Not a subject'],['unusable_face','Unusable data']].forEach(([value,text])=>{const option=el('option',text);option.value=value;reasonSelect.append(option);});
+    reasonSelect.value='not_face';reasonLabel.append(reasonSelect);
+    const disableSelected=button('Disable selected',()=>changeExampleStatus([...selected],reasonSelect.value));
+    const restoreSelected=button('Restore selected',()=>changeExampleStatus([...selected],null));
+    disableSelected.disabled=restoreSelected.disabled=true;
+    exampleStatusControls.append(reasonLabel,disableSelected,restoreSelected,el('span','Disabled examples stay available for review, but do not contribute to matching.','hint'));
+    root.append(el('h2', 'Enrolled examples'),exampleStatusControls, examplesRoot);
+    async function changeExampleStatus(ids,reason) {
+      if (!ids.length) return;
+      try {
+        const result=(await mutate(`/api/subjects/${subject.subject_id}/examples/matching`,'PUT',{version:subject.version,example_ids:ids,reason})).body;
+        renderSubject(root,result);
+      } catch(e) { errorAt(message,e); if(e.status===409)message.append(button('Refresh subject',()=>loadSubject(subject.subject_id))); }
+    }
+    const more = button('Load more examples', () => fetchExamples(next)); root.append(more); let next = null;
+    async function fetchExamples(cursor = null) {
+      more.disabled = true;
+      try {
+        const params = new URLSearchParams({ limit: '30' }); if (cursor) params.set('cursor', cursor);
+        const data = (await api(`/api/subjects/${subject.subject_id}/examples?${params}`)).body;
+        const known = new Set(exampleRows.map(r => r.example_id)); exampleRows.push(...data.examples.filter(r => !known.has(r.example_id))); next = data.next_cursor; renderExamples(); more.hidden = !next;
+      } catch (e) { errorAt(message, e); } finally { more.disabled = false; }
+    }
+    function selectionChanged() {
+      move.disabled = !selected.size; separate.disabled = !selected.size;
+      disableSelected.disabled = restoreSelected.disabled = !selected.size;
+      move.textContent = 'Move examples';
+      move.title = selected.size ? `Move ${selected.size} selected examples to another subject` : 'Move selected examples to another subject';
+    }
+    async function selectSource(source, control) {
+      control.disabled = true;
+      try {
+        const rows = []; let cursor = null;
+        do {
+          const params = new URLSearchParams({ limit: '100', source_id: source });
+          if (cursor) params.set('cursor', cursor);
+          const data = (await api(`/api/subjects/${subject.subject_id}/examples?${params}`)).body;
+          rows.push(...data.examples); cursor = data.next_cursor;
+          if (rows.length > 1000) throw new Error('This source has more than 1,000 examples. Select a smaller set of tracks.');
+        } while (cursor);
+        const current = (await api(`/api/subjects/${subject.subject_id}/sources`)).body;
+        if (current.version !== subject.version) throw new Error('This subject changed. Refresh it before selecting this source.');
+        const known = new Set(exampleRows.map(r => r.example_id));
+        rows.forEach(row => { if (!known.has(row.example_id)) { exampleRows.push(row); known.add(row.example_id); } selected.add(row.example_id); });
+        selectionChanged(); renderExamples();
+      } catch (e) { errorAt(message, e); } finally { control.disabled = false; }
+    }
+    function renderExamples() {
+      examplesRoot.replaceChildren(); const sources = new Map();
+      exampleRows.forEach(row => { if (!sources.has(row.source_id)) sources.set(row.source_id, []); sources.get(row.source_id).push(row); });
+      if (!sources.size) examplesRoot.append(el('p', 'This subject has no enrolled examples.', 'hint'));
+      sources.forEach((rows, source) => {
+        const section = el('section', null, 'example-source'); const openSource = sourceLink(source); openSource.className = 'button-link secondary'; section.append(el('h3', `Source ${source}`));
+        const controls = el('div', null, 'example-source-actions');
+        controls.append(openSource, button("Select this source's examples", e => selectSource(source, e.currentTarget)), button('Clear source selection', () => { rows.forEach(r => selected.delete(r.example_id)); selectionChanged(); renderExamples(); })); section.append(controls);
+        rows.forEach(row => {
+          const label = el('label', null, 'example-row'); label.classList.toggle('example-disabled',!!row.disabled_reason); const checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.value = row.example_id; checkbox.checked = selected.has(row.example_id);
+          checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(row.example_id) : selected.delete(row.example_id); selectionChanged(); });
+          label.append(checkbox); if (row.preview_url) { const img = el('img'); img.src = row.preview_url; img.alt = 'Enrolled example'; img.loading = 'lazy'; label.append(img); }
+          const text = el('div'); text.append(el('code', row.example_id, 'subject-id'));
+          const statusActions=el('div',null,'example-status-actions');
+          const statusButton=(title,reason)=>button(title,e=>{e.preventDefault();e.stopPropagation();changeExampleStatus([row.example_id],reason);});
+          if(row.disabled_reason){text.append(el('p',row.disabled_reason==='not_face'?'Disabled: not a subject':'Disabled: unusable data','matching-status'));statusActions.append(statusButton('Restore example',null));}
+          else statusActions.append(statusButton('Not a subject','not_face'),statusButton('Unusable data','unusable_face'));
+          text.append(statusActions);
+          if (row.start_ms !== null) text.append(el('p', `${(row.start_ms / 1000).toFixed(1)}–${(row.end_ms / 1000).toFixed(1)} seconds`, 'hint'));
+          if (row.run_id) { const a = el('a', 'View Run', 'button-link secondary'); a.href = `/runs/${row.run_id}`; a.title = `Run ${row.run_id}`; text.append(a); }
+          if (row.processing_job_id) text.append(el('p', `Processing job ${row.processing_job_id}`, 'hint'));
+          if (row.page_url) text.append(sourceLinks([row.page_url])); label.append(text); section.append(label);
+        }); examplesRoot.append(section);
+      });
+    }
+    async function chooseCorrection(action, candidate = null, separateNew = false) {
+      if (action === 'combine') { if (candidate) await reviewBulkMerge([subject, candidate], subject.subject_id, message); else bulkMergePanel(root, subject); return; }
+      const panel = el('div', null, 'correction-panel'); const title = action === 'combine' ? 'Choose the other subject' : 'Choose where to move these examples'; panel.append(el('h3', title));
+      const result = el('div'); panel.append(result); actions.after(panel);
+      const cancel = button('Close', () => panel.remove()); panel.append(cancel);
+      let chosen = null, submitted = false;
+      async function review(target) {
+        chosen = target;
+        let sourceInfo, targetInfo;
+        try {
+          [sourceInfo, targetInfo] = await Promise.all([
+            api(`/api/subjects/${subject.subject_id}/sources`).then(r => r.body),
+            target ? api(`/api/subjects/${target.subject_id}/sources`).then(r => r.body) : Promise.resolve(null),
+          ]);
+          if (sourceInfo.version !== subject.version || (target && targetInfo.version !== target.version)) {
+            throw new Error('A subject changed. Refresh and review the current records before correcting them.');
+          }
+        } catch (e) { errorAt(message, e); panel.remove(); message.append(button('Refresh subject', () => loadSubject(subject.subject_id))); return; }
+        const contents = el('div'); contents.append(el('p', action === 'combine' ? 'Review the subjects and choose which identity details to keep.' : `${selected.size} examples will move to the chosen subject.`), subjectCard(subject, () => {})); contents.querySelectorAll('button').forEach(b => b.remove());
+        let survivor = subject;
+        if (target) {
+          const card = subjectCard(target, () => {}); card.querySelectorAll('button').forEach(b => b.remove()); contents.append(card);
+          if (action === 'combine') {
+            const field = el('label', 'Keep this subject and its identity details'); const select = el('select');
+            [subject, target].forEach(s => { const option = el('option', `${name(s)} · ${s.subject_id} · ${s.external_identity_ref || 'No external reference'}`); option.value = s.subject_id; select.append(option); });
+            select.addEventListener('change', () => { survivor = select.value === subject.subject_id ? subject : target; }); field.append(select); contents.append(field);
+          }
+        } else contents.append(el('p', 'A new subject will be created for the selected examples.'));
+        const scope = el('section', null, 'correction-scope');
+        const sourceUnion = new Set([...sourceInfo.sources, ...(targetInfo?.sources || [])].map(r => r.source_id));
+        if (action === 'combine') {
+          scope.append(el('strong', `All ${subject.example_count + target.example_count} examples from ${sourceUnion.size} distinct sources will be merged.`));
+          scope.append(el('p', 'This includes every source in both subjects, including media outside the video you may be reviewing.'));
+          [sourceInfo, targetInfo].forEach(info => {
+            const details = el('details'); details.append(el('summary', `${info.subject_id}: all ${info.sources.length} sources`));
+            info.sources.forEach(row => details.append(sourcePreview(info.subject_id, row)));
+            scope.append(details);
+          });
+        } else {
+          const selectedRows = exampleRows.filter(row => selected.has(row.example_id));
+          const movingSources = new Map(); selectedRows.forEach(row => movingSources.set(row.source_id, (movingSources.get(row.source_id) || 0) + 1));
+          if (selectedRows.length !== selected.size || selected.size > 1000) { errorAt(message, new Error('Select between 1 and 1,000 available examples.')); return; }
+          const remainingSources = sourceInfo.sources.filter(row => row.example_count > (movingSources.get(row.source_id) || 0)).length;
+          const destinationSources = new Set([...(targetInfo?.sources || []).map(r => r.source_id), ...movingSources.keys()]).size;
+          scope.append(el('strong', `Only ${selected.size} selected examples from ${movingSources.size} sources will move.`));
+          scope.append(el('p', `Original subject after move: ${subject.example_count - selected.size} examples, ${remainingSources} sources.`));
+          scope.append(el('p', `Destination after move: ${(target?.example_count || 0) + selected.size} examples, ${destinationSources} sources.`));
+          const details = el('details'); details.append(el('summary', 'Exact selected examples'));
+          selectedRows.forEach(row => details.append(el('p', `${row.example_id} · source ${row.source_id}`, 'subject-id'))); scope.append(details);
+        }
+        contents.append(scope);
+        if (!await confirmation(action === 'combine' ? 'Merge entire subjects?' : 'Move selected examples?', contents, action === 'combine' ? 'Merge entire subjects' : 'Move examples')) return;
+        if (submitted) return; submitted = true;
+        try {
+          let url, body;
+          if (action === 'combine') {
+            const other = survivor.subject_id === subject.subject_id ? chosen : subject;
+            url = `/api/subjects/${survivor.subject_id}/combine`; body = { operation_id: crypto.randomUUID(), version: survivor.version, other_subject_id: other.subject_id, target_version: other.version };
+          } else {
+            url = `/api/subjects/${subject.subject_id}/move-examples`; body = { operation_id: crypto.randomUUID(), version: subject.version, example_ids: [...selected], target_subject_id: target?.subject_id || null, target_version: target?.version || null };
+          }
+          const response = (await mutate(url, 'POST', body)).body;
+          panel.remove(); await navigate(`/subjects/${response.destination.subject_id}`);
+        } catch (e) { submitted = false; errorAt(message, e); panel.remove(); if (e.status === 409) message.append(button('Refresh subject', () => loadSubject(subject.subject_id))); }
+      }
+      if (action === 'move') panel.prepend(button('Create a new subject', () => review(null)));
+      if (separateNew) await review(null);
+      else if (candidate) await review(candidate);
+      else lookup(result, review, { exclude: subject.subject_id });
+    }
+    fetchExamples();
+  }
+
+  function selectedTracks() { return [...document.querySelectorAll('#data-items input:checked')].map(n => n.value); }
+  window.setupEnrollmentAssignments = async () => {
+    const root = document.querySelector('#enrollment-assignments'); const enabled = await features;
+    root.hidden = !enabled.enrollment_grouping || state.handlingPolicy === 'search_then_discard'; if (root.hidden) return;
+    document.querySelector('#selection-submit').textContent = 'Review and enroll selected data';
+    root.replaceChildren(el('h3', 'Enrollment groups'), el('p', 'Group tracks from this submission as one person. Each group creates one new subject; each ungrouped selected track creates a separate new subject.', 'hint'));
+    const message = el('p', '', 'inline-message'), editor = el('div'), list = el('div'); root.append(message);
+    function addGroup(existing = null) {
+      const members = new Set(existing ? existing.group_ids : selectedTracks());
+      const occupied = new Set(state.assignments.filter(a => a !== existing).flatMap(a => a.group_ids));
+      if (!members.size) { errorAt(message, new Error('Select at least one data track.')); return; }
+      if ([...members].some(id => occupied.has(id))) { errorAt(message, new Error('Some selected tracks are already grouped. Edit that group or select other tracks.')); return; }
+      editor.replaceChildren(el('p', 'Choose the tracks that share one subject.'));
+      const membership = el('div', null, 'group-members');
+      document.querySelectorAll('#data-items input').forEach((source, index) => {
+        if (occupied.has(source.value)) return;
+        const label = el('label', `Data track ${index + 1}`), checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.checked = members.has(source.value);
+        checkbox.addEventListener('change', () => checkbox.checked ? members.add(source.value) : members.delete(source.value));
+        label.prepend(checkbox); membership.append(label);
+      });
+      editor.append(membership);
+      const apply = () => {
+        if (!members.size) { errorAt(message, new Error('Choose at least one track for this group.')); return; }
+        const updated = { assignment_id: existing?.assignment_id || crypto.randomUUID(), group_ids: [...members] };
+        if (existing) state.assignments = state.assignments.map(a => a === existing ? updated : a);
+        else state.assignments.push(updated);
+        document.querySelectorAll('#data-items input').forEach(n => { if (members.has(n.value)) n.checked = true; });
+        editor.replaceChildren(); renderList();
+      };
+      editor.append(button('Create one new subject', () => apply()));
+      editor.append(button('Cancel group changes', () => editor.replaceChildren()));
+    }
+    root.append(button('Group selected as one person', () => addGroup()), editor, list);
+    function renderList() {
+      list.replaceChildren(); message.textContent = '';
+      state.assignments.forEach((a, i) => {
+        const line = el('div', null, 'assignment-row');
+        line.append(el('p', `Group ${i + 1}: ${a.group_ids.length} tracks → One new subject`));
+        line.append(button('Edit group', () => addGroup(a)), button('Remove grouping', () => { state.assignments = state.assignments.filter(x => x !== a); renderList(); }));
+        list.append(line);
+      });
+    }
+    renderList();
+  };
+  window.enrollmentSelection = async group_ids => {
+    const enabled = await features;
+    if (!enabled.enrollment_grouping || state.handlingPolicy === 'search_then_discard') return { group_ids };
+    const assignments = state.assignments.map(a => ({ assignment_id: a.assignment_id, group_ids: [...a.group_ids] }));
+    if (assignments.some(a => a.group_ids.some(id => !group_ids.includes(id)))) throw new Error('A grouped track was deselected. Edit or remove its grouping before continuing.');
+    const summary = el('div'); const assigned = new Set(assignments.flatMap(a => a.group_ids));
+    state.assignments.forEach((a, i) => summary.append(el('p', `Group ${i + 1}: ${a.group_ids.length} tracks → One new subject`)));
+    const singletons = group_ids.length - assigned.size;
+    summary.append(el('p', `${singletons} ungrouped tracks → ${singletons} new subjects`));
+    const total = assignments.length + singletons;
+    summary.prepend(el('strong', `${group_ids.length} tracks → ${total} new ${total === 1 ? 'subject' : 'subjects'}`));
+    if (!await confirmation('Review enrollment', summary, 'Start enrollment')) return null;
+    return { group_ids, assignments };
+  };
+  features.then(enabled => {
+    if (!enabled.subject_management) return;
+    const nav = document.querySelector('nav');
+    [['/subjects', 'Subjects'], ['/sources', 'Sources']].forEach(([href, text]) => { const link = el('a', text, 'link'); link.href = href; nav.append(link); });
+  });
+  document.addEventListener('click', e => {
+    const link = e.target.closest('a[href="/subjects"], a[href="/sources"], a[href^="/subjects/"], a[href^="/sources/"]');
+    if (!link || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button) return;
+    e.preventDefault(); navigate(link.getAttribute('href'));
+  });
+  window.addEventListener('popstate', () => navigate(location.pathname + location.search, false));
+  if (location.pathname.startsWith('/subjects') || location.pathname.startsWith('/sources')) navigate(location.pathname + location.search, false);
+})();

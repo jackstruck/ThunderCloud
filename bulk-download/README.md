@@ -48,7 +48,7 @@ avoids duplicate-content uploads. Uploads cannot overwrite an existing generatio
 Successful records include generation, SHA-256, byte count, and content type.
 
 The downloader does not automatically enqueue face processing. Use
-[archive submission](../face-batch-gcp-scaffold/OPERATIONS.md#submit-archive-objects-through-the-common-run-framework)
+[archive submission](../data-batch-gcp-scaffold/OPERATIONS.md#submit-archive-objects-through-the-common-run-framework)
 to prepare and submit durable receipts for selected new sources. Reuse a receipt
 on retry and check existing submissions before processing historical objects.
 
@@ -85,8 +85,6 @@ Full HLS videos are downloaded, validated, and uploaded with the configured CSEK
 reruns skip completed pages and deduplicate identical content. GCS upload is the
 end of this workflow. Run one writer per manifest/temp directory. The process
 must stay running; local scratch media and manifests are not encrypted by CSEK.
-See [the acquisition design](../docs/design/hotscope-acquisition.md) for supported
-formats, recovery behavior, and limitations.
 
 HLS uses `IMAGEIO_FFMPEG_EXE` when set, then a system `ffmpeg`, then the bundled
 imageio binary. Install system FFmpeg if the bundled binary is incompatible with

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thundercloud-data-batch"
+version = "0.2.0"
+description = "ThunderCloud data processing worker"
+requires-python = ">=3.12"
+dependencies = [
+  "av>=14,<17",
+  "cloud-sql-python-connector[pg8000]>=1.16,<2",
+  "google-cloud-storage>=3,<4",
+  "google-cloud-secret-manager>=2.25,<3",
+  "flask>=3.1,<4",
+  "gunicorn>=23,<24",
+  "numpy>=2,<3",
+  "onnxruntime>=1.21,<2",
+  "opencv-python-headless>=4.11,<5",
+  "pg8000>=1.31,<2",
+  "supervision>=0.26,<1",
+]
+
+[project.optional-dependencies]
+gpu = ["onnxruntime-gpu>=1.21,<2"]
+dev = ["pytest>=8,<10", "pytest-cov>=6,<8", "ruff>=0.16,<1"]
+
+[project.scripts]
+source-merges = "worker.source_merges_cli:main"
+data-worker = "worker.__main__:main"
+data-submit = "worker.operator_submission:main"
+data-probe = "worker.probe:main"
+data-console = "worker.console:main"
+data-gallery-correct = "worker.gallery_correction:main"
+
+# Compatibility aliases for existing installations and deployed launchers.
+face-worker = "worker.__main__:main"
+face-submit = "worker.operator_submission:main"
+face-probe = "worker.probe:main"
+face-console = "worker.console:main"
+face-gallery-correct = "worker.gallery_correction:main"
+
+[tool.setuptools]
+packages = ["worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
