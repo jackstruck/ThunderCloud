@@ -2,6 +2,20 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from contextlib import contextmanager
+
+
+@contextmanager
+def phase_timer(phase, run_id):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        logging.getLogger(__name__).info('processing_phase', extra={
+            'phase': phase, 'run_id': run_id,
+            'duration_seconds': round(time.monotonic() - started, 3),
+        })
 
 
 class JsonFormatter(logging.Formatter):
@@ -18,6 +32,9 @@ class JsonFormatter(logging.Formatter):
             "processed_by_task",
             "failed_by_task",
             "status",
+            "phase",
+            "run_id",
+            "duration_seconds",
         ):
             value = getattr(record, field, None)
             if value is not None:

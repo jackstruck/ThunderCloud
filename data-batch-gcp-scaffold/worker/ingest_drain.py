@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -9,6 +11,7 @@ from google.api_core.exceptions import GoogleAPIError
 from .config import Settings
 from .db import Database
 from .hls_fetch import fetch_hotscope_video, fetch_luluvid_video
+from .import_queue import ImportQueue
 from .ingest_repository import IngestRepository
 from .job_invoker import CloudRunJobInvoker
 from .maintenance import MaintenanceRepository, maintain
@@ -31,6 +34,7 @@ def drain(
 ) -> int:
     completed = 0
     while work := repository.claim_fetch():
+        started = time.monotonic()
         try:
             if work.source_kind == "archive":
                 object_name, generation, size = storage.archive_to_temporary(
@@ -78,10 +82,28 @@ def drain(
                 "source_rejected" if rejected else "fetch_failed",
                 retryable=not rejected,
             )
+        finally:
+            logging.getLogger(__name__).info('processing_phase', extra={
+                'phase': 'fetch', 'run_id': work.run_id,
+                'duration_seconds': round(time.monotonic() - started, 3),
+            })
     return completed
 
 
+def dispatch_until_idle(queue, repository, fetch, invokers, *, deadline, clock=time.monotonic, sleep=time.sleep):
+    """Reuse one CPU dispatcher while queued videos wait for processing slots."""
+    while clock() < deadline:
+        for run_id, mode in repository.recover_processing():
+            invokers[mode](run_id)
+        queue.dispatch(lambda _: None)
+        fetch()
+        if not queue.has_pending():
+            return
+        sleep(min(5, max(0, deadline - clock())))
+
+
 def main() -> None:
+    deadline = time.monotonic() + 840
     configure_logging()
     settings = Settings.from_env()
     settings.validate()
@@ -101,24 +123,34 @@ def main() -> None:
         settings.staging_prefix,
         csek,
     )
+    queue = ImportQueue(database)
+    owner = None
     try:
         if os.getenv("FACE_INGEST_MODE", "drain") == "maintenance":
             maintain(MaintenanceRepository(database), storage)
-        else:
-            invoker = CloudRunJobInvoker(
+        owner = queue.acquire_dispatch()
+        if owner is None:
+            return
+        invokers = {mode: CloudRunJobInvoker(
                 settings.project_id,
                 os.getenv("FACE_REGION", "us-central1"),
                 os.getenv("FACE_INTERACTIVE_JOB", "face-interactive-gpu"),
-                env={"FACE_INTERACTIVE_MODE": "detect"},
-            )
-            drain(
-                IngestRepository(database),
-                storage,
-                max_bytes=int(os.getenv("FACE_MAX_INGEST_BYTES", "262144000")),
-                invoke_detect=invoker,
-            )
+                env={"FACE_INTERACTIVE_MODE": mode},
+            ) for mode in ('detect','match')}
+        repository = IngestRepository(database)
+        dispatch_until_idle(
+            queue, repository,
+            lambda: drain(repository, storage,
+                          max_bytes=int(os.getenv("FACE_MAX_INGEST_BYTES", "262144000")),
+                          invoke_detect=invokers['detect']),
+            invokers, deadline=deadline,
+        )
     finally:
-        database.close()
+        try:
+            if owner is not None:
+                queue.release_dispatch(owner)
+        finally:
+            database.close()
 
 
 if __name__ == "__main__":

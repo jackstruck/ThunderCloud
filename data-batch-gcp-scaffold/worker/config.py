@@ -32,7 +32,7 @@ class Settings:
     max_probe_image_bytes: int = 26_214_400
     max_probe_image_pixels: int = 50_000_000
     max_probe_video_bytes: int = 262_144_000
-    max_probe_video_duration_seconds: float = 900.0
+    max_probe_video_duration_seconds: float = 1800.0
     best_n: int = 5
     top_k: int = 5
     gallery_repair_min_similarity: float = 0.55
@@ -79,7 +79,7 @@ class Settings:
                 os.getenv("FACE_MAX_PROBE_VIDEO_BYTES", "262144000")
             ),
             max_probe_video_duration_seconds=float(
-                os.getenv("FACE_MAX_PROBE_VIDEO_DURATION_SECONDS", "900")
+                os.getenv("FACE_MAX_PROBE_VIDEO_DURATION_SECONDS", "1800")
             ),
             best_n=int(os.getenv("FACE_BEST_N", "5")),
             top_k=int(os.getenv("FACE_TOP_K", "5")),

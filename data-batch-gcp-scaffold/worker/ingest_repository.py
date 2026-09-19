@@ -25,6 +25,35 @@ class IngestRepository:
         self.database = database
         self.lease_seconds = lease_seconds
 
+    def recover_processing(self):
+        """Throttle recovery launches while startup proceeds; leases own execution."""
+        connection = self.database.connect()
+        cursor = connection.cursor()
+        try:
+            cursor.execute('''UPDATE media_run r SET state='failed',failed_step=r.state,
+                retryable=true,error_code='processing_lease_expired',completed_at=now(),updated_at=now()
+                FROM run_operation o WHERE o.run_id=r.run_id AND o.kind IN ('detect','match')
+                  AND o.state='leased' AND o.lease_expires_at<now() AND o.attempt_count>=3
+                  AND r.state IN ('queued','detecting','matching')''')
+            cursor.execute('''WITH due AS (
+                SELECT o.operation_id FROM run_operation o JOIN media_run r USING(run_id)
+                WHERE o.kind IN ('detect','match') AND NOT r.cancel_requested
+                  AND r.state IN ('queued','detecting','matching')
+                  AND (o.state='queued' OR (o.state='leased' AND o.lease_expires_at<now()))
+                  AND o.updated_at<now()-interval '5 minutes'
+                ORDER BY o.created_at FOR UPDATE OF o SKIP LOCKED LIMIT 6
+            ) UPDATE run_operation o SET updated_at=now() FROM due
+              WHERE o.operation_id=due.operation_id RETURNING o.run_id,o.kind''')
+            result = [(str(run), kind) for run, kind in cursor.fetchall()]
+            connection.commit()
+            return result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
     def claim_fetch(self) -> FetchWork | None:
         connection = self.database.connect()
         cursor = connection.cursor()

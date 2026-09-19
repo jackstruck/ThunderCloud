@@ -46,7 +46,7 @@ class RankingCursor:
         self.statements.append((statement, parameters))
         self.results = (
             [("b-subject", 0.8, "label-b", 4), ("a-subject", 0.8, None, 9)]
-            if "FROM subject" in statement
+            if "FROM subject s\n" in statement
             else []
         )
 

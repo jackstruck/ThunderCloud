@@ -62,8 +62,22 @@ class ProfileBatches:
             raise RunNotFoundError(batch_id)
         ids = {r['run_id'] for r in state['receipts'].values() if r.get('run_id')}
         ids.update(state.get('preexisting_runs', []))
+        status = dict(state.get('status', {}))
+        if state.get('queue_version') == 1:
+            from .import_queue import ImportQueue
+            queued = ImportQueue(self.repository.database).status(batch_id, principal)
+            ids.update(item['run_id'] for item in queued if item['run_id'])
+            status['awaiting_submission'] = sum(item['state'] in {'pending','leased'} for item in queued)
+            status['submission_failures'] = sum(item['state']=='failed' for item in queued)
+            status['handed_off_or_preexisting'] = sum(item['state']=='submitted' for item in queued)
+            status['processing_complete'] = bool(status.get('handoff_complete')) and all(
+                item['state']=='failed' or item['processing_state'] in {'succeeded','failed','cancelled','expired'}
+                for item in queued)
         runs = [{'run_id': r['run_id'], 'state': r['state'], 'status_url': r['status_url'], 'source_url': r.get('source_url')}
                 for r in self.repository.batch_statuses(sorted(ids))]
+        if state.get('queue_version') == 1:
+            status['processing_complete'] = status['processing_complete'] and len(runs) == len(ids) and all(
+                run['state'] in {'succeeded', 'failed', 'cancelled', 'expired'} for run in runs)
         return {'batch_id': batch_id, 'username': state['users'][0],
-                'status': state.get('status', {}), 'runs': runs,
+                'status': status, 'runs': runs,
                 'discovery_failures': len(state.get('discovery_failures', []))}

@@ -19,7 +19,7 @@ from .job_invoker import CloudRunJobInvoker
 from .probe_service import LocalMedia, image_faces, video_faces
 from .storage import StorageRepository, load_configured_csek
 from .subject_backfill import SubjectGalleryBackfill, SubjectGalleryRepository
-from .telemetry import configure_logging
+from .telemetry import configure_logging, phase_timer
 
 
 def _review_preview(crops) -> bytes:
@@ -304,11 +304,14 @@ def main() -> None:
                     if os.getenv('FACE_SOURCE_MERGES_AUTO_THRESHOLD') else None)), storage
             )
             if mode == "detect":
-                completed = processor.detect(run_id)
+                with phase_timer('detect', run_id):
+                    completed = processor.detect(run_id)
                 if completed:
-                    processor.match(run_id)
+                    with phase_timer('match_enroll', run_id):
+                        processor.match(run_id)
             else:
-                completed = processor.match(run_id)
+                with phase_timer('match_enroll', run_id):
+                    completed = processor.match(run_id)
             if completed:
                 CloudRunJobInvoker(
                     settings.project_id,

@@ -66,7 +66,7 @@ resource "google_cloud_run_v2_job" "acquisition_batch" {
         args    = ["-u", "-m", "worker.acquisition_batch"]
         resources { limits = { cpu = "1", memory = "2Gi" } }
         dynamic "env" {
-          for_each = {
+          for_each = merge(local.processing_capacity_env, {
             FACE_PROJECT_ID            = var.project_id
             FACE_BUCKET                = var.source_bucket_name
             FACE_CSEK_SECRET           = google_secret_manager_secret.gcs_csek.secret_id
@@ -80,7 +80,7 @@ resource "google_cloud_run_v2_job" "acquisition_batch" {
             FACE_INTERACTIVE_JOB       = "face-interactive-gpu"
             FACE_BATCH_STATE_OBJECT    = var.acquisition_batch_state_object
             FACE_BATCH_MAX_VIDEO_BYTES = "262144000"
-          }
+          })
           content {
             name  = env.key
             value = env.value

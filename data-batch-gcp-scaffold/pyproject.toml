@@ -18,6 +18,7 @@ dependencies = [
   "onnxruntime>=1.21,<2",
   "opencv-python-headless>=4.11,<5",
   "pg8000>=1.31,<2",
+  "SQLAlchemy>=2.0,<3",
   "supervision>=0.26,<1",
 ]
 

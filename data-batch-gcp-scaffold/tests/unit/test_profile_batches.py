@@ -43,3 +43,30 @@ def test_profile_checkpoint_idempotency_policy_and_ownership():
     assert service.get('tester', result['batch_id'])['username'] == 'Mary'
     with pytest.raises(RunConflictError): service.create('tester', 'unique-request-key', '/user/Other', 'enroll_only')
     with pytest.raises(RunNotFoundError): service.get('other', result['batch_id'])
+
+
+@pytest.mark.parametrize('queue_state,legacy_state,complete', [
+    ('pending', 'succeeded', False),
+    ('submitted', 'detecting', False),
+    ('submitted', 'succeeded', True),
+    ('failed', 'succeeded', True),
+])
+def test_queue_completion_includes_pending_work_and_legacy_receipts(monkeypatch, queue_state, legacy_state, complete):
+    batch_id = 'ed960846-4354-48c7-b4e2-977ea21aa605'
+    state = {'principal': 'tester', 'users': ['Mary'], 'queue_version': 1,
+             'receipts': {'old': {'run_id': 'old-run'}},
+             'status': {'handoff_complete': True}}
+    blob = SimpleNamespace(download_as_bytes=lambda: json.dumps(state).encode())
+    storage = SimpleNamespace(bucket=SimpleNamespace(blob=lambda *a, **k: blob), csek=b'key')
+    repo = Mock()
+    repo.batch_statuses.return_value = [
+        {'run_id': 'old-run', 'state': legacy_state, 'status_url': '/runs/old-run'}]
+    queued = {'run_id': None, 'state': queue_state,
+              'processing_state': 'succeeded' if queue_state == 'submitted' else None}
+    queue = Mock()
+    queue.status.return_value = [queued]
+    monkeypatch.setattr('worker.import_queue.ImportQueue', lambda _: queue)
+    result = ProfileBatches(storage, repo, Mock(), 'batch-control/test').get('tester', batch_id)
+    assert result['status']['processing_complete'] is complete
+    assert result['status']['awaiting_submission'] == (queue_state == 'pending')
+    assert result['status']['submission_failures'] == (queue_state == 'failed')

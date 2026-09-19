@@ -49,7 +49,7 @@ class MatchWork:
 
 
 class InteractiveRepository:
-    def __init__(self, database, lease_seconds: int = 1200, *, source_merge_threshold=None):
+    def __init__(self, database, lease_seconds: int = 3900, *, source_merge_threshold=None):
         self.database = database
         self.lease_seconds = lease_seconds
         self.source_merge_threshold = (configuration({'threshold': source_merge_threshold})

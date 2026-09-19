@@ -121,3 +121,38 @@ def test_luluvid_and_justpaste_playlists_use_hls_downloader():
                      resolver=lambda url: ResolvedSource(playlist, adapter, page, 'https://luluvdo.com/')) == 1
         assert repository.completed[0][1]['final_url'] == page
         assert repository.completed[0][1]['source_adapter'] == adapter
+
+
+def test_dispatcher_reuses_capacity_until_queue_is_empty():
+    from unittest.mock import Mock
+
+    from worker.ingest_drain import dispatch_until_idle
+
+    queue, repository, fetch, detect = Mock(), Mock(), Mock(), Mock()
+    queue.has_pending.side_effect = [True, False]
+    repository.recover_processing.side_effect = [[], [('recovered-run', 'detect')]]
+    elapsed = [0]
+    def sleep(seconds):
+        elapsed[0] += seconds
+    dispatch_until_idle(queue, repository, fetch, {'detect': detect},
+                        deadline=20, clock=lambda: elapsed[0], sleep=sleep)
+    assert queue.dispatch.call_count == fetch.call_count == 2
+    detect.assert_called_once_with('recovered-run')
+    assert elapsed[0] == 5
+
+
+def test_dispatcher_yields_at_runtime_limit_with_pending_work():
+    from unittest.mock import Mock
+
+    from worker.ingest_drain import dispatch_until_idle
+
+    queue, repository, fetch = Mock(), Mock(), Mock()
+    queue.has_pending.return_value = True
+    repository.recover_processing.return_value = []
+    elapsed = [0]
+    def sleep(seconds):
+        elapsed[0] += seconds
+    dispatch_until_idle(queue, repository, fetch, {}, deadline=7,
+                        clock=lambda: elapsed[0], sleep=sleep)
+    assert queue.dispatch.call_count == 2
+    assert elapsed[0] == 7

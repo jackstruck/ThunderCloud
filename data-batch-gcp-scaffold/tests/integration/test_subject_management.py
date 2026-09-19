@@ -2701,11 +2701,11 @@ def test_acquisition_reuse_requires_requested_policy(db):
     connection=db.connect()
     try:
         cursor=connection.cursor()
-        assert existing_acquisitions(cursor,'retain_and_enroll') == {}
-        assert next(iter(existing_acquisitions(cursor,'search_then_discard').values()))[0] == old
+        assert existing_acquisitions(cursor,'retain_and_enroll',[row]) == {}
+        assert next(iter(existing_acquisitions(cursor,'search_then_discard',[row]).values()))[0] == old
         connection.rollback()
         new=repo.create('tester',str(uuid.uuid4()),source_payload(row,'retain_and_enroll')).record['run_id']
-        assert next(iter(existing_acquisitions(cursor,'retain_and_enroll').values()))[0] == new
+        assert next(iter(existing_acquisitions(cursor,'retain_and_enroll',[row]).values()))[0] == new
     finally:
         connection.close()
 
@@ -2924,3 +2924,78 @@ def test_empty_detection_registers_library_source_and_backfill_reuses_sha(db, po
     assert RunRepository(db).get(other)['source_url'] == '/sources/' + source_id
     assert len(SubjectManagement(db).browse_sources()['sources']) == 1
     assert len(SubjectManagement(db).browse_sources()['sources'][0]['page_urls']) == 2
+
+
+def test_run_mutation_returns_record_with_single_connection_pool(db, monkeypatch):
+    monkeypatch.setenv('FACE_DB_POOL_SIZE', '1')
+    pooled = Database('local', 'postgres', 'postgres')
+    pooled._open = db.connect
+    repository = RunRepository(pooled)
+    try:
+        record = repository.create('pool-test', str(uuid.uuid4()), {
+            'handling_policy': 'search_then_discard',
+            'source': {'kind': 'url', 'url': 'https://example.com/video.mp4'},
+        }).record
+        result = repository.cancel(record['run_id'])
+        assert result['run_id'] == record['run_id']
+        assert result['state'] == 'cancelled'
+    finally:
+        pooled.close()
+
+
+def test_browser_profile_keeps_polling_after_acquisition_handoff(db, browser_console):
+    from playwright.sync_api import expect
+
+    page, origin = browser_console
+    batch = str(uuid.uuid4())
+    calls = []
+
+    def respond(route):
+        calls.append(True)
+        pending = len(calls) == 1
+        route.fulfill(json={
+            'batch_id': batch, 'username': 'TestProfile', 'discovery_failures': 0,
+            'status': {'phase': 'processing', 'selected': 2, 'acquired': 2,
+                       'handoff_complete': True, 'processing_complete': not pending,
+                       'awaiting_submission': 1 if pending else 0,
+                       'submission_failures': 0 if pending else 1},
+            'runs': [],
+        })
+
+    page.route('**/api/profile-batches/' + batch, respond)
+    page.goto(origin + '/batches/' + batch)
+    expect(page.locator('#batch-status')).to_contain_text('1 waiting to process')
+    expect(page.locator('#batch-status')).not_to_contain_text('Finished')
+    expect(page.locator('#batch-status')).to_contain_text('Finished', timeout=8000)
+    expect(page.locator('#batch-status')).to_contain_text('1 videos could not be submitted')
+    assert len(calls) == 2
+
+
+def test_pooled_enrollment_commits_gallery_cleanup_receipts_independently(db, monkeypatch):
+    monkeypatch.setenv('FACE_DB_POOL_SIZE', '2')
+    monkeypatch.setenv('FACE_DB_POOL_TIMEOUT', '0.2')
+    pooled = Database('local', 'postgres', 'postgres')
+    pooled._open = db.connect
+    try:
+        subject, run, *_ = enroll(pooled, 3)
+        assert RunRepository(pooled).get(run)['state'] == 'succeeded'
+        assert sql(pooled, 'SELECT count(*) FROM subject_example WHERE subject_id=%s', (subject,))[0][0] == 3
+        assert sql(pooled, 'SELECT count(*) FROM gallery_cleanup_object')[0][0] == 0
+        run, groups = make_run(pooled, 2)
+        RunRepository(pooled).select(run, groups, 1, [assignment(groups)])
+        worker, storage = processor(pooled)
+        publish = storage.upload_gallery_face
+        published = []
+        def fail_second(*args):
+            if published:
+                raise RuntimeError('second publication failed')
+            published.append(publish(*args))
+            return published[-1]
+        monkeypatch.setattr(storage, 'upload_gallery_face', fail_second)
+        assert not worker.match(run)
+        assert RunRepository(pooled).get(run)['state'] == 'failed'
+        # The first upload remains queued for cleanup after enrollment rolls back.
+        assert sql(pooled, 'SELECT object_name,object_generation FROM gallery_cleanup_object') == (list(published[0]),)
+        assert sql(pooled, 'SELECT count(*) FROM subject_example WHERE submission_group_id=ANY(%s::uuid[])', (groups,))[0][0] == 0
+    finally:
+        pooled.close()

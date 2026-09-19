@@ -107,16 +107,26 @@ class SourceMerges:
         cursor.execute('SELECT source_id FROM source_asset WHERE source_id=%s', (source_id,))
         if cursor.fetchone() is None:
             raise SubjectError(404, 'source_not_found', 'Source not found.')
-        cursor.execute('''SELECT s.subject_id,s.canonical_embedding::text,s.sample_count,s.model_version,
+        # Select the bounded member set first. Aggregate every example belonging
+        # to those members, including other sources and disabled examples.
+        if ids is None:
+            selected = '''SELECT s.subject_id FROM subject s
+                JOIN (SELECT DISTINCT subject_id FROM subject_example WHERE source_id=%s) own
+                  USING(subject_id) WHERE s.merged_into_subject_id IS NULL
+                ORDER BY s.subject_id LIMIT %s'''
+            parameters = (source_id, MAX_SUBJECTS + 1)
+        else:
+            selected = '''SELECT subject_id FROM subject WHERE subject_id=ANY(%s::uuid[])
+                ORDER BY subject_id LIMIT %s'''
+            parameters = (ids, MAX_SUBJECTS + 1)
+        cursor.execute(f'''WITH selected AS MATERIALIZED ({selected})
+            SELECT s.subject_id,s.canonical_embedding::text,s.sample_count,s.model_version,
             s.row_version,s.merged_into_subject_id,
             count(DISTINCT e.source_id),bool_and(e.source_id=%s),
             count(e.example_id) FILTER (WHERE e.disabled_at IS NULL),min(e.start_ms),max(e.end_ms),bool_and(e.model_version=s.model_version),s.matching_excluded
-            FROM subject s LEFT JOIN subject_example e USING(subject_id)
-            WHERE (%s::uuid[] IS NOT NULL AND s.subject_id=ANY(%s::uuid[])) OR
-              (%s::uuid[] IS NULL AND s.merged_into_subject_id IS NULL AND EXISTS
-                (SELECT 1 FROM subject_example own WHERE own.subject_id=s.subject_id AND own.source_id=%s))
-            GROUP BY s.subject_id ORDER BY s.subject_id LIMIT %s''',
-            (source_id, ids, ids, ids, source_id, MAX_SUBJECTS + 1))
+            FROM selected JOIN subject s USING(subject_id) LEFT JOIN subject_example e USING(subject_id)
+            GROUP BY s.subject_id ORDER BY s.subject_id''',
+            (*parameters, source_id))
         rows = cursor.fetchall()
         if len(rows) > MAX_SUBJECTS:
             raise SubjectError(422, 'background_scan_required',

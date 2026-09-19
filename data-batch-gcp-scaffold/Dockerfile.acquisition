@@ -1,0 +1,13 @@
+# Build from the repository root, using the matching console release as the base.
+ARG CONSOLE_IMAGE=us-central1-docker.pkg.dev/teak-banner-dome/face-batch-worker/console@sha256:4b467e60ce9403df1729caca6c833dde2a9ac2a1142f796721a4fc0ed0ce6a21
+FROM ${CONSOLE_IMAGE}
+
+USER root
+COPY bulk-download/pyproject.toml /app/bulk-download/pyproject.toml
+COPY bulk-download/src /app/bulk-download/src
+RUN /opt/venv/bin/python -m pip install /app/bulk-download
+COPY data-batch-gcp-scaffold/worker /app/worker
+COPY data-batch-gcp-scaffold/worker /opt/venv/lib/python3.12/site-packages/worker
+USER console
+
+CMD ["/opt/venv/bin/python", "-u", "-m", "worker.acquisition_batch"]

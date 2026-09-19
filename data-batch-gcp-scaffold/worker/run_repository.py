@@ -82,16 +82,21 @@ class RunRepository:
     used only for idempotency, context, and per-principal active-run quotas.
     """
 
-    def __init__(self, database, active_run_limit: int = 3):
+    def __init__(self, database, active_run_limit: int | None = None):
+        from .admission import AdmissionPolicy
         self.database = database
-        self.active_run_limit = active_run_limit
+        self.admission = AdmissionPolicy.from_env(active_run_limit)
+        self.active_run_limit = self.admission.active
 
     def create(
         self,
         principal: str,
         idempotency_key: str,
         payload: dict[str, Any],
+        *, workload: str = "interactive",
     ) -> CreatedRun:
+        if workload not in {'interactive', 'batch'}:
+            raise ValueError('Invalid run workload')
         fingerprint = request_fingerprint(payload)
         source = payload["source"]
         state = (
@@ -123,13 +128,16 @@ class RunRepository:
                     )
                 connection.commit()
                 return CreatedRun(serialize_run(existing), False)
-            cursor.execute(
-                """SELECT count(*) FROM media_run
-                   WHERE submitter_principal = %s
-                     AND state NOT IN ('succeeded','failed','cancelled','expired')""",
-                (principal,),
-            )
-            if int(cursor.fetchone()[0]) >= self.active_run_limit:
+            self.admission.lock(cursor)
+            if (payload['handling_policy'] == 'search_then_discard'
+                    and payload.get('selection_policy', 'manual') == 'manual'
+                    and self.admission.review_full(cursor, principal)):
+                raise RunConflictError('pending review quota reached')
+            if state is RunState.AWAITING_MEDIA:
+                full = self.admission.waiting_full(cursor, principal, 'awaiting_media')
+            else:
+                full = self.admission.full(cursor, workload)
+            if full:
                 raise RunConflictError("active run quota reached")
             run_id = uuid.uuid4()
             cursor.execute(
@@ -137,8 +145,8 @@ class RunRepository:
                     (run_id, submitter_principal, idempotency_key,
                      request_fingerprint, handling_policy, source_kind,
                      source_page_url, content_type, expected_bytes, state, selection_policy,
-                     archive_bucket, archive_object_name, archive_object_generation, archive_sha256)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     archive_bucket, archive_object_name, archive_object_generation, archive_sha256, workload)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING {_RUN_COLUMNS}""",
                 (
                     str(run_id),
@@ -157,6 +165,7 @@ class RunRepository:
                     source.get("object_name"),
                     source.get("generation"),
                     source.get("sha256"),
+                    workload,
                 ),
             )
             record = serialize_run(cursor.fetchone())
@@ -176,22 +185,30 @@ class RunRepository:
             cursor.close()
             connection.close()
 
+    def _admit_existing(self, cursor, run_id):
+        self.admission.lock(cursor)
+        cursor.execute('SELECT state,workload FROM media_run WHERE run_id=%s', (run_id,))
+        row = cursor.fetchone()
+        if row and row[0] in {'awaiting_media','awaiting_face_selection','failed'} and self.admission.full(cursor, row[1]):
+            raise RunConflictError('active run quota reached')
+
     def get(self, run_id: str) -> dict[str, Any]:
         connection = self.database.connect()
         cursor = connection.cursor()
         try:
-            cursor.execute(
-                f"SELECT {_RUN_COLUMNS} FROM media_run WHERE run_id = %s",
-                (run_id,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise RunNotFoundError(run_id)
-            return serialize_run(row)
+            return self._get(cursor, run_id)
         finally:
             connection.rollback()
             cursor.close()
             connection.close()
+
+    @staticmethod
+    def _get(cursor, run_id):
+        cursor.execute(f"SELECT {_RUN_COLUMNS} FROM media_run WHERE run_id = %s", (run_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise RunNotFoundError(run_id)
+        return serialize_run(row)
 
     def batch_statuses(self, run_ids):
         connection = self.database.connect()
@@ -280,6 +297,7 @@ class RunRepository:
         connection = self.database.connect()
         cursor = connection.cursor()
         try:
+            self._admit_existing(cursor, run_id)
             cursor.execute(
                 """UPDATE media_run SET source_sha256 = %s,
                           object_generation = %s, object_bytes = %s,
@@ -308,7 +326,7 @@ class RunRepository:
                 (run_id,),
             )
             connection.commit()
-            return self.get(run_id)
+            return self._get(cursor, run_id)
         except Exception:
             connection.rollback()
             raise
@@ -362,6 +380,7 @@ class RunRepository:
         connection = self.database.connect()
         cursor = connection.cursor()
         try:
+            self._admit_existing(cursor, run_id)
             assignments = assignments or []
             fingerprint = request_fingerprint(
                 {"group_ids": sorted(group_ids), "assignments": assignments}
@@ -377,7 +396,7 @@ class RunRepository:
                 and prior[0] != "awaiting_face_selection"
             ):
                 connection.rollback()
-                return self.get(run_id)
+                return self._get(cursor, run_id)
             cursor.execute(
                 """SELECT group_id FROM submission_face_group
                    WHERE run_id = %s AND group_id = ANY(%s::uuid[])""",
@@ -401,7 +420,7 @@ class RunRepository:
                 raise RunConflictError("selection is stale or no longer editable")
             queue_selection(cursor, run_id, group_ids, assignments)
             connection.commit()
-            return self.get(run_id)
+            return self._get(cursor, run_id)
         except Exception:
             connection.rollback()
             raise
@@ -468,7 +487,7 @@ class RunRepository:
                     (run_id, run_id, run_id),
                 )
             connection.commit()
-            return self.get(run_id)
+            return self._get(cursor, run_id)
         except Exception:
             connection.rollback()
             raise
@@ -480,6 +499,7 @@ class RunRepository:
         connection = self.database.connect()
         cursor = connection.cursor()
         try:
+            self._admit_existing(cursor, run_id)
             cursor.execute(
                 """UPDATE media_run SET state = failed_step, retryable = false,
                           error_code = NULL, updated_at = now(), row_version = row_version + 1
@@ -507,7 +527,7 @@ class RunRepository:
                 (run_id, kind),
             )
             connection.commit()
-            return self.get(run_id)
+            return self._get(cursor, run_id)
         except Exception:
             connection.rollback()
             raise

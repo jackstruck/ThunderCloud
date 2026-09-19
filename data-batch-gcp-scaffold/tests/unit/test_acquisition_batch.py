@@ -74,3 +74,25 @@ def test_policy_change_uses_new_handoff_keys():
     old=handoff_key('batch','search_then_discard','object#42')
     new=handoff_key('batch','retain_and_enroll','object#42')
     assert new!=old and new==handoff_key('batch','retain_and_enroll','object#42')
+
+
+def test_manifest_progress_tails_new_rows_and_reconstructs_on_restart(tmp_path):
+    import json
+
+    from worker.acquisition_batch import ManifestProgress
+    path=tmp_path/'manifest.jsonl'
+    source=row()
+    duplicate={'provider':'hotscope','provider_id':'two','status':'duplicate',
+        'duplicate_of':source['object'],'page_url':'https://hotscope.tv/video/two'}
+    path.write_text(json.dumps(duplicate)+'\n')
+    progress=ManifestProgress(path)
+    assert progress.refresh({'one','two'})==({},set())
+    with path.open('a') as handle:handle.write(json.dumps(source)+'\n')
+    expected=acquired_sources([duplicate,source],{'one','two'})
+    assert progress.refresh({'one','two'})==expected
+    assert progress.refresh({'one','two'})==expected
+    assert progress.text==path.read_text()
+    assert ManifestProgress(path).refresh({'one','two'})==expected
+    from bulk_download.manifest import completed_hashes, completed_urls
+    assert progress.completed_urls == completed_urls(path)
+    assert progress.completed_hashes == completed_hashes(path)

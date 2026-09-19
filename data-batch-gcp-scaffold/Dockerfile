@@ -30,6 +30,7 @@ ENV FACE_DETECTOR_MODEL=/opt/models/scrfd.onnx \
     FACE_EMBEDDING_COLOR_ORDER=BGR \
     FACE_DETECTOR_VERSION=scrfd-10g-5838f7fe \
     FACE_EMBEDDING_MODEL_VERSION=adaface-ir18-6b6a3577 \
+    FACE_DB_POOL_SIZE=2 \
     FACE_WORKER_VERSION=0.2.0-cloud-run-r4
 
 # Validate hashes, model contracts, and that this is a CUDA-enabled ORT build. Actual

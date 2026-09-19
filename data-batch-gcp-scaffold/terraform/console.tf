@@ -3,6 +3,12 @@ locals {
   temporary_submission_prefix = "submissions-temporary/"
   gallery_prefix              = "subject-gallery/"
   training_media_prefix       = "training-media/"
+  processing_capacity_env = {
+    FACE_ACTIVE_RUN_LIMIT     = tostring(var.processing_capacity.active)
+    FACE_INTERACTIVE_RESERVED = tostring(var.processing_capacity.interactive_reserved)
+    FACE_IMPORT_PENDING_LIMIT = tostring(var.processing_capacity.pending)
+    FACE_PENDING_REVIEW_LIMIT = tostring(var.processing_capacity.review)
+  }
 }
 
 resource "google_service_account" "console" {
@@ -185,16 +191,27 @@ resource "google_cloud_run_v2_service" "console" {
   template {
     service_account                  = google_service_account.console[0].email
     timeout                          = "30s"
-    max_instance_request_concurrency = 20
+    max_instance_request_concurrency = 8
     scaling {
       max_instance_count = 3
     }
     containers {
       image   = var.console_image
       command = ["gunicorn"]
-      args    = ["--bind=0.0.0.0:8080", "--workers=2", "--access-logfile=-", "worker.console:create_app()"]
+      args    = ["--bind=0.0.0.0:8080", "--workers=2", "--threads=4", "--access-logfile=-", "worker.console:create_app()"]
       resources {
-        limits = { cpu = "1", memory = "512Mi" }
+        limits = { cpu = "1", memory = "1Gi" }
+      }
+      env {
+        name  = "FACE_DB_POOL_SIZE"
+        value = "2"
+      }
+      dynamic "env" {
+        for_each = local.processing_capacity_env
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
       env {
         name  = "FACE_PROJECT_ID"
@@ -239,10 +256,6 @@ resource "google_cloud_run_v2_service" "console" {
       env {
         name  = "FACE_RESULT_TTL_DAYS"
         value = "7"
-      }
-      env {
-        name  = "FACE_ACTIVE_RUN_LIMIT"
-        value = "3"
       }
       env {
         name  = "FACE_ALLOW_ARBITRARY_HOSTS"
@@ -330,6 +343,13 @@ resource "google_cloud_run_v2_job" "ingest_drain" {
         command = ["python", "-m", "worker.ingest_drain"]
         resources {
           limits = { cpu = "1", memory = "1Gi" }
+        }
+        dynamic "env" {
+          for_each = local.processing_capacity_env
+          content {
+            name  = env.key
+            value = env.value
+          }
         }
         env {
           name  = "FACE_PROJECT_ID"
@@ -425,11 +445,30 @@ resource "google_cloud_run_v2_job" "interactive_gpu" {
         image   = coalesce(var.interactive_gpu_image, var.cloud_run_worker_image)
         command = ["python", "-m", "worker.interactive"]
 
+        # Enrollment keeps a separate committed gallery-cleanup receipt while its
+        # main transaction is open.
+        env {
+          name  = "FACE_DB_POOL_SIZE"
+          value = "2"
+        }
+
+        env {
+          name  = "FACE_MAX_PROBE_VIDEO_DURATION_SECONDS"
+          value = "1800"
+        }
+
         resources {
           limits = {
             cpu              = "4"
             memory           = "16Gi"
             "nvidia.com/gpu" = "1"
+          }
+        }
+        dynamic "env" {
+          for_each = local.processing_capacity_env
+          content {
+            name  = env.key
+            value = env.value
           }
         }
         env {
@@ -512,7 +551,7 @@ resource "google_cloud_scheduler_job" "ingest_reconciliation" {
   region      = var.region
   name        = "face-ingest-reconciliation"
   description = "Recover durable Phase 1 work left queued after an invocation failure."
-  schedule    = "*/10 * * * *"
+  schedule    = "*/2 * * * *"
   time_zone   = "Etc/UTC"
   http_target {
     http_method = "POST"

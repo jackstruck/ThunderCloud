@@ -66,10 +66,12 @@ async function openBatch(id){
  const refresh=async()=>{try{
   const {body}=await api(`/api/profile-batches/${id}`);if(request!==state.runRequest)return;
   document.querySelector('#batch-title').textContent=`Videos from ${body.username}`;
-  const status=body.status,finished=status.handoff_complete&&body.runs.every(r=>['succeeded','failed','cancelled','expired'].includes(r.state));
+  const status=body.status,finished=status.processing_complete??(status.handoff_complete&&body.runs.every(r=>['succeeded','failed','cancelled','expired'].includes(r.state)));
   document.querySelector('#batch-status').textContent=status.phase==='failed'?status.message:status.phase==='queued'?'Queued for processing…':status.phase==='discovering'?'Finding all videos…':`${status.selected||0} videos found · ${status.acquired||0} downloaded · ${body.runs.length} runs · ${finished?'Finished':status.handoff_complete?'Processing videos':'Submitting videos'}`;
   const failures=(status.acquisition_failures||0)+(body.discovery_failures||0);
   if(failures)document.querySelector('#batch-status').textContent+=` · ${failures} videos could not be acquired`;
+  if(status.awaiting_submission)document.querySelector('#batch-status').textContent+=` · ${status.awaiting_submission} waiting to process`;
+  if(status.submission_failures)document.querySelector('#batch-status').textContent+=` · ${status.submission_failures} videos could not be submitted`;
   const list=document.querySelector('#batch-runs');list.replaceChildren();
   body.runs.forEach(run=>appendRunEntry(list,run,run.run_id));
   if(!finished&&status.phase!=='failed')state.poll=setTimeout(refresh,5000);

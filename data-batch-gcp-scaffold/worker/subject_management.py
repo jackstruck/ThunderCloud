@@ -293,16 +293,20 @@ class SubjectManagement:
             pattern = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             metric = {"id":"0::bigint", "sources":"COALESCE(c.sources,0)", "examples":"COALESCE(c.examples,0)",
                       "newest":"(extract(epoch FROM s.created_at)*1000000)::bigint"}[sort]
-            cursor.execute(f"""WITH counts AS (
-                    SELECT subject_id,count(DISTINCT source_id) AS sources,count(*) AS examples
-                    FROM subject_example GROUP BY subject_id
-                ), listed AS (
+            needs_counts = sort in {"sources", "examples"} or source_scope != "all"
+            counts_join = """LEFT JOIN (
+                SELECT subject_id,count(DISTINCT source_id) AS sources,count(*) AS examples
+                FROM subject_example GROUP BY subject_id
+            ) c USING(subject_id)""" if needs_counts else ""
+            scope_filter = "TRUE" if source_scope == "all" else (
+                "COALESCE(c.sources,0)=1" if source_scope == "single" else "COALESCE(c.sources,0)>1")
+            cursor.execute(f"""WITH listed AS (
                     SELECT s.subject_id,{metric} AS metric
-                    FROM subject s LEFT JOIN identity i USING(identity_id) LEFT JOIN counts c USING(subject_id)
+                    FROM subject s LEFT JOIN identity i USING(identity_id) {counts_join}
                     WHERE s.merged_into_subject_id IS NULL
                       AND (%s OR NOT s.matching_excluded)
                       AND (%s='' OR lower(i.display_name) LIKE lower(%s))
-                      AND (%s='all' OR (%s='single' AND COALESCE(c.sources,0)=1) OR (%s='multiple' AND COALESCE(c.sources,0)>1))
+                      AND {scope_filter}
                       AND (%s='all' OR (%s='named' AND btrim(COALESCE(i.display_name,''))<>'') OR (%s='unnamed' AND btrim(COALESCE(i.display_name,''))=''))
                       AND (%s::uuid IS NULL OR EXISTS (SELECT 1 FROM subject_example e WHERE e.subject_id=s.subject_id AND e.source_id=%s::uuid))
                       AND (NOT %s OR EXISTS (
@@ -312,7 +316,7 @@ class SubjectManagement:
                 ) SELECT subject_id,metric FROM listed
                 WHERE (%s::uuid IS NULL OR metric<%s OR (metric=%s AND subject_id>%s::uuid))
                 ORDER BY metric DESC,subject_id LIMIT %s""",
-                (include_excluded,q,pattern,source_scope,source_scope,source_scope,name_status,name_status,name_status,
+                (include_excluded,q,pattern,name_status,name_status,name_status,
                  source_id,source_id,shared_source,after_id,after_metric or 0,after_metric or 0,after_id,limit+1))
             rows = cursor.fetchall()
             next_cursor = next_browse_cursor(sort, rows[limit-1][1], rows[limit-1][0]) if len(rows)>limit else None
@@ -554,22 +558,49 @@ class SubjectManagement:
         pattern = "%" + q.strip().replace("\\","\\\\").replace("%","\\%").replace("_","\\_") + "%"
         metric = {"id":"0::bigint","subjects":"subjects","examples":"examples","newest":"created"}[sort]
         with self.transaction() as cursor:
-            cursor.execute(f"""WITH grouped AS (
-                SELECT sa.source_id,sa.source_page_url,count(DISTINCT s.subject_id) AS subjects,count(s.subject_id) AS examples,
-                       (extract(epoch FROM sa.created_at)*1000000)::bigint AS created
-                FROM source_asset sa LEFT JOIN subject_example e ON e.source_id=sa.source_id
-                LEFT JOIN subject s ON s.subject_id=e.subject_id AND s.merged_into_subject_id IS NULL
-                WHERE sa.deleted_at IS NULL
-                  AND (sa.source_id::text ILIKE %s OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=sa.source_id AND p.page_url ILIKE %s))
-                  AND (%s='' OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=sa.source_id AND regexp_replace(lower(split_part(split_part(p.page_url,'://',2),'/',1)), '^www\\.|:443$', '', 'g')=%s))
-                GROUP BY sa.source_id,sa.source_page_url,sa.created_at
-                HAVING {count_filter}
+            predicates = ["sa.deleted_at IS NULL"]
+            args = []
+            if q.strip():
+                predicates.append("""(sa.source_id::text ILIKE %s OR EXISTS
+                    (SELECT 1 FROM source_page_link p WHERE p.source_id=sa.source_id AND p.page_url ILIKE %s))""")
+                args.extend((pattern, pattern))
+            if origin:
+                predicates.append("""EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=sa.source_id
+                    AND regexp_replace(lower(split_part(split_part(p.page_url,'://',2),'/',1)), '^www\\.|:443$', '', 'g')=%s)""")
+                args.append(origin)
+            where = " AND ".join(predicates)
+            if sort in {"id", "newest"} and subject_scope == "all":
+                # Page source metadata before reading examples. Count-filtered and
+                # count-sorted modes below deliberately aggregate before pagination.
+                page_metric = "0::bigint" if sort == "id" else "(extract(epoch FROM sa.created_at)*1000000)::bigint"
+                query = f"""WITH candidates AS (
+                    SELECT sa.source_id,sa.source_page_url,{page_metric} AS metric
+                    FROM source_asset sa WHERE {where}
+                ), page AS MATERIALIZED (
+                    SELECT * FROM candidates WHERE (%s::uuid IS NULL OR metric<%s
+                        OR (metric=%s AND source_id>%s::uuid))
+                    ORDER BY metric DESC,source_id LIMIT %s
+                ) SELECT page.source_id,page.source_page_url,c.subjects,c.examples,page.metric,
+                    ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=page.source_id ORDER BY p.page_url)
+                  FROM page CROSS JOIN LATERAL (
+                    SELECT count(DISTINCT s.subject_id) AS subjects,count(s.subject_id) AS examples
+                    FROM subject_example e LEFT JOIN subject s ON s.subject_id=e.subject_id
+                        AND s.merged_into_subject_id IS NULL WHERE e.source_id=page.source_id
+                  ) c ORDER BY page.metric DESC,page.source_id"""
+            else:
+                query = f"""WITH grouped AS (
+                    SELECT sa.source_id,sa.source_page_url,count(DISTINCT s.subject_id) AS subjects,
+                        count(s.subject_id) AS examples,(extract(epoch FROM sa.created_at)*1000000)::bigint AS created
+                    FROM source_asset sa LEFT JOIN subject_example e ON e.source_id=sa.source_id
+                    LEFT JOIN subject s ON s.subject_id=e.subject_id AND s.merged_into_subject_id IS NULL
+                    WHERE {where} GROUP BY sa.source_id,sa.source_page_url,sa.created_at
+                    HAVING {count_filter}
                 ), listed AS (SELECT *,{metric} AS metric FROM grouped)
                 SELECT source_id,source_page_url,subjects,examples,metric,
-                  ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=listed.source_id ORDER BY p.page_url) FROM listed
-                WHERE (%s::uuid IS NULL OR metric<%s OR (metric=%s AND source_id>%s::uuid))
-                ORDER BY metric DESC,source_id LIMIT %s""",
-                (pattern,pattern,origin,origin,after_id,after_metric or 0,after_metric or 0,after_id,limit+1))
+                    ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=listed.source_id ORDER BY p.page_url)
+                FROM listed WHERE (%s::uuid IS NULL OR metric<%s OR (metric=%s AND source_id>%s::uuid))
+                ORDER BY metric DESC,source_id LIMIT %s"""
+            cursor.execute(query, (*args, after_id, after_metric or 0, after_metric or 0, after_id, limit+1))
             rows=cursor.fetchall()
             return {"sources":[{"source_id":str(r[0]),"page_url":r[1],"page_urls":list(r[5]),"subject_count":r[2],"example_count":r[3]} for r in rows[:limit]],
                     "next_cursor":next_browse_cursor(sort,rows[limit-1][4],rows[limit-1][0]) if len(rows)>limit else None}

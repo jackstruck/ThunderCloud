@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -136,13 +137,13 @@ def _provenance(item) -> dict:
             "luluvid_url": item.luluvid_url, "uid": item.uid}
 
 
-def run(config, input_stage: str = "all", options=None) -> int:
+def run(config, input_stage: str = "all", options=None, *, manifest_state=None) -> int:
     key = load_csek(config)
     stale = sorted([*config.temp_dir.glob("*.part"), *config.temp_dir.glob("*.segments.ts")]) if config.temp_dir.exists() else []
     if stale:
         raise ConfigError(f"stale partial files must be removed manually: {', '.join(map(str, stale))}")
-    done = completed_urls(config.manifest_file)
-    hash_index = completed_hashes(config.manifest_file)
+    done, hash_index = (manifest_state if manifest_state is not None else
+                        (completed_urls(config.manifest_file), completed_hashes(config.manifest_file)))
     storage = StorageAdapter(config, key)
     storage.check_bucket()
     found, failures = _discover_all(config, input_stage, options, done)
@@ -158,10 +159,13 @@ def run(config, input_stage: str = "all", options=None) -> int:
                 _log("skip", "manifest already records completion", item.uid)
                 continue
             downloaded = None
+            timings = {}
             try:
+                started = time.monotonic()
                 restriction = fetcher.restricted_to(HOSTS) if getattr(item, "provider", None) == "hotscope" else nullcontext()
                 with restriction, fetcher.referring_to(item.media_referer or item.page_url):
                     downloaded = download_video(fetcher, config, item.media_url, item.uid)
+                timings['download_validation_seconds'] = round(time.monotonic() - started, 3)
                 prior = hash_index.get(downloaded.sha256)
                 if prior is not None:
                     append(config.manifest_file, {
@@ -170,30 +174,36 @@ def run(config, input_stage: str = "all", options=None) -> int:
                         "sha256": downloaded.sha256, "bytes": downloaded.size,
                         "duplicate_of": prior["object"],
                         "duplicate_of_uid": prior.get("uid"),
+                        "timings": timings,
                     })
                     downloaded.path.unlink(missing_ok=True)
                     _log("duplicate", f"matches {prior['object']}", item.uid)
                     continue
                 object_name = f"{config.gcp.prefix}/{item.uid}{downloaded.extension}"
+                started = time.monotonic()
                 existing = storage.existing(object_name)
                 if existing is not None:
                     downloaded = storage.reuse_existing(existing, downloaded, allow_remux=item.media_url.split('?', 1)[0].lower().endswith('.m3u8'))
+                    timings['archive_reuse_seconds'] = round(time.monotonic() - started, 3)
                     record = {
                         "timestamp": _timestamp(), "status": "complete", "recovered_from_gcs": True,
                         **_provenance(item),
                         "object": f"gs://{config.gcp.bucket}/{object_name}", "generation": int(existing.generation),
                         "sha256": downloaded.sha256, "bytes": downloaded.size,
                         "content_type": downloaded.content_type,
+                        "timings": timings,
                     }
                     append(config.manifest_file, record)
                     hash_index[downloaded.sha256] = record
                     downloaded.path.unlink(missing_ok=True)
                     continue
                 blob = storage.upload(object_name, downloaded.path, downloaded.content_type, downloaded.size)
+                timings['archive_upload_seconds'] = round(time.monotonic() - started, 3)
                 record = {
                     "timestamp": _timestamp(), "status": "complete", **_provenance(item), "object": f"gs://{config.gcp.bucket}/{object_name}",
                     "generation": int(blob.generation), "content_type": downloaded.content_type,
                     "bytes": downloaded.size, "sha256": downloaded.sha256,
+                    "timings": timings,
                 }
                 append(config.manifest_file, record)
                 hash_index[downloaded.sha256] = record

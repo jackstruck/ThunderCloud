@@ -67,9 +67,9 @@ variable "private_service_range_prefix_length" {
 }
 
 variable "db_tier" {
-  description = "Cloud SQL tier. db-f1-micro is appropriate only for development/prototyping."
+  description = "Cloud SQL tier; db-g1-small provides the budget performance baseline."
   type        = string
-  default     = "db-f1-micro"
+  default     = "db-g1-small"
 }
 
 variable "db_disk_size_gb" {
@@ -234,5 +234,24 @@ variable "source_merges_auto_threshold" {
   validation {
     condition     = var.source_merges_auto_threshold == null ? true : (var.source_merges_auto_threshold >= -1 && var.source_merges_auto_threshold <= 1)
     error_message = "Automatic source matching requires a cosine threshold between -1 and 1."
+  }
+}
+
+variable "processing_capacity" {
+  description = "Shared global processing admission and bounded pending work limits."
+  type = object({
+    active               = number
+    interactive_reserved = number
+    pending              = number
+    review               = number
+  })
+  default = { active = 3, interactive_reserved = 1, pending = 1000, review = 50 }
+  validation {
+    condition = (var.processing_capacity.active >= 1 &&
+      var.processing_capacity.interactive_reserved >= 0 &&
+      var.processing_capacity.interactive_reserved < var.processing_capacity.active &&
+      var.processing_capacity.pending >= 1 && var.processing_capacity.review >= 1 &&
+    alltrue([for n in values(var.processing_capacity) : n == floor(n)]))
+    error_message = "Use positive integer capacities and reserve fewer slots than the active capacity."
   }
 }

@@ -13,7 +13,7 @@ BEGIN
         run_operation, subject_representative_face, run_cleanup_object,
         gallery_cleanup_object, gallery_fallback_source,
         subject_example, enrollment_assignment, enrollment_assignment_member,
-        subject_change_event, subject_suggestion_dismissal TO %I', principal);
+        subject_change_event, subject_suggestion_dismissal, import_queue, import_dispatch_lease TO %I', principal);
     EXECUTE format('REVOKE ALL ON verified_embedding_model, platform_schema_migration FROM %I', principal);
     EXECUTE format('GRANT SELECT ON verified_embedding_model, source_page_link TO %I', principal);
 END $$;

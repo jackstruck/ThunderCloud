@@ -10,7 +10,7 @@ staging_ttl_days = 1
 subnet_cidr      = "10.42.0.0/24"
 
 # Development only. Increase for production after benchmarking.
-db_tier         = "db-f1-micro"
+db_tier         = "db-g1-small"
 db_disk_size_gb = 10
 
 # Turn on once you want Terraform deletion protection for the DB.
