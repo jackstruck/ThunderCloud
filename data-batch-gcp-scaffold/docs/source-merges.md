@@ -115,8 +115,8 @@ and the independently verified minimum score alongside ordinary recovery members
    alone: missed matches require review of excluded/unproposed pairs too. Once the
    reviewed threshold is accepted, set `source_merges_apply_enabled=true` in Terraform
    to enable explicitly selected operator groups. No numerical threshold is preset.
-3. Unattended application is not implemented or enabled. It requires separately
-   reviewed calibration evidence establishing an acceptable false-merge rate.
+3. Automatic new-source application is separately configured with
+   `source_merges_auto_threshold`; see the current rollout below.
 
 Retain review records privately alongside plans/receipts. Recalibrate after a model
 change. Failed groups, user rejections, and missed matches are not interchangeable.
@@ -140,3 +140,62 @@ being kept is marked; full IDs and extra identity details can be expanded. Use
 summary states the exact number of subjects and resulting groups before application.
 Application availability is checked against the current server setting whenever the
 review panel opens. Reload to pick up a rollout change; saved selections are retained.
+
+## Automatic new-source matching
+
+Following the user's threshold change on 2026-09-17, production
+new-source enrollment uses cosine **0.4**. Set `source_merges_auto_threshold = 0.4`
+in Terraform (`FACE_SOURCE_MERGES_AUTO_THRESHOLD` on the interactive processing job).
+Leave it null/empty to disable automatic matching independently of operator merging.
+
+New `enroll_only` and `retain_and_enroll` submissions automatically select all detected
+tracks. After those tracks are enrolled, the worker
+forms complete-linkage groups within that source and merges them before marking the run
+successful. Every example, representative image, and source attribution is retained.
+The member with the most examples survives, with stable subject IDs breaking ties.
+Search-only processing and duplicate-video enrollment reuse do not trigger this step;
+there is no historical-library sweep.
+
+The same model, source boundary, version, exclusion, dismissed-pair, and identity checks
+used by operator merges apply. Conflicting identities and groups over 50 members stay
+separate for manual review. Sources beyond the 400-subject/10-second planning bound
+finish enrollment without automatic merges. Each source keeps an `automatic_matching`
+report in its metadata; successful merges retain the normal audit and separation records.
+
+Enrollment and automatic merges share one transaction and enrollment lock. An unexpected
+failure rolls back both, so an ordinary run retry cannot leave half-enrolled or duplicate
+merges. Operation IDs derive from the run, algorithm, threshold, and members. This is one
+grouping pass over newly enrolled subjects; it does not repeatedly merge averaged group
+embeddings into larger groups. Recalibrate the configured threshold after model changes.
+
+### Historical backfill
+
+`python -m worker.source_merge_backfill` applies the same complete-linkage cosine
+0.5 matching to a fixed inventory of historical sources. It excludes deleted/new
+sources, sources already carrying automatic/historical matching results, and any
+source connected to a successful subject combine (including subsequently separated
+merges). Failed combine attempts do not disqualify a source. Audit example IDs,
+current subject redirects, and move-connected subjects conservatively preserve merge
+history. Eligibility is checked again under the enrollment advisory lock.
+
+Set `FACE_BACKFILL_ID` to a UUID, `FACE_BACKFILL_CUTOFF` to an ISO timestamp with a
+timezone, and `FACE_BACKFILL_REPORT_OBJECT` to an authorized bucket object. The
+initial default dry run saves the inventory without merging. Set
+`FACE_BACKFILL_APPLY=true` with the same scope to apply or resume it. Each source's
+merges, audit records, and `metadata.historical_matching` report commit atomically;
+all example IDs and source provenance are retained. The encrypted GCS report uses
+generation preconditions and checkpoints after each source. Per-source errors are
+retried on the next execution; committed source reports prevent duplicate merges.
+Existing size, identity-conflict, dismissal, and multi-source safeguards apply.
+
+The optional Terraform `source_merge_backfill_image` provisions a CPU Cloud Run
+job using the console database identity and private networking. It has no schedule;
+execution requires explicit scope environment overrides.
+
+A timeout follow-up can set `FACE_BACKFILL_SCAN_BUDGET_SECONDS` (1–300; default 10)
+and `FACE_BACKFILL_RETRY_FROM` to the original backfill UUID. It requires a separate
+prepopulated report containing only the chosen sources, with matching
+`scan_budget_seconds` and `retry_from_backfill_id` fields. Under the merge lock,
+only original `manual_review/background_scan_required` reports with no merge
+outcomes may be retried. Successful reports remain idempotent, and merge history
+is checked again. Uploads retain their default 10-second scan budget.

@@ -253,6 +253,10 @@ resource "google_cloud_run_v2_service" "console" {
         value = tostring(var.source_merges_apply_enabled)
       }
       env {
+        name  = "FACE_PROFILE_BATCH_PREFIX"
+        value = local.acquisition_batch_enabled ? dirname(var.acquisition_batch_state_object) : ""
+      }
+      env {
         name  = "FACE_SUBJECT_MANAGEMENT_ENABLED"
         value = tostring(var.subject_management_enabled)
       }
@@ -471,6 +475,10 @@ resource "google_cloud_run_v2_job" "interactive_gpu" {
         env {
           name  = "FACE_REQUIRE_CUDA"
           value = "true"
+        }
+        env {
+          name  = "FACE_SOURCE_MERGES_AUTO_THRESHOLD"
+          value = var.source_merges_auto_threshold == null ? "" : tostring(var.source_merges_auto_threshold)
         }
         env {
           name  = "FACE_TOP_K"

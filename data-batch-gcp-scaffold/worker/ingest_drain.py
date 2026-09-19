@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from google.api_core.exceptions import GoogleAPIError
 
 from .config import Settings
 from .db import Database
-from .hls_fetch import fetch_hotscope_video
+from .hls_fetch import fetch_hotscope_video, fetch_luluvid_video
 from .ingest_repository import IngestRepository
 from .job_invoker import CloudRunJobInvoker
 from .maintenance import MaintenanceRepository, maintain
@@ -25,6 +26,7 @@ def drain(
     fetcher=fetch_media,
     resolver=resolve_source,
     hls_fetcher=fetch_hotscope_video,
+    luluvid_fetcher=fetch_luluvid_video,
     invoke_detect=lambda _run_id: None,
 ) -> int:
     completed = 0
@@ -44,8 +46,13 @@ def drain(
                 source = resolver(work.source_url)
                 if source.source_adapter == "hotscope":
                     fetched = hls_fetcher(source.final_url, page_url=source.page_url, max_bytes=max_bytes)
+                elif (source.source_adapter in {"luluvid", "justpaste"}
+                      and urlsplit(source.final_url).path.lower().endswith(".m3u8")):
+                    fetched = luluvid_fetcher(source.final_url, page_url=source.page_url,
+                                              referer=source.media_referer, max_bytes=max_bytes)
                 else:
-                    fetched = fetcher(source.final_url, max_bytes=max_bytes)
+                    options = {"referer": source.media_referer} if source.media_referer else {}
+                    fetched = fetcher(source.final_url, max_bytes=max_bytes, **options)
                 object_name, generation, size = storage.upload_temporary(
                     work.run_id,
                     fetched.data,

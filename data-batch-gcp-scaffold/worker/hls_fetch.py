@@ -1,4 +1,4 @@
-"""Acquire finite Hotscope MPEG-TS HLS through the DNS-pinned HTTPS transport."""
+"""Acquire finite MPEG-TS HLS through the DNS-pinned HTTPS transport."""
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from .secure_fetch import FetchResult, fetch_resource
 
@@ -21,14 +21,30 @@ CDN_HOSTS = {"cdn.hotscope.tv"}
 
 def fetch_hotscope_video(url: str, *, page_url: str, max_bytes: int,
                          resource_fetcher=fetch_resource) -> FetchResult:
+    return _fetch_hls(url, page_url=page_url, referer=page_url, max_bytes=max_bytes,
+                      allowed_hosts=CDN_HOSTS, resource_fetcher=resource_fetcher)
+
+
+def fetch_luluvid_video(url: str, *, page_url: str, referer: str | None,
+                        max_bytes: int, resource_fetcher=fetch_resource) -> FetchResult:
+    host = urlsplit(url).hostname
+    if not host:
+        raise ValueError("HLS URL has no host")
+    # Every rendition, segment and redirect remains on the resolved media host.
+    return _fetch_hls(url, page_url=page_url, referer=referer or page_url,
+                      max_bytes=max_bytes, allowed_hosts={host.lower().rstrip(".")},
+                      resource_fetcher=resource_fetcher)
+
+
+def _fetch_hls(url, *, page_url, referer, max_bytes, allowed_hosts, resource_fetcher):
     deadline = time.monotonic() + 180
 
     def get(target, limit, types):
         if time.monotonic() >= deadline:
             raise RuntimeError("HLS acquisition exceeded its time budget")
         return resource_fetcher(target, max_bytes=limit, allowed_types=types,
-                                validate_signature=False, allowed_hosts=CDN_HOSTS,
-                                referer=page_url, timeout=min(20, max(1, deadline - time.monotonic())))
+                                validate_signature=False, allowed_hosts=allowed_hosts,
+                                referer=referer, timeout=min(20, max(1, deadline - time.monotonic())))
 
     def playlist(target):
         result = get(target, 2_000_000, PLAYLIST_TYPES)

@@ -507,7 +507,7 @@ def test_browser_edit_search_move_and_combine(db, browser_console):
     page.get_by_label("Subject ID or display name").fill(sid)
     page.get_by_role("button", name="Search Subjects", exact=True).click()
     expect(page.locator(".subject-card")).to_have_count(1)
-    page.get_by_role("link", name="Open subject").click()
+    page.get_by_role("link", name="View Subject").click()
     expect(page.get_by_label("Display name", exact=True)).to_be_hidden()
     expect(page.get_by_role('button', name='Save details', exact=True)).to_be_hidden()
     page.get_by_role('button', name='Edit identity', exact=True).click()
@@ -862,7 +862,7 @@ def test_browser_source_selection_crosses_pages_and_previews_all_sources(
     expect(page.get_by_label("Multiple sources")).to_be_checked()
     expect(page.get_by_label("Sort subjects")).to_have_value("sources")
     expect(page.locator(".subject-card")).to_have_count(1)
-    page.get_by_role("link", name="Open subject").click()
+    page.get_by_role("link", name="View Subject").click()
     expect(page.locator(".example-row")).to_have_count(30)
     video_source = next(
         r for r in service.sources(sid)["sources"] if r["example_count"] == 31
@@ -1246,14 +1246,9 @@ def test_browser_potential_matches_dismiss_restore_and_merge(db, browser_console
     expect(section.locator(".subject-card")).to_have_count(0)
     section.get_by_role("button", name="Show dismissed", exact=True).click()
     expect(section.locator(".subject-card")).to_have_count(1)
-    section.get_by_role("button", name="Review merge", exact=True).click()
-    dialog = page.get_by_role("dialog")
-    expect(dialog).to_contain_text("All 2 examples")
-    dialog.get_by_label("Keep this subject and its identity details").select_option(
-        target
-    )
-    dialog.get_by_role("button", name="Merge entire subjects", exact=True).click()
-    expect(page).to_have_url(origin + "/subjects/" + target)
+    section.get_by_role("button", name="Merge", exact=True).click()
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    expect(page).to_have_url(origin + "/subjects/" + sid)
     expect(page.locator(".example-row")).to_have_count(2)
     expect(page.locator(".potential-matches .subject-card")).to_have_count(0)
     assert SubjectManagement(db).coverage()["count_mismatches"] == 0
@@ -1813,6 +1808,9 @@ def test_shared_source_filter_tracks_current_membership_and_pagination(db):
     assert len(service.subjects(source_id=source)['subjects']) == 2
     assert service.sources(primary)['sources'][0]['subject_count'] == 2
     assert service.browse_sources(multiple_subjects=True)['sources'][0]['source_id'] == source
+    assert service.browse_sources(subject_scope='multiple')['sources'][0]['source_id'] == source
+    assert all(row['subject_count']==1 for row in service.browse_sources(subject_scope='single')['sources'])
+    assert not service.browse_sources(subject_scope='none')['sources']
     assert service.browse_sources(q=source)['sources'][0]['subject_count'] == 2
     page = service.browse_sources(limit=1)
     next_page = service.browse_sources(limit=1, after=page['next_cursor'])
@@ -2568,3 +2566,361 @@ def test_duplicate_submission_does_not_reactivate_disabled_or_excluded_content(d
     assert sql(db,'SELECT count(*) FROM subject')[0][0]==1
     assert service.subject(sid)['matching_excluded'] and service.subject(sid)['active_example_count']==0
     assert service.examples(sid)['examples'][0]['disabled_reason']=='not_face'
+
+
+@pytest.mark.parametrize('policy', ['enroll_only', 'retain_and_enroll'])
+def test_new_source_automatic_matching_keeps_examples_and_retries_atomically(db, monkeypatch, policy):
+    other, *_ = enroll(db, 1)
+    run, groups = make_run(db, 4, policy)
+    for group, angle in zip(groups, [0, .1, 1.1, 2.8], strict=True):
+        sql(db, 'UPDATE submission_face_group SET aggregate_embedding=%s::vector WHERE group_id=%s', (pgvector(vector(angle)), group))
+    RunRepository(db).select(run, groups, 1, [assignment([g]) for g in groups])
+    worker, _ = processor(db)
+    worker.repository = InteractiveRepository(db, source_merge_threshold=.5)
+    cleanup = worker.repository._enqueue_cleanup
+    # Crash after automatic merges but before enrollment commits: no partial enrollment.
+    def crash(*args):
+        raise RuntimeError('interrupted enrollment')
+    monkeypatch.setattr(worker.repository, '_enqueue_cleanup', crash)
+    assert not worker.match(run)
+    assert sql(db, 'SELECT count(*) FROM subject_example')[0][0] == 1
+    assert sql(db, "SELECT count(*) FROM subject_change_event WHERE actor='automatic-source-matching'")[0][0] == 0
+    monkeypatch.setattr(worker.repository, '_enqueue_cleanup', cleanup)
+    # Resume through the ordinary retry path.
+    sql(db, "UPDATE media_run SET state='matching' WHERE run_id=%s", (run,))
+    sql(db, "UPDATE run_operation SET state='queued' WHERE run_id=%s AND kind='match'", (run,))
+    assert worker.match(run)
+    source = sql(db, 'SELECT retained_source_id FROM media_run WHERE run_id=%s', (run,))[0][0]
+    report = sql(db, "SELECT metadata->'automatic_matching' FROM source_asset WHERE source_id=%s", (source,))[0][0]
+    assert report['threshold'] == .5
+    assert len(report['outcomes']) == 1 and report['outcomes'][0]['status'] == 'merged'
+    # A-B passes and B-C passes, but A-C fails: complete linkage must keep C separate.
+    assert sql(db, 'SELECT count(DISTINCT subject_id),count(*) FROM subject_example WHERE source_id=%s', (source,))[0] == [3, 4]
+    assert sql(db, 'SELECT count(*) FROM subject_representative_face WHERE active')[0][0] == 5
+    assert SubjectManagement(db).subject(other)['sample_count'] == 1
+    assert not worker.match(run)
+    assert sql(db, "SELECT count(*) FROM subject_change_event WHERE actor='automatic-source-matching'")[0][0] == 1
+    duplicate, selected = make_run(db, 2, policy)
+    sql(db, 'UPDATE media_run SET source_sha256=(SELECT source_sha256 FROM media_run WHERE run_id=%s) WHERE run_id=%s', (run, duplicate))
+    RunRepository(db).select(duplicate, selected, 1, [assignment([g]) for g in selected])
+    assert worker.match(duplicate)
+    assert sql(db, 'SELECT enrollment_reused FROM media_run WHERE run_id=%s', (duplicate,))[0][0]
+    assert sql(db, 'SELECT count(DISTINCT subject_id),count(*) FROM subject_example WHERE source_id=%s', (source,))[0] == [3, 4]
+    assert sql(db, "SELECT metadata->'automatic_matching' FROM source_asset WHERE source_id=%s", (source,))[0][0] == report
+
+
+def test_automatic_source_matching_bounds_leave_enrollment_intact(db, monkeypatch):
+    from worker import source_merges
+    run, groups = make_run(db, 3)
+    RunRepository(db).select(run, groups, 1, [assignment([g]) for g in groups])
+    worker, _ = processor(db)
+    worker.repository = InteractiveRepository(db, source_merge_threshold=.5)
+    monkeypatch.setattr(source_merges, 'MAX_SUBJECTS', 2)
+    assert worker.match(run)
+    source = sql(db, 'SELECT retained_source_id FROM media_run WHERE run_id=%s', (run,))[0][0]
+    assert sql(db, 'SELECT count(DISTINCT subject_id),count(*) FROM subject_example WHERE source_id=%s', (source,))[0] == [3, 3]
+    assert sql(db, "SELECT metadata->'automatic_matching'->>'reason' FROM source_asset WHERE source_id=%s", (source,))[0][0] == 'background_scan_required'
+
+
+def test_automatic_matching_respects_identity_conflicts_and_dismissals(db):
+    from worker.source_merges import SourceMerges
+    source, ids = source_merge_fixture(db, [0, .01, 2, 2.01])
+    service = SubjectManagement(db)
+    for sid, name in zip(ids[:2], ['First person', 'Second person'], strict=True):
+        current = service.subject(sid)
+        service.edit(sid, {'operation_id': str(uuid.uuid4()), 'version': current['version'],
+                          'identity_version': current['identity_version'], 'display_name': name,
+                          'external_identity_ref': None}, 'tester')
+    low, high = sorted(ids[2:])
+    sql(db, '''INSERT INTO subject_suggestion_dismissal(subject_low,subject_high,low_version,high_version,dismissed_by)
+        SELECT a.subject_id,b.subject_id,a.row_version,b.row_version,'tester'
+        FROM subject a,subject b WHERE a.subject_id=%s AND b.subject_id=%s''', (low, high))
+    before = sql(db, 'SELECT example_id,subject_id FROM subject_example ORDER BY example_id')
+    with service.transaction(write=True) as cursor:
+        report = SourceMerges(service).auto_merge(cursor, source, str(uuid.uuid4()), .5)
+    assert report['outcomes'][0]['reason'] == 'identity_conflict'
+    assert len(report['outcomes']) == 1
+    assert sql(db, 'SELECT example_id,subject_id FROM subject_example ORDER BY example_id') == before
+
+
+def test_run_without_candidates_preserves_source_link(db, browser_console):
+    from playwright.sync_api import expect
+    run, groups = make_run(db, 1, policy='search_then_discard')
+    sql(db, "UPDATE media_run SET source_page_url='https://hotscope.tv/video/example' WHERE run_id=%s", (run,))
+    RunRepository(db).select(run, groups, 1)
+    worker, _ = processor(db)
+    assert worker.match(run)
+    data = RunRepository(db).results(run)
+    assert data['source']['page_url'] == 'https://hotscope.tv/video/example'
+    assert not data['groups'][0]['candidates']
+    page, origin = browser_console
+    page.goto(origin + '/runs/' + run)
+    expect(page.get_by_text('No matching candidates were found.', exact=True)).to_be_visible()
+    expect(page.locator('#candidate-groups .external-source-link')).to_have_attribute('href', 'https://hotscope.tv/video/example')
+    # No detections still retain attribution even without a source asset or enrolled subject.
+    sql(db, "UPDATE media_run SET outcome='no_faces' WHERE run_id=%s", (run,))
+    page.reload()
+    expect(page.get_by_text('No usable data was detected in this media.', exact=True)).to_be_visible()
+    expect(page.locator('#candidate-groups .external-source-link')).to_have_attribute('href', 'https://hotscope.tv/video/example')
+    page.get_by_role('link', name='View Source', exact=True).click()
+    expect(page).to_have_url(origin + '/sources/' + data['source']['source_id'])
+    expect(page.locator('.source-origin a')).to_have_attribute('href', 'https://hotscope.tv/video/example')
+
+
+def test_browser_profile_submits_all_and_no_file_import(db, browser_console):
+    from playwright.sync_api import expect
+    page, origin = browser_console
+    batch_id = str(uuid.uuid4())
+    requests = []
+    def submit(route):
+        requests.append(route.request.post_data_json)
+        route.fulfill(json={'batch_id':batch_id, 'status_url':'/batches/'+batch_id}, status=202)
+    page.route('**/api/profile-batches', submit)
+    page.route('**/api/profile-batches/'+batch_id, lambda route: route.fulfill(json={
+        'batch_id':batch_id, 'username':'Mary', 'status':{'phase':'discovering'}, 'runs':[], 'discovery_failures':0}))
+    page.set_viewport_size({'width':390,'height':844})
+    page.goto(origin)
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    expect(page.locator('#video-links-file')).to_have_count(0)
+    page.get_by_label('Enroll Only', exact=True).check()
+    page.locator('#source-url').fill('/user/Mary')
+    page.get_by_role('button', name='Start link search', exact=True).click()
+    expect(page.get_by_role('heading', name='Videos from Mary')).to_be_visible()
+    assert requests == [{'url':'https://hotscope.tv/user/Mary','handling_policy':'enroll_only'}]
+    expect(page.get_by_text('Finding all videos…', exact=True)).to_be_visible()
+    page.reload()
+    expect(page.get_by_role('heading', name='Videos from Mary')).to_be_visible()
+
+
+def test_acquisition_reuse_requires_requested_policy(db):
+    from worker.acquisition_batch import existing_acquisitions, source_payload
+    row = {'object':'gs://test-bucket/videos/policy.mp4','generation':123,'sha256':'b'*64,
+           'bytes':100,'content_type':'video/mp4','page_url':'https://media.example/video'}
+    repo = RunRepository(db)
+    old = repo.create('tester',str(uuid.uuid4()),source_payload(row,'search_then_discard')).record['run_id']
+    connection=db.connect()
+    try:
+        cursor=connection.cursor()
+        assert existing_acquisitions(cursor,'retain_and_enroll') == {}
+        assert next(iter(existing_acquisitions(cursor,'search_then_discard').values()))[0] == old
+        connection.rollback()
+        new=repo.create('tester',str(uuid.uuid4()),source_payload(row,'retain_and_enroll')).record['run_id']
+        assert next(iter(existing_acquisitions(cursor,'retain_and_enroll').values()))[0] == new
+    finally:
+        connection.close()
+
+
+def test_historical_matching_preserves_examples_and_replays(db):
+    from datetime import UTC, datetime
+
+    from worker.source_merge_backfill import HistoricalMatching
+    source, _ = source_merge_fixture(db, [0, .01, 2, 2.01])
+    other, _ = source_merge_fixture(db, [0, .01])
+    service = HistoricalMatching(db)
+    cutoff = datetime.now(UTC)
+    batch = str(uuid.uuid4())
+    origins = sql(db, 'SELECT example_id,source_id FROM subject_example ORDER BY example_id')
+    assert len(service.inventory(cutoff)['sources']) == 2
+    report = service.apply_source(source, batch, cutoff)
+    assert (report['subjects_before'], report['subjects_after'], report['examples_preserved']) == (4, 2, 4)
+    assert len(report['outcomes']) == 2
+    assert service.apply_source(source, batch, cutoff) == report
+    assert sql(db, 'SELECT example_id,source_id FROM subject_example ORDER BY example_id') == origins
+    assert sql(db, 'SELECT count(DISTINCT subject_id) FROM subject_example WHERE source_id=%s', (other,))[0][0] == 2
+    assert sql(db, "SELECT count(*) FROM subject_change_event WHERE actor='historical-source-matching'")[0][0] == 2
+
+
+@pytest.mark.parametrize('separate', [False, True])
+def test_historical_matching_protects_manual_merges_and_rechecks(db, separate):
+    from datetime import UTC, datetime
+
+    from worker.source_merge_backfill import HistoricalMatching
+    from worker.source_merges import SourceMerges
+    source, _ = source_merge_fixture(db, [0, .01, 2, 2.01])
+    cutoff = datetime.now(UTC)
+    backfill = HistoricalMatching(db)
+    assert len(backfill.inventory(cutoff)['sources']) == 1
+    subjects = SubjectManagement(db)
+    with subjects.transaction(write=True) as cursor:
+        assert source not in backfill.protected_sources(cursor)
+    planner = SourceMerges(subjects, apply_enabled=True)
+    plan = planner.plan(source, {'threshold': .5})
+    group = plan['groups'][0]
+    group['selected'] = True
+    planner.apply(source, plan, 'tester')
+    if separate:
+        survivor = group['survivor_id']
+        history = subjects.merge_members(survivor)
+        subjects.separate_merge(survivor, {'operation_id': str(uuid.uuid4()), 'version': history['version'],
+            'merge_operation_id': group['operation_id'], 'member_subject_id': history['members'][0]['subject_id']}, 'tester')
+    assert backfill.inventory(cutoff)['excluded'] == [{'source_id': source, 'reason': 'prior_merge'}]
+    before = sql(db, 'SELECT example_id,subject_id FROM subject_example ORDER BY example_id')
+    assert backfill.apply_source(source, str(uuid.uuid4()), cutoff)['reason'] == 'prior_merge'
+    assert sql(db, 'SELECT example_id,subject_id FROM subject_example ORDER BY example_id') == before
+
+
+def test_historical_matching_rolls_back_and_respects_cutoff_and_prior_pass(db, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from worker.source_merge_backfill import HistoricalMatching
+    from worker.source_merges import SourceMerges
+    source, _ = source_merge_fixture(db, [0, .01])
+    service = HistoricalMatching(db)
+    cutoff = datetime.now(UTC)
+    batch = str(uuid.uuid4())
+    assert service.apply_source(source, batch, cutoff-timedelta(days=1))['status'] == 'skipped'
+    original = SourceMerges.auto_merge
+    def fail(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        raise RuntimeError('rollback after merge')
+    monkeypatch.setattr(SourceMerges, 'auto_merge', fail)
+    with pytest.raises(RuntimeError): service.apply_source(source, batch, cutoff)
+    assert sql(db, 'SELECT count(DISTINCT subject_id) FROM subject_example WHERE source_id=%s', (source,))[0][0] == 2
+    assert sql(db, "SELECT count(*) FROM subject_change_event WHERE action='combine'")[0][0] == 0
+    sql(db, "UPDATE source_asset SET metadata=metadata || '{\"automatic_matching\":{\"status\":\"completed\"}}'::jsonb WHERE source_id=%s", (source,))
+    assert service.apply_source(source, batch, cutoff)['reason'] == 'already_matched'
+
+
+def test_historical_matching_does_not_treat_failed_merge_as_success(db):
+    from datetime import UTC, datetime
+
+    from worker.source_merge_backfill import HistoricalMatching
+    from worker.source_merges import SourceMerges
+    source, ids = source_merge_fixture(db, [0, .01])
+    planner = SourceMerges(SubjectManagement(db), apply_enabled=True)
+    plan = planner.plan(source, {'threshold': .5})
+    plan['groups'][0]['selected'] = True
+    sql(db, 'UPDATE subject SET row_version=row_version+1 WHERE subject_id=%s', (ids[0],))
+    assert planner.apply(source, plan, 'tester')['outcomes'][0]['status'] == 'stale'
+    service = HistoricalMatching(db)
+    cutoff = datetime.now(UTC)
+    assert service.inventory(cutoff)['sources'][0]['source_id'] == source
+    assert service.apply_source(source, str(uuid.uuid4()), cutoff)['subjects_after'] == 1
+
+
+def test_historical_long_scan_retries_only_timed_out_pass_and_replays(db, monkeypatch):
+    from datetime import UTC, datetime
+
+    from worker import source_merges
+    from worker.source_merge_backfill import HistoricalMatching
+    source, _ = source_merge_fixture(db, [0, .01, 2, 2.01])
+    cutoff = datetime.now(UTC)
+    original_id, retry_id = str(uuid.uuid4()), str(uuid.uuid4())
+    clock = [0]
+    load = source_merges.SourceMerges._load
+    def slow_load(self, *args, **kwargs):
+        result = load(self, *args, **kwargs)
+        clock[0] += 11
+        return result
+    monkeypatch.setattr(source_merges.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(source_merges.SourceMerges, '_load', slow_load)
+    original = HistoricalMatching(db).apply_source(source, original_id, cutoff)
+    assert original['status'] == 'manual_review'
+    assert original['subjects_before'] == original['subjects_after'] == 4
+    wrong_scope = HistoricalMatching(db, scan_budget_seconds=120, retry_from_backfill_id=str(uuid.uuid4()))
+    assert wrong_scope.apply_source(source, retry_id, cutoff) == original
+    service = HistoricalMatching(db, scan_budget_seconds=120, retry_from_backfill_id=original_id)
+    report = service.apply_source(source, retry_id, cutoff)
+    assert report['status'] == 'completed'
+    assert report['subjects_after'] == 2 and report['examples_preserved'] == 4
+    assert report['scan_budget_seconds'] == 120
+    assert service.apply_source(source, retry_id, cutoff) == report
+    assert sql(db, "SELECT count(*) FROM subject_change_event WHERE action='combine'")[0][0] == 2
+
+
+def test_historical_long_scan_rechecks_manual_merge_after_timeout(db):
+    from datetime import UTC, datetime
+
+    from worker.source_merge_backfill import HistoricalMatching
+    from worker.source_merges import SourceMerges
+    source, _ = source_merge_fixture(db, [0, .01, 2, 2.01])
+    original_id = str(uuid.uuid4())
+    previous = {'status':'manual_review','reason':'background_scan_required','outcomes':[], 'backfill_id':original_id}
+    sql(db, "UPDATE source_asset SET metadata=jsonb_set(metadata,'{historical_matching}',%s::jsonb) WHERE source_id=%s", (json.dumps(previous),source))
+    planner = SourceMerges(SubjectManagement(db), apply_enabled=True)
+    plan = planner.plan(source, {'threshold':.5});plan['groups'][0]['selected'] = True
+    planner.apply(source, plan, 'tester')
+    service = HistoricalMatching(db, scan_budget_seconds=120, retry_from_backfill_id=original_id)
+    assert service.apply_source(source, str(uuid.uuid4()), datetime.now(UTC))['reason'] == 'prior_merge'
+
+
+@pytest.mark.parametrize('kind', ['url', 'upload'])
+@pytest.mark.parametrize('policy', ['search_then_discard', 'retain_and_enroll', 'enroll_only'])
+def test_submission_policy_controls_selection_and_point_four_source_merge(db, kind, policy):
+    runs = RunRepository(db)
+    source = ({'kind': 'url', 'url': 'https://media.example/video.mp4'} if kind == 'url'
+              else {'kind': 'upload', 'content_type': 'video/mp4', 'bytes': 100})
+    payload = {'handling_policy': policy, 'source': source}
+    key = str(uuid.uuid4())
+    created = runs.create('policy-test', key, payload)
+    run = created.record['run_id']
+    assert runs.create('policy-test', key, payload).record['run_id'] == run
+    automatic = policy != 'search_then_discard'
+    assert sql(db, 'SELECT selection_policy FROM media_run WHERE run_id=%s', (run,))[0][0] == ('all_tracks' if automatic else 'manual')
+    # Simulate completed acquisition; exercise real detection completion and enrollment.
+    sql(db, "UPDATE media_run SET state='queued',source_sha256=%s,object_name=%s,object_generation=1,object_bytes=100,content_type='video/mp4' WHERE run_id=%s",
+        (uuid.uuid4().hex * 2, f'submissions-temporary/{run}/source.mp4', run))
+    sql(db, "INSERT INTO run_operation(run_id,kind,state) VALUES (%s,'detect','queued')", (run,))
+    interactive = InteractiveRepository(db, source_merge_threshold=.4)
+    work = interactive.claim_detection(run)
+    groups = [{
+        'group_id': str(uuid.uuid4()), 'local_group_id': i,
+        'bbox': None, 'start_ms': 0, 'end_ms': 100, 'quality': {'max_quality': .8},
+        'preview_object_name': f'submissions-temporary/{run}/preview-{i}.jpg', 'preview_generation': 1,
+        'representative_object_name': f'submissions-temporary/{run}/face-{i}.jpg', 'representative_generation': 1,
+        'embedding': vector(angle),
+    } for i, angle in enumerate([0, math.acos(.45), 2.9])]
+    assert interactive.complete_detection(work, groups, detector_version='detector', embedding_version='model')
+    assert runs.get(run)['state'] == ('matching' if automatic else 'awaiting_face_selection')
+    assert sql(db, 'SELECT count(*) FROM submission_face_group WHERE run_id=%s AND selected', (run,))[0][0] == (3 if automatic else 0)
+    if not automatic:
+        assert sql(db, "SELECT count(*) FROM run_operation WHERE run_id=%s AND kind='match'", (run,))[0][0] == 0
+        return
+    worker, _ = processor(db)
+    worker.repository = interactive
+    assert worker.match(run)
+    assert runs.get(run)['state'] == 'succeeded'
+    source_id = sql(db, 'SELECT retained_source_id FROM media_run WHERE run_id=%s', (run,))[0][0]
+    report = sql(db, "SELECT metadata->'automatic_matching' FROM source_asset WHERE source_id=%s", (source_id,))[0][0]
+    assert report['threshold'] == .4
+    # Cosine .45 now merges; the third group stays separate. Every example survives.
+    assert sql(db, 'SELECT count(DISTINCT subject_id),count(*) FROM subject_example WHERE source_id=%s', (source_id,))[0] == [2, 3]
+
+
+@pytest.mark.parametrize('policy', ['retain_and_enroll', 'enroll_only'])
+def test_retained_submission_automatically_selects_even_if_caller_requests_manual(db, policy):
+    run = RunRepository(db).create('policy-test', str(uuid.uuid4()), {
+        'handling_policy': policy, 'selection_policy': 'manual',
+        'source': {'kind': 'url', 'url': 'https://media.example/video.mp4'},
+    }).record['run_id']
+    assert sql(db, 'SELECT selection_policy FROM media_run WHERE run_id=%s', (run,))[0][0] == 'all_tracks'
+
+
+@pytest.mark.parametrize('policy', ['retain_and_enroll','enroll_only','search_then_discard'])
+def test_empty_detection_registers_library_source_and_backfill_reuses_sha(db, policy):
+    from worker.source_registry import backfill
+    run, _ = make_run(db, 0, policy=policy)
+    sql(db, "UPDATE media_run SET state='queued',source_page_url='https://example.com/empty' WHERE run_id=%s", (run,))
+    sql(db, "INSERT INTO run_operation(run_id,kind,state) VALUES (%s,'detect','queued')", (run,))
+    interactive = InteractiveRepository(db)
+    work = interactive.claim_detection(run)
+    assert interactive.complete_detection(work, [], detector_version='detector', embedding_version='model')
+    record = RunRepository(db).get(run)
+    source_id = record['source']['source_id']
+    assert record['source_url'] == '/sources/' + source_id
+    assert RunRepository(db).results(run)['source']['source_id'] == source_id
+    source = SubjectManagement(db).browse_sources(q=source_id)['sources'][0]
+    assert source['subject_count'] == source['example_count'] == 0
+    assert source['page_urls'] == ['https://example.com/empty']
+    assert not SubjectManagement(db).browse_sources(multiple_subjects=True)['sources']
+    assert SubjectManagement(db).browse_sources(subject_scope='none')['sources'][0]['source_id']==source_id
+    assert not SubjectManagement(db).browse_sources(subject_scope='single')['sources']
+    with pytest.raises(SubjectError):
+        SubjectManagement(db).browse_sources(subject_scope='invalid')
+    other, _ = make_run(db, 0, policy=policy)
+    sql(db, "UPDATE media_run SET state='succeeded',outcome='no_faces',source_sha256=(SELECT source_sha256 FROM media_run WHERE run_id=%s),source_page_url='https://example.com/duplicate' WHERE run_id=%s", (run,other))
+    assert backfill(db) == 1
+    assert backfill(db) == 0
+    assert RunRepository(db).get(other)['source_url'] == '/sources/' + source_id
+    assert len(SubjectManagement(db).browse_sources()['sources']) == 1
+    assert len(SubjectManagement(db).browse_sources()['sources'][0]['page_urls']) == 2

@@ -16,6 +16,7 @@ import imageio_ffmpeg
 from .config import Config
 from .fetch import Fetcher
 from .urls import canonicalize
+from .verification import VerificationError
 
 EXTENSIONS = {"video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov"}
 
@@ -245,15 +246,52 @@ def _download_hls(fetcher: Fetcher, config: Config, url: str, uid: str) -> Downl
         raise
 
 
-def _validate_hls(path: Path, expected_duration: float) -> None:
-    """Decode the completed file and compare its duration with the finite playlist."""
-    result = subprocess.run(
+def _decode_check(path: Path):
+    return subprocess.run(
         [ffmpeg_executable(), "-nostdin", "-hide_banner", "-v", "error",
          "-xerror", "-protocol_whitelist", "file,pipe", "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?",
          "-progress", "pipe:1", "-f", "null", "-"],
         stdin=subprocess.DEVNULL, capture_output=True, timeout=6 * 60 * 60, check=False,
     )
+
+
+def _validate_hls(path: Path, expected_duration: float) -> None:
+    """Decode all media and compare duration; tolerate reserved H.264 color tags.
+
+    FFmpeg 7 rejects reserved color metadata before decoding. For that specific
+    failure, validate a temporary stream-copy with unspecified color tags. The
+    compressed image/audio data and the original file are never transcoded.
+    """
+    result = _decode_check(path)
+    if result.returncode and b"Invalid color space" in result.stderr:
+        validation = path.with_suffix('.validation.mp4')
+        try:
+            normalized = subprocess.run(
+                [ffmpeg_executable(), '-nostdin', '-hide_banner', '-v', 'error',
+                 '-protocol_whitelist', 'file,pipe', '-i', str(path),
+                 '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy',
+                 '-bsf:v', 'h264_metadata=colour_primaries=2:transfer_characteristics=2:matrix_coefficients=2',
+                 '-f', 'mp4', str(validation)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=6 * 60 * 60, check=False)
+            if normalized.returncode == 0:
+                result = _decode_check(validation)
+        finally:
+            validation.unlink(missing_ok=True)
     times = re.findall(rb"out_time_us=(\d+)", result.stdout)
     duration = int(times[-1]) / 1_000_000 if times else 0
-    if result.returncode or duration <= 0 or abs(duration - expected_duration) > max(2, expected_duration * 0.02):
-        raise RuntimeError("verification_failure")
+    if result.returncode:
+        raise VerificationError('media_decode', result.stderr.decode(errors='replace')[-1500:])
+    if duration <= 0 or abs(duration - expected_duration) > max(2, expected_duration * 0.02):
+        raise VerificationError('media_duration', f'Expected {expected_duration:.3f}s; decoded {duration:.3f}s')
+
+
+def media_fingerprint(path: Path) -> bytes:
+    """Hash compressed packets, timing, codec metadata and stream layout, not MP4 tags."""
+    result = subprocess.run(
+        [ffmpeg_executable(), '-nostdin', '-hide_banner', '-v', 'error',
+         '-protocol_whitelist', 'file,pipe', '-i', str(path), '-map', '0',
+         '-c', 'copy', '-f', 'framehash', '-hash', 'sha256', '-'],
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=6 * 60 * 60, check=False)
+    if result.returncode or not any(line and not line.startswith(b'#') for line in result.stdout.splitlines()):
+        raise VerificationError('media_fingerprint', 'Could not verify media packets and timing')
+    return hashlib.sha256(result.stdout).digest()

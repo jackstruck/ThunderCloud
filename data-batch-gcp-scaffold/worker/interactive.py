@@ -299,7 +299,9 @@ def main() -> None:
                     break
         else:
             processor = InteractiveProcessor(
-                settings, InteractiveRepository(database), storage
+                settings, InteractiveRepository(database, source_merge_threshold=(
+                    float(os.environ['FACE_SOURCE_MERGES_AUTO_THRESHOLD'])
+                    if os.getenv('FACE_SOURCE_MERGES_AUTO_THRESHOLD') else None)), storage
             )
             if mode == "detect":
                 completed = processor.detect(run_id)

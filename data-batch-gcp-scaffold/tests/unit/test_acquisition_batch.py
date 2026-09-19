@@ -37,6 +37,7 @@ def test_payload_preserves_generation_attribution_and_explicit_policy():
 
 def test_duplicate_archive_aliases_are_recorded_before_handoff():
     from unittest.mock import Mock
+
     from worker.acquisition_batch import record_source_urls
     source=row()
     alias={**source,'page_url':'https://hotscope.tv/video/alias'}
@@ -45,3 +46,31 @@ def test_duplicate_archive_aliases_are_recorded_before_handoff():
     args=database.connect.return_value.cursor.return_value.executemany.call_args.args
     assert args[1]==[('a'*64,'https://hotscope.tv/video/alias'),('a'*64,'https://hotscope.tv/video/one')]
     database.connect.return_value.commit.assert_called_once()
+
+
+def test_profile_discovery_selects_every_video_and_rejects_incomplete_pagination():
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from bulk_download.pipeline import DiscoveryFailure
+
+    from worker.acquisition_batch import discover_profile
+    state = {'users':['Mary']}
+    discover = Mock(return_value=([SimpleNamespace(provider_id=str(i)) for i in range(250)], []))
+    assert len(discover_profile(state, None, fetcher_factory=lambda _: nullcontext('fetcher'), discover=discover)) == 250
+    discover.assert_called_once_with('fetcher', ['Mary'], set(), None, 1000)
+    assert state['discovery_complete']
+    state = {'users':['Mary']}
+    discover.return_value = ([SimpleNamespace(provider_id='one')], [DiscoveryFailure('pagination_limit','incomplete',{})])
+    with pytest.raises(ValueError):
+        discover_profile(state, None, fetcher_factory=lambda _: nullcontext('fetcher'), discover=discover)
+    assert not state.get('discovery_complete')
+    assert state['discovery_failures'] == ['pagination_limit']
+
+
+def test_policy_change_uses_new_handoff_keys():
+    from worker.acquisition_batch import handoff_key
+    old=handoff_key('batch','search_then_discard','object#42')
+    new=handoff_key('batch','retain_and_enroll','object#42')
+    assert new!=old and new==handoff_key('batch','retain_and_enroll','object#42')

@@ -13,6 +13,7 @@ from .config import Settings
 from .db import Database
 from .gallery import GalleryRepository, GalleryService
 from .job_invoker import CloudRunJobInvoker
+from .profile_batches import ProfileBatches
 from .rate_limit import FixedWindowRateLimiter
 from .run_repository import RunConflictError, RunNotFoundError, RunRepository
 from .source_adapters import HOTSCOPE_PAGE_HOSTS, hotscope_video_id
@@ -117,7 +118,7 @@ def _create_payload(
             except ValueError as error:
                 raise RequestError(422, "invalid_url", str(error)) from error
         if host == "heylink.me" or host.endswith(".heylink.me"):
-            raise RequestError(422, "unsupported_source", "HeyLink is not supported.")
+            raise RequestError(422, "unsupported_source", "This link type is not supported.")
         if host not in ADAPTER_HOST_SUFFIXES and not allow_arbitrary_hosts:
             raise RequestError(
                 422,
@@ -159,6 +160,7 @@ def create_app(
     subject_service=None,
     subject_management_enabled=None,
     rate_limiter=None,
+    profile_batches=None,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     configured_repository = repository is None
@@ -183,6 +185,11 @@ def create_app(
             settings.staging_prefix,
             csek,
         )
+        if os.getenv('FACE_PROFILE_BATCH_PREFIX'):
+            def invoke_profile(object_name):
+                CloudRunJobInvoker(settings.project_id, os.getenv('FACE_REGION', 'us-central1'),
+                    'face-acquisition-batch', env={'FACE_BATCH_STATE_OBJECT': object_name}, strict=True)('')
+            profile_batches = ProfileBatches(storage, repository, invoke_profile, os.environ['FACE_PROFILE_BATCH_PREFIX'])
     origin = allowed_origin or os.getenv("FACE_CONSOLE_ORIGIN")
     if allow_arbitrary_hosts is None:
         allow_arbitrary_hosts = os.getenv(
@@ -249,7 +256,7 @@ def create_app(
     @app.before_request
     def authenticate_and_validate_origin():
         g.principal = _principal()
-        operation = "create" if request.path == "/api/runs" else "read"
+        operation = "create" if request.path in {"/api/runs", "/api/profile-batches"} and request.method == 'POST' else "read"
         limit = 10 if operation == "create" else 120
         if not rate_limiter.allow((g.principal, operation), limit):
             raise RequestError(429, "rate_limited", "Request rate limit exceeded.")
@@ -317,7 +324,8 @@ def create_app(
             raise SubjectError(422, "invalid_search", "Use true or false for the source filter.")
         return jsonify(subject_service.browse_sources(
             request.args.get("q", ""), request.args.get("cursor"), page_size(24), multiple == "true",
-            sort=request.args.get("sort", "id"), origin=request.args.get("origin", "")))
+            sort=request.args.get("sort", "id"), origin=request.args.get("origin", ""),
+            subject_scope=request.args.get("subject_scope", "all")))
 
     @app.get("/api/subjects")
     def list_subjects():
@@ -453,6 +461,29 @@ def create_app(
             response.headers["Cache-Control"] = "no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
         return response
+
+    @app.post('/api/profile-batches')
+    def create_profile_batch():
+        if profile_batches is None:
+            raise RequestError(503, 'profile_batches_unavailable', 'User-profile submission is not available.')
+        key = request.headers.get('Idempotency-Key', '')
+        if not IDEMPOTENCY_RE.fullmatch(key):
+            raise RequestError(400, 'invalid_idempotency_key', 'Provide a valid Idempotency-Key.')
+        data = _json_object()
+        if set(data) != {'url', 'handling_policy'} or data['handling_policy'] not in {'search_then_discard', 'enroll_only', 'retain_and_enroll'}:
+            raise RequestError(422, 'invalid_request', 'Provide a user link and handling policy.')
+        if data['handling_policy'] != 'search_then_discard' and not enrollment_enabled:
+            raise RequestError(422, 'feature_not_available', 'Enrollment is not available.')
+        try:
+            return jsonify(profile_batches.create(g.principal, key, data['url'], data['handling_policy'])), 202
+        except ValueError as error:
+            raise RequestError(422, 'invalid_profile', str(error)) from error
+
+    @app.get('/api/profile-batches/<uuid:batch_id>')
+    def profile_batch_status(batch_id):
+        if profile_batches is None:
+            raise RequestError(503, 'profile_batches_unavailable', 'User-profile submission is not available.')
+        return jsonify(profile_batches.get(g.principal, str(batch_id)))
 
     @app.post("/api/runs")
     def create_run():
@@ -636,11 +667,13 @@ def create_app(
 
     @app.get("/")
     @app.get("/runs/<uuid:_run_id>")
+    @app.get("/runs/<uuid:_run_id>/source")
+    @app.get("/batches/<uuid:_batch_id>")
     @app.get("/sources")
     @app.get("/subjects")
     @app.get("/subjects/<uuid:_subject_id>")
     @app.get("/sources/<uuid:_source_id>")
-    def index(_run_id=None, _subject_id=None, _source_id=None):
+    def index(_run_id=None, _subject_id=None, _source_id=None, _batch_id=None):
         return send_from_directory(
             os.path.join(os.path.dirname(__file__), "..", "ui"), "index.html"
         )

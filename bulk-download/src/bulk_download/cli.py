@@ -177,7 +177,7 @@ def run(config, input_stage: str = "all", options=None) -> int:
                 object_name = f"{config.gcp.prefix}/{item.uid}{downloaded.extension}"
                 existing = storage.existing(object_name)
                 if existing is not None:
-                    storage.verify(existing, downloaded.path, downloaded.content_type, downloaded.size)
+                    downloaded = storage.reuse_existing(existing, downloaded, allow_remux=item.media_url.split('?', 1)[0].lower().endswith('.m3u8'))
                     record = {
                         "timestamp": _timestamp(), "status": "complete", "recovered_from_gcs": True,
                         **_provenance(item),
@@ -209,7 +209,8 @@ def run(config, input_stage: str = "all", options=None) -> int:
                 } else "upload_failure")
                 append(config.manifest_file, {
                     "timestamp": _timestamp(), "status": "failed", "error_code": code,
-                    "message": type(exc).__name__, **_provenance(item),
+                    "message": str(exc) if code == "verification_failure" else type(exc).__name__,
+                    **({"verification_stage": exc.stage} if hasattr(exc, "stage") else {}), **_provenance(item),
                 })
                 _log(code, type(exc).__name__, item.uid)
     return 1 if failures or item_failed else 0

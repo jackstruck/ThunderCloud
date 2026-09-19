@@ -20,7 +20,7 @@ locals {
 
 resource "google_monitoring_alert_policy" "cloud_run_execution_error" {
   project               = var.project_id
-  display_name          = "Face processing Cloud Run execution error"
+  display_name          = "Data processing Cloud Run execution error"
   combiner              = "OR"
   severity              = "ERROR"
   notification_channels = local.face_batch_notification_channels

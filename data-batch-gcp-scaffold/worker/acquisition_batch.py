@@ -11,11 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-from google.cloud import storage
-
 from bulk_download.cli import run as acquire
 from bulk_download.config import Config, GcpConfig, HttpConfig
-from bulk_download.hotscope import video_id
+from bulk_download.fetch import Fetcher
+from bulk_download.hotscope import discover_users, video_id
+from google.cloud import storage
+
 from .config import Settings
 from .db import Database
 from .job_invoker import CloudRunJobInvoker
@@ -55,6 +56,16 @@ def identity(row):
     return f"{row['object']}#{int(row['generation'])}"
 
 
+def existing_acquisitions(cursor, policy):
+    cursor.execute("""SELECT archive_bucket,archive_object_name,archive_object_generation,run_id,state
+        FROM media_run WHERE source_kind=%s AND handling_policy=%s ORDER BY created_at,run_id""", ('archive', policy))
+    return {f'gs://{b}/{o}#{int(g)}': (str(r), status) for b,o,g,r,status in cursor.fetchall()}
+
+
+def handoff_key(batch_id, policy, ident):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, batch_id + ':' + policy + ':' + ident))
+
+
 def record_source_urls(database, rows):
     """Keep alternate URLs even when the archive handoff is skipped as a duplicate."""
     urls = sorted({(row['sha256'],row.get('page_url') or row.get('luluvid_url')) for row in rows
@@ -68,6 +79,17 @@ def record_source_urls(database, rows):
         connection.commit()
     finally:
         connection.close()
+
+
+def discover_profile(state, http_config, *, fetcher_factory=Fetcher, discover=discover_users):
+    with fetcher_factory(http_config) as fetcher:
+        found, errors = discover(fetcher, state['users'], set(), None, 1000)
+    state['discovery_failures'] = [error.code for error in errors]
+    if any(not error.context.get('provider_id') for error in errors):
+        raise ValueError('Could not finish discovering every video in this profile.')
+    state['videos'] = list(dict.fromkeys(item.provider_id for item in found))
+    state['discovery_complete'] = True
+    return state['videos']
 
 
 def main():
@@ -106,10 +128,21 @@ def main():
                                 if_generation_match=generation, timeout=120)
         generation = int(blob.generation)
 
-    # Claim a generation before side effects; overlapping executions cannot both commit progress.
+    # An execution owns its checkpoint across task retries. Duplicate launches exit.
+    execution = os.getenv('CLOUD_RUN_EXECUTION', str(uuid.uuid4()))
+    if state.get('execution') and state['execution'] != execution:
+        database.close()
+        key_path.unlink(missing_ok=True)
+        return
+    state['execution'] = execution
     checkpoint()
     recorded_urls = set()
     try:
+        if state.get('users') and not state.get('discovery_complete'):
+            state['status'] = {'phase': 'discovering'}
+            checkpoint()
+            selected = discover_profile(state, config.http)
+            checkpoint()
         while True:
             rows = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()]
             acquired, failures = acquired_sources(rows, set(selected))
@@ -121,19 +154,20 @@ def main():
             connection = database.connect()
             try:
                 cursor = connection.cursor()
-                cursor.execute('SELECT archive_bucket,archive_object_name,archive_object_generation,run_id,state FROM media_run WHERE source_kind=%s', ('archive',))
-                existing = {f'gs://{b}/{o}#{int(g)}': (str(r), status) for b,o,g,r,status in cursor.fetchall()}
+                existing = existing_acquisitions(cursor, state['handling_policy'])
                 cursor.execute("SELECT count(*) FROM media_run WHERE submitter_principal=%s AND state NOT IN ('succeeded','failed','cancelled','expired')", (state['principal'],))
                 slots = max(0, 3 - int(cursor.fetchone()[0]))
                 connection.rollback()
             finally:
                 connection.close()
             pending = 0
+            state['preexisting_runs'] = []
             statuses = Counter()
             launch = None
             for ident, row in unique.items():
                 if ident in existing:
                     run_id, status = existing[ident]
+                    state['preexisting_runs'].append(run_id)
                     statuses[status] += 1
                     receipt = state['receipts'].get(ident)
                     if receipt and receipt['run_id'] is None:
@@ -149,7 +183,7 @@ def main():
                 if receipt is None:
                     receipt = {'format': 1, 'principal': state['principal'], 'payload': payload,
                         'fingerprint': request_fingerprint(payload),
-                        'idempotency_key': str(uuid.uuid5(uuid.NAMESPACE_URL, state['batch_id'] + ':' + ident)),
+                        'idempotency_key': handoff_key(state['batch_id'], state['handling_policy'], ident),
                         'run_id': None}
                     state['receipts'][ident] = receipt
                     checkpoint()  # durable request key before the database commit
@@ -171,7 +205,7 @@ def main():
             if launch:
                 invoke(launch)
             remaining = [ident for ident in selected if ident not in acquired and ident not in failures]
-            state['status'] = {'selected': len(selected), 'acquired': len(acquired),
+            state['status'] = {'phase': 'processing', 'selected': len(selected), 'acquired': len(acquired),
                 'acquisition_failures': len(failures), 'remaining_downloads': len(remaining),
                 'unique_objects': len(unique), 'handed_off_or_preexisting': sum(statuses.values()),
                 'awaiting_submission': pending, 'processing_states': dict(statuses),
@@ -187,6 +221,11 @@ def main():
                 checkpoint()
             else:
                 time.sleep(30)
+    except Exception:
+        state['status'] = {**state.get('status', {}), 'phase': 'failed',
+                           'message': 'The batch could not finish. Submitted runs remain available below.'}
+        checkpoint()
+        raise
     finally:
         database.close()
         key_path.unlink(missing_ok=True)

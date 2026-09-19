@@ -88,8 +88,7 @@ variable "labels" {
   description = "Common labels."
   type        = map(string)
   default = {
-    workload = "face-batch"
-    data     = "biometric"
+    workload = "data-batch"
   }
 }
 
@@ -223,7 +222,17 @@ variable "gallery_repair_min_similarity" {
 }
 
 variable "source_merges_apply_enabled" {
-  description = "Enable explicitly reviewed source groups after the initial proposal review. No unattended application is implemented."
+  description = "Enable operator application of explicitly reviewed source groups. Automatic enrollment matching is configured separately."
   type        = bool
   default     = false
+}
+
+variable "source_merges_auto_threshold" {
+  description = "Reviewed cosine threshold for automatic merging during new-source enrollment; null disables it."
+  type        = number
+  default     = null
+  validation {
+    condition     = var.source_merges_auto_threshold == null ? true : (var.source_merges_auto_threshold >= -1 && var.source_merges_auto_threshold <= 1)
+    error_message = "Automatic source matching requires a cosine threshold between -1 and 1."
+  }
 }

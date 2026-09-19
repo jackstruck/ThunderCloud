@@ -338,12 +338,13 @@ def test_hotscope_profile_is_rejected_as_a_single_video_source():
     assert response.json['code'] == 'invalid_url'
 
 
-def test_video_list_import_assets_are_served():
+def test_video_list_import_is_not_in_the_ui():
     http = client()
     page = http.get('/', headers=AUTH)
     assert page.status_code == 200
-    assert b'id="video-links-file"' in page.data
-    assert b'HTTPS media or video link' in page.data
+    assert b'id="video-links-file"' not in page.data
+    assert b'Media, video, or user link' in page.data
+    assert b'/video-links.js' not in page.data
     script = http.get('/video-links.js', headers=AUTH)
     assert script.status_code == 200
     assert b'parseVideoLinks' in script.data
@@ -362,7 +363,7 @@ def test_browse_filters_are_forwarded_and_privacy_script_is_served():
     assert subjects.subjects.call_args.kwargs['source_scope'] == 'single'
     assert subjects.subjects.call_args.kwargs['name_status'] == 'unnamed'
     assert http.get('/api/sources?sort=subjects&origin=example.test', headers=AUTH).status_code == 200
-    assert subjects.browse_sources.call_args.kwargs == {'sort':'subjects', 'origin':'example.test'}
+    assert subjects.browse_sources.call_args.kwargs == {'sort':'subjects', 'origin':'example.test', 'subject_scope':'all'}
     response = http.get('/privacy.js', headers=AUTH)
     assert response.status_code == 200 and b'privateGallery' in response.data
 
@@ -385,3 +386,21 @@ def test_matching_exclusion_and_example_status_routes_require_origin_and_forward
     assert http.get('/api/subjects?include_excluded=true',headers=AUTH).status_code==200
     assert subjects.subjects.call_args.kwargs['include_excluded'] is True
     assert http.get('/api/subjects?include_excluded=invalid',headers=AUTH).status_code==422
+
+
+def test_profile_batch_api_is_authenticated_idempotent_and_policy_scoped():
+    from unittest.mock import Mock
+    batches = Mock()
+    batches.create.return_value = {'batch_id': RUN_ID, 'status_url': '/batches/'+RUN_ID}
+    batches.get.return_value = {'batch_id': RUN_ID, 'username': 'Mary', 'status': {'phase': 'queued'}, 'runs': []}
+    app = create_app(Repository(), allowed_origin=ORIGIN, enrollment_enabled=True, profile_batches=batches)
+    client = app.test_client()
+    payload = {'url': '/user/Mary', 'handling_policy': 'enroll_only'}
+    assert client.post('/api/profile-batches', json=payload).status_code == 401
+    response = client.post('/api/profile-batches', json=payload, headers={**AUTH,'Idempotency-Key':'profile-request-key'})
+    assert response.status_code == 202
+    batches.create.assert_called_once_with('member@example.test', 'profile-request-key', '/user/Mary', 'enroll_only')
+    assert client.get('/api/profile-batches/'+RUN_ID, headers=AUTH).json['username'] == 'Mary'
+    assert client.get('/batches/'+RUN_ID, headers=AUTH).status_code == 200
+    disabled = create_app(Repository(), allowed_origin=ORIGIN, enrollment_enabled=False, profile_batches=batches).test_client()
+    assert disabled.post('/api/profile-batches', json=payload, headers={**AUTH,'Idempotency-Key':'profile-request-key'}).status_code == 422

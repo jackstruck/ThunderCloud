@@ -35,3 +35,9 @@ monitoring_email_address = "jack@jackstruck.info"
 
 # Enable only after reviewing a small production proposal set at an explicit threshold.
 source_merges_apply_enabled = false
+
+# Enable automatic new-source merging only with a reviewed threshold.
+source_merges_auto_threshold = null # Production reviewed value: 0.4
+
+# Optional one-pass historical source matching job; execute with an explicit scope.
+# source_merge_backfill_image = "REGION-docker.pkg.dev/PROJECT/REPOSITORY/source-merge-backfill@sha256:DIGEST"

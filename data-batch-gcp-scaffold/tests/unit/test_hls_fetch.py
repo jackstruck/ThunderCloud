@@ -2,14 +2,19 @@ import hashlib
 import subprocess
 
 import pytest
-from worker.hls_fetch import fetch_hotscope_video
+from worker.hls_fetch import fetch_hotscope_video, fetch_luluvid_video
 from worker.secure_fetch import FetchResult
 
 PAGE = 'https://hotscope.tv/video/abc'
 MASTER = 'https://cdn.hotscope.tv/videos/abc/playlist.m3u8'
 
 
-def test_generated_hls_acquires_complete_mp4_and_selects_highest_bandwidth(tmp_path):
+@pytest.mark.parametrize("provider", ["hotscope", "luluvid"])
+def test_generated_hls_acquires_complete_mp4_and_selects_highest_bandwidth(tmp_path, provider):
+    acquire = fetch_hotscope_video if provider == "hotscope" else fetch_luluvid_video
+    options = {} if provider == "hotscope" else {"referer": "https://luluvdo.com/"}
+    master = MASTER if provider == "hotscope" else "https://media.example/master.m3u8"
+    hosts = {"cdn.hotscope.tv"} if provider == "hotscope" else {"media.example"}
     subprocess.run([
         'ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=64x64:rate=10',
         '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '3', '-c:v', 'libx264',
@@ -19,23 +24,23 @@ def test_generated_hls_acquires_complete_mp4_and_selects_highest_bandwidth(tmp_p
     calls = []
     def fetch(url, **kwargs):
         calls.append(url)
-        assert kwargs['allowed_hosts'] == {'cdn.hotscope.tv'}
-        assert kwargs['referer'] == PAGE
-        if url == MASTER:
+        assert kwargs['allowed_hosts'] == hosts
+        assert kwargs['referer'] == options.get('referer', PAGE)
+        if url == master:
             data = b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2\nhigh.m3u8\n'
         else:
             data = (tmp_path / url.rsplit('/', 1)[-1]).read_bytes()
         if len(data) > kwargs['max_bytes']:
             raise ValueError('byte limit')
         return FetchResult(url, 'application/octet-stream', data, '')
-    result = fetch_hotscope_video(MASTER, page_url=PAGE, max_bytes=1_000_000, resource_fetcher=fetch)
+    result = acquire(master, page_url=PAGE, max_bytes=1_000_000, resource_fetcher=fetch, **options)
     assert result.data[4:8] == b'ftyp'
     assert result.sha256 == hashlib.sha256(result.data).hexdigest()
     assert result.content_type == 'video/mp4'
     assert result.final_url == PAGE
     assert not any('low.m3u8' in call for call in calls)
     with pytest.raises(ValueError, match='byte limit'):
-        fetch_hotscope_video(MASTER, page_url=PAGE, max_bytes=10, resource_fetcher=fetch)
+        acquire(master, page_url=PAGE, max_bytes=10, resource_fetcher=fetch, **options)
 
 
 @pytest.mark.parametrize('playlist', [

@@ -9,6 +9,10 @@ from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 from .secure_fetch import fetch_html
 
 _DIGITS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+LULUVID_PAGE_HOSTS = {
+    "luluvid.com", "www.luluvid.com", "luluvdo.com", "www.luluvdo.com",
+    "luluvdoo.com", "www.luluvdoo.com",
+}
 
 
 @dataclass(frozen=True)
@@ -16,6 +20,7 @@ class ResolvedSource:
     final_url: str
     source_adapter: str
     page_url: str | None = None
+    media_referer: str | None = None
 
 
 class _Links(HTMLParser):
@@ -23,9 +28,12 @@ class _Links(HTMLParser):
         super().__init__()
         self.anchors: list[str] = []
         self.media: list[str] = []
+        self.frames: list[str] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
         values = dict(attrs)
+        if tag == "iframe" and values.get("src"):
+            self.frames.append(values["src"])
         if tag == "a" and values.get("href"):
             self.anchors.append(values["href"])
         if tag in {"video", "source"} and values.get("src"):
@@ -61,6 +69,28 @@ def _host(url: str) -> str:
     return (urlsplit(url).hostname or "").rstrip(".").lower()
 
 
+def _luluvid_page(url: str) -> str:
+    parsed = urlsplit(_canonical_https(url))
+    if parsed.hostname not in LULUVID_PAGE_HOSTS or parsed.port not in {None, 443}:
+        raise ValueError("invalid provider page URL")
+    return urlunsplit(("https", "luluvid.com", parsed.path, parsed.query, ""))
+
+
+def _luluvid_referer(html: str, page_url: str) -> str:
+    parser = _Links()
+    parser.feed(html)
+    file_id = urlsplit(page_url).path.rstrip("/").rsplit("/", 1)[-1]
+    for frame in parser.frames:
+        try:
+            embed = urlsplit(_canonical_https(urljoin(page_url, frame)))
+        except ValueError:
+            continue
+        if (embed.hostname in LULUVID_PAGE_HOSTS and embed.port in {None, 443}
+                and embed.path.rstrip("/") == f"/e/{file_id}"):
+            return f"https://{embed.hostname}/"
+    return page_url
+
+
 def _luluvid_links(html: str, base_url: str) -> list[str]:
     parser = _Links()
     parser.feed(html)
@@ -77,8 +107,8 @@ def _luluvid_links(html: str, base_url: str) -> list[str]:
             canonical = _canonical_https(absolute)
         except ValueError:
             continue
-        if _host(canonical) in {"luluvid.com", "www.luluvid.com"}:
-            result.append(canonical)
+        if _host(canonical) in LULUVID_PAGE_HOSTS:
+            result.append(_luluvid_page(canonical))
     return list(dict.fromkeys(result))
 
 
@@ -229,9 +259,11 @@ def resolve_source(url: str, html_fetcher=fetch_html) -> ResolvedSource:
         canonical = links[0]
         host = _host(canonical)
         adapter = "justpaste"
-    elif host in {"luluvid.com", "www.luluvid.com"}:
+    elif host in LULUVID_PAGE_HOSTS:
         adapter = "luluvid"
     else:
         return ResolvedSource(canonical, "direct")
+    canonical = _luluvid_page(canonical)
     html, final_page = html_fetcher(canonical)
-    return ResolvedSource(_media_link(html, final_page), adapter)
+    return ResolvedSource(_media_link(html, final_page), adapter, canonical,
+                          _luluvid_referer(html, final_page))

@@ -207,7 +207,73 @@ html[data-private-gallery=true] img{filter:brightness(0) invert(.5)!important}
 @media(max-width:600px){header{padding:0 12px}.header-actions{gap:4px}.header-actions .link{padding:7px 6px;font-size:.75rem;min-height:40px}}
 
 .matching-controls,.example-status-controls,.example-status-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
-.example-status-controls label{margin:0}
-.example-status-controls .hint{flex-basis:100%}
+.example-status-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.example-status-controls>button{width:100%;min-width:0}
+.example-status-controls .hint{grid-column:1 / -1}
 .example-disabled img{opacity:.35}
 .example-disabled{border-style:dashed}
+#source-url, #source-file { width:100%; min-width:0; }
+#batch-title, #batch-runs { overflow-wrap:anywhere; }
+#url-form > button, #upload-form > button:first-of-type { display:block; width:100%; margin:10px 0 0; }
+
+.manual-selection-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%}
+.manual-selection-actions>button{width:100%;min-width:0}
+.merge-tools>.manual-merge-button{flex:1 0 100%;width:100%}
+
+/* Equal-width navigation, with external sources consistently in the last column. */
+.result-actions,.subject-card-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start;gap:8px;width:100%}
+.source-navigation{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:8px;margin:12px 0}
+.result-actions>.source-links,.subject-card-actions>.source-links{grid-column:3}
+.source-card-links,.source-links{display:flex;flex-direction:column;gap:8px;min-width:0;margin:0}
+.result-actions .button-link,.subject-card-actions .button-link,.source-navigation .button-link,.enrolled-subject .result-actions .button-link{width:100%;min-width:0;margin:0;padding:10px 6px;white-space:normal;text-align:center;overflow-wrap:anywhere;min-height:44px;height:auto}
+.result-actions>*,.subject-card-actions>*,.source-navigation>*{min-width:0}
+.external-source-link{gap:5px}
+.external-source-link svg{width:14px;height:14px;flex:none}
+.source-selection-label{overflow-wrap:anywhere}
+.merge-scan-controls input,.merge-scan-controls button{height:48px;min-height:48px}
+.merge-scan-controls label{margin:0}
+.merge-action-bar{display:grid;grid-template-columns:minmax(0,1fr)}
+.merge-action-bar>button{width:100%}
+.selection-tools,.potential-matches>.management-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%}
+.selection-tools>button,.potential-matches>.management-actions>button{width:100%;min-width:0;margin:0}
+.potential-matches>.management-actions>button:last-child:nth-child(odd){grid-column:1/-1}
+#selection-submit,#selection-cancel,#enrollment-assignments>button,.subject-card>button{display:block;width:100%;margin:10px 0 0}
+#status>#copy-id,#status>#cancel-run{width:calc(50% - 4px);margin:10px 0 0;min-height:44px;vertical-align:top}
+#status>#copy-id{margin-right:8px}
+#enrollment-assignments button{width:100%;margin:10px 0 0}
+.assignment-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.assignment-row>p{grid-column:1/-1}
+#enrollment-assignments .assignment-row>button{margin:0}
+.potential-matches>.management-actions{grid-template-columns:repeat(3,minmax(0,1fr))}
+.potential-matches>.management-actions>button:last-child:nth-child(odd){grid-column:auto}
+.potential-matches>.management-actions>button{white-space:normal;overflow-wrap:anywhere;padding:11px 6px}
+
+/* Run navigation wraps whole buttons, never stretches them to the card height. */
+#results .result-actions{grid-template-columns:repeat(auto-fit,minmax(min(100%,max(120px,calc((100% - 16px)/3))),1fr));align-items:start}
+#results .result-actions .button-link,#results .source-navigation .button-link{height:44px;min-height:44px;max-width:100%;white-space:nowrap;overflow-wrap:normal;flex:none}
+
+/* Run and example navigation stays within its row. */
+#batch-runs{display:grid;gap:8px}
+.recent-run-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}
+.recent-run-row .button-link{white-space:nowrap;height:44px}
+.example-origin-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0}
+.example-origin-actions .button-link{min-width:0;white-space:nowrap;height:44px;padding-inline:8px}
+/* The open subject needs only the two source navigation columns. */
+#subject-detail>.subject-card .subject-card-actions{grid-template-columns:repeat(2,minmax(0,1fr))}
+#subject-detail>.subject-card .subject-card-actions>.source-links{grid-column:auto}
+.example-row>div{flex:1}
+.example-origin-actions{align-items:start}
+.example-origin-actions .button-link{height:36px;min-height:36px;max-height:36px;padding:6px 8px;line-height:1.2;align-self:start}
+/* Candidate navigation: subject first, then paired source links. */
+#results .candidate .result-actions,.subject-card-actions{grid-template-columns:repeat(2,minmax(0,1fr))}
+#results .candidate .result-actions>a[href^="/subjects/"],.subject-card-actions>a[data-subject-route]{grid-column:1 / -1}
+#results .candidate .result-actions>a[href^="/sources/"],.subject-card-actions>.source-card-links{grid-column:1}
+#results .candidate .result-actions>.external-source-link,.subject-card-actions>.source-links{grid-column:2}
+
+/* Compact source-library cards. */
+.source-library-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr))}
+.source-library-card{container-type:inline-size}
+.source-library-card .source-selection-label{width:100%;flex-wrap:nowrap;gap:6px}
+.source-library-id{font-size:clamp(9px,3.7cqi,12px);font-weight:500;white-space:nowrap;overflow-wrap:normal}
+.source-library-card .source-navigation{width:100%;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-self:stretch}
+.source-library-card .source-navigation .button-link{height:36px;min-height:36px;max-height:36px;padding:6px 4px;line-height:1.2;font-size:clamp(10px,4.7cqi,12.8px);white-space:nowrap;overflow-wrap:normal}

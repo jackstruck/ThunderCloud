@@ -47,7 +47,7 @@ uses deterministic object names, recovers existing objects where possible, and
 avoids duplicate-content uploads. Uploads cannot overwrite an existing generation.
 Successful records include generation, SHA-256, byte count, and content type.
 
-The downloader does not automatically enqueue face processing. Use
+The downloader does not automatically enqueue data processing. Use
 [archive submission](../data-batch-gcp-scaffold/OPERATIONS.md#submit-archive-objects-through-the-common-run-framework)
 to prepare and submit durable receipts for selected new sources. Reuse a receipt
 on retry and check existing submissions before processing historical objects.
@@ -90,3 +90,30 @@ HLS uses `IMAGEIO_FFMPEG_EXE` when set, then a system `ffmpeg`, then the bundled
 imageio binary. Install system FFmpeg if the bundled binary is incompatible with
 the host. The generated-media tests exercise remuxing, audio/video decoding, and
 cleanup (`python -m unittest discover -s tests`).
+
+Existing HLS archives can be reused across FFmpeg remux versions even when MP4
+container bytes differ. Reuse requires an integrity-checked download of the exact
+stored generation and identical compressed-packet SHA-256 fingerprints including
+codec metadata, stream layout and timestamps. The manifest records the archived
+file's SHA-256 and size. Different media is rejected, and archives are never
+overwritten by this reconciliation.
+
+HLS verification still decodes the full video and checks playlist duration. If
+FFmpeg rejects reserved H.264 color tags, validation uses a temporary stream-copy
+with unspecified color tags; the archived file is unchanged. Verification failures
+include a stage and diagnostic message in the manifest.
+
+### Export user directory links in the browser
+
+Open `https://hotscope.tv/users`, then paste
+[`scripts/export-search-links.js`](scripts/export-search-links.js) into the browser
+console. It starts at `/users`, follows directory pagination such as
+`/users?page=2`, and downloads deduplicated profile URLs (one per line) as
+`user-links.txt`. The same script still exports video URLs on a search results page.
+
+The existing controls apply to both modes:
+`window.videoLinkExportOptions = { maxPages: 1000, pauseMs: 700 }` before running;
+`window.videoLinkExport.stop()` to stop; `window.videoLinkExport.urls` to inspect
+collected links. Failed, stopped, or page-limited exports are marked partial and
+use `user-links-partial.txt`. Completion means all discovered pagination links
+were exhausted. This collects URLs only; it does not submit or download videos.

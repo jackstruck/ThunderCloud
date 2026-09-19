@@ -23,13 +23,13 @@ def browser():
         browser.close()
 
 
-def setup(browser, fixtures, *, page_number=1, options=None):
+def setup(browser, fixtures, *, page_number=1, options=None, users=False):
     page = browser.new_page(accept_downloads=True)
     calls = []
 
     def handle(route):
         url = urlsplit(route.request.url)
-        if url.hostname != 'media.example.test' or url.path != '/search':
+        if url.hostname != 'media.example.test' or url.path != ('/users' if users else '/search'):
             raise AssertionError('Unexpected request: ' + route.request.url)
         number = int(parse_qs(url.query).get('page', ['1'])[0])
         calls.append(number)
@@ -40,7 +40,7 @@ def setup(browser, fixtures, *, page_number=1, options=None):
             route.fulfill(status=200, content_type='text/html', body=response)
 
     page.route('**/*', handle)
-    page.goto(f'{ORIGIN}/search?query=sample&page={page_number}')
+    page.goto(f'{ORIGIN}/users?page={page_number}' if users else f'{ORIGIN}/search?query=sample&page={page_number}')
     calls.clear()
     page.evaluate('(options) => window.videoLinkExportOptions = options',
                   {'pauseMs': 0, 'download': False, **(options or {})})
@@ -131,4 +131,45 @@ def test_empty_results_complete_without_download(browser):
     page, calls = setup(browser, {1: document()})
     result = page.evaluate(SCRIPT)
     assert result['complete'] and result['urls'] == [] and calls == [1]
+    page.close()
+
+
+
+def users_document(*links):
+    return document(*links).replace('<input name="query" value="sample">', '<header><span>Users</span></header>')
+
+
+def test_users_directory_pagination_and_download(browser, tmp_path):
+    page, calls = setup(browser, {
+        1: users_document('/user/Mary', '/user/Mary?tracking=1', '/users?page=1',
+                          '/users?page=2', '/video/ignored', 'https://other.example/user/ignored'),
+        2: users_document('/user/Mary/', '/user/Alice', '/users?page=3',
+                          '/users?page=2&sort=other', '/users?page=-1'),
+        3: users_document('/user/Bob', '/users?page=2'),
+    }, page_number=2, users=True, options={'download': True})
+    requests = []
+    page.on('request', lambda request: requests.append(request.url))
+    with page.expect_download() as downloaded:
+        result = page.evaluate(SCRIPT)
+    assert calls == [1, 2, 3]
+    assert requests == [f'{ORIGIN}/users', f'{ORIGIN}/users?page=2', f'{ORIGIN}/users?page=3']
+    assert result['complete'] and result['pages'] == 3
+    assert result['urls'] == [f'{ORIGIN}/user/{name}' for name in ['Mary', 'Alice', 'Bob']]
+    assert downloaded.value.suggested_filename == 'user-links.txt'
+    output = tmp_path / 'users.txt'
+    downloaded.value.save_as(output)
+    assert output.read_text() == '\n'.join(result['urls']) + '\n'
+    page.close()
+
+
+def test_users_challenge_preserves_partial_export(browser):
+    page, calls = setup(browser, {
+        1: users_document('/user/Mary', '/users?page=2'),
+        2: '<html>Challenge</html>',
+    }, users=True, options={'download': True})
+    with page.expect_download() as downloaded:
+        result = page.evaluate(SCRIPT)
+    assert not result['complete'] and result['pages'] == 1
+    assert result['urls'] == [f'{ORIGIN}/user/Mary']
+    assert downloaded.value.suggested_filename == 'user-links-partial.txt'
     page.close()

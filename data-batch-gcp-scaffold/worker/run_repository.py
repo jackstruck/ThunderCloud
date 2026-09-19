@@ -40,6 +40,10 @@ def serialize_run(row) -> dict[str, Any]:
         "expires_at": row[9],
     }
     result["status_url"] = f"/runs/{result['run_id']}"
+    source_id, page_url = row[10:12]
+    result["source"] = {"source_id": str(source_id) if source_id else None, "page_url": page_url}
+    result["source_url"] = (f"/sources/{source_id}" if source_id else
+                            None)
     if row[5]:
         result["error"] = {"code": str(row[5]), "message": str(row[6])}
     return result
@@ -47,7 +51,11 @@ def serialize_run(row) -> dict[str, Any]:
 
 _RUN_COLUMNS = """run_id, state, handling_policy, outcome, retryable, error_code,
                   CASE WHEN error_code IS NULL THEN NULL ELSE 'The run could not complete.' END,
-                  created_at, updated_at, expires_at"""
+                  created_at, updated_at, expires_at,
+                  COALESCE(retained_source_id,
+                    (SELECT s.source_id FROM source_asset s
+                     WHERE s.source_sha256=media_run.source_sha256 AND s.deleted_at IS NULL
+                     ORDER BY s.created_at,s.source_id LIMIT 1)), source_page_url"""
 
 
 def queue_selection(cursor, run_id, group_ids, assignments):
@@ -109,7 +117,7 @@ class RunRepository:
             )
             existing = cursor.fetchone()
             if existing:
-                if str(existing[10]) != fingerprint:
+                if str(existing[-1]) != fingerprint:
                     raise RunConflictError(
                         "idempotency key was already used for a different request"
                     )
@@ -143,7 +151,8 @@ class RunRepository:
                     source.get("content_type"),
                     source.get("bytes"),
                     state.value,
-                    payload.get("selection_policy", "manual"),
+                    ("all_tracks" if payload["handling_policy"] in {"retain_and_enroll", "enroll_only"}
+                     else payload.get("selection_policy", "manual")),
                     source.get("bucket"),
                     source.get("object_name"),
                     source.get("generation"),
@@ -182,6 +191,16 @@ class RunRepository:
         finally:
             connection.rollback()
             cursor.close()
+            connection.close()
+
+    def batch_statuses(self, run_ids):
+        connection = self.database.connect()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(f'SELECT {_RUN_COLUMNS} FROM media_run WHERE run_id=ANY(%s::uuid[]) ORDER BY created_at,run_id', (run_ids,))
+            return [serialize_run(row) for row in cursor.fetchall()]
+        finally:
+            connection.rollback()
             connection.close()
 
     def recent(self, principal: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -610,9 +629,17 @@ class RunRepository:
                     candidate["sources"] = sources_by_subject.get(candidate["resolved_subject_id"], [])
                     candidate["page_urls"] = sorted(set(candidate["page_urls"]) | {
                         url for source in candidate["sources"] for url in source["page_urls"]})
+            cursor.execute("""SELECT COALESCE(r.retained_source_id,
+                (SELECT s.source_id FROM source_asset s WHERE s.source_sha256=r.source_sha256
+                 AND s.deleted_at IS NULL ORDER BY s.created_at,s.source_id LIMIT 1)),
+                r.source_page_url
+                FROM media_run r WHERE r.run_id=%s""", (run_id,))
+            source_id, page_url = cursor.fetchone()
             return {
                 "run_id": run_id,
                 "handling_policy": run["handling_policy"],
+                "outcome": run["outcome"],
+                "source": {"source_id": str(source_id) if source_id else None, "page_url": page_url},
                 **self._reused_enrollment(cursor, run_id),
                 "groups": [
                     {

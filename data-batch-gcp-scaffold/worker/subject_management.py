@@ -539,30 +539,37 @@ class SubjectManagement:
             )
             return result
 
-    def browse_sources(self, q="", after=None, limit=24, multiple_subjects=False, sort="id", origin=""):
+    def browse_sources(self, q="", after=None, limit=24, multiple_subjects=False, sort="id", origin="", subject_scope="all"):
         if (not isinstance(q,str) or len(q)>200 or type(limit) is not int or not 1<=limit<=100
+            or subject_scope not in {"all", "none", "single", "multiple"}
+            or (multiple_subjects and subject_scope in {"none", "single"})
             or type(multiple_subjects) is not bool or sort not in {"id","subjects","examples","newest"}):
             raise SubjectError(422,"invalid_search","Use a valid search, filters, sort, and page size from 1 to 100.")
+        if multiple_subjects:
+            subject_scope = "multiple"
+        count_filter = {"all": "TRUE", "none": "count(DISTINCT s.subject_id)=0",
+                        "single": "count(DISTINCT s.subject_id)=1", "multiple": "count(DISTINCT s.subject_id)>1"}[subject_scope]
         after_metric, after_id = browse_cursor(after,sort)
         origin = origin_hostname(origin)
         pattern = "%" + q.strip().replace("\\","\\\\").replace("%","\\%").replace("_","\\_") + "%"
         metric = {"id":"0::bigint","subjects":"subjects","examples":"examples","newest":"created"}[sort]
         with self.transaction() as cursor:
             cursor.execute(f"""WITH grouped AS (
-                SELECT e.source_id,sa.source_page_url,count(DISTINCT e.subject_id) AS subjects,count(*) AS examples,
+                SELECT sa.source_id,sa.source_page_url,count(DISTINCT s.subject_id) AS subjects,count(s.subject_id) AS examples,
                        (extract(epoch FROM sa.created_at)*1000000)::bigint AS created
-                FROM subject_example e JOIN subject s USING(subject_id) JOIN source_asset sa USING(source_id)
-                WHERE s.merged_into_subject_id IS NULL
-                  AND (e.source_id::text ILIKE %s OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=e.source_id AND p.page_url ILIKE %s))
-                  AND (%s='' OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=e.source_id AND regexp_replace(lower(split_part(split_part(p.page_url,'://',2),'/',1)), '^www\\.|:443$', '', 'g')=%s))
-                GROUP BY e.source_id,sa.source_page_url,sa.created_at
-                HAVING NOT %s OR count(DISTINCT e.subject_id)>1
+                FROM source_asset sa LEFT JOIN subject_example e ON e.source_id=sa.source_id
+                LEFT JOIN subject s ON s.subject_id=e.subject_id AND s.merged_into_subject_id IS NULL
+                WHERE sa.deleted_at IS NULL
+                  AND (sa.source_id::text ILIKE %s OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=sa.source_id AND p.page_url ILIKE %s))
+                  AND (%s='' OR EXISTS (SELECT 1 FROM source_page_link p WHERE p.source_id=sa.source_id AND regexp_replace(lower(split_part(split_part(p.page_url,'://',2),'/',1)), '^www\\.|:443$', '', 'g')=%s))
+                GROUP BY sa.source_id,sa.source_page_url,sa.created_at
+                HAVING {count_filter}
                 ), listed AS (SELECT *,{metric} AS metric FROM grouped)
                 SELECT source_id,source_page_url,subjects,examples,metric,
                   ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=listed.source_id ORDER BY p.page_url) FROM listed
                 WHERE (%s::uuid IS NULL OR metric<%s OR (metric=%s AND source_id>%s::uuid))
                 ORDER BY metric DESC,source_id LIMIT %s""",
-                (pattern,pattern,origin,origin,multiple_subjects,after_id,after_metric or 0,after_metric or 0,after_id,limit+1))
+                (pattern,pattern,origin,origin,after_id,after_metric or 0,after_metric or 0,after_id,limit+1))
             rows=cursor.fetchall()
             return {"sources":[{"source_id":str(r[0]),"page_url":r[1],"page_urls":list(r[5]),"subject_count":r[2],"example_count":r[3]} for r in rows[:limit]],
                     "next_cursor":next_browse_cursor(sort,rows[limit-1][4],rows[limit-1][0]) if len(rows)>limit else None}
@@ -989,7 +996,11 @@ class SubjectManagement:
         for group in groups:
             member_id = group['subject']['subject_id']
             cursor.execute('UPDATE subject_example SET subject_id=%s WHERE subject_id=%s', (sid, member_id))
-            cursor.execute('UPDATE subject SET merged_into_subject_id=%s WHERE subject_id=%s', (sid, member_id))
+            # All examples have moved. Clear the empty donor's embedding in this
+            # same update so its old vector is not needlessly reinserted into HNSW.
+            # Recalculation below still updates versions and validates all models.
+            cursor.execute('''UPDATE subject SET merged_into_subject_id=%s,
+                canonical_embedding=NULL,sample_count=0 WHERE subject_id=%s''', (sid, member_id))
         cursor.execute("""UPDATE subject SET matching_excluded=true WHERE subject_id=%s
             AND EXISTS(SELECT 1 FROM subject WHERE subject_id=ANY(%s::uuid[]) AND matching_excluded)""",
             (sid,list(versions)))

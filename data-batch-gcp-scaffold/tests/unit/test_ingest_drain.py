@@ -105,3 +105,19 @@ def test_hotscope_drain_uses_hls_and_preserves_page_attribution():
                  resolver=lambda url: ResolvedSource(playlist, 'hotscope', page)) == 1
     assert repository.completed[0][1]['final_url'] == page
     assert repository.completed[0][1]['source_adapter'] == 'hotscope'
+
+
+def test_luluvid_and_justpaste_playlists_use_hls_downloader():
+    for adapter in ['luluvid', 'justpaste']:
+        repository = Repository()
+        page = 'https://luluvid.com/abc'
+        playlist = 'https://cdn.example/master.m3u8?token=x'
+        def hls(url, *, page_url, referer, max_bytes):
+            assert (url, page_url, referer, max_bytes) == (playlist, page, 'https://luluvdo.com/', 100)
+            return FetchResult(page, 'video/mp4', b'\xff\xd8\xffimage', 'a' * 64)
+        def direct(*args, **kwargs):
+            raise AssertionError('playlist passed to direct media downloader')
+        assert drain(repository, Storage(), max_bytes=100, fetcher=direct, luluvid_fetcher=hls,
+                     resolver=lambda url: ResolvedSource(playlist, adapter, page, 'https://luluvdo.com/')) == 1
+        assert repository.completed[0][1]['final_url'] == page
+        assert repository.completed[0][1]['source_adapter'] == adapter

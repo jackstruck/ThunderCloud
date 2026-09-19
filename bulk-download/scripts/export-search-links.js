@@ -1,4 +1,5 @@
 (async () => {
+  // Run on /users to export profiles, or /search?query=... to export videos.
   // Optional overrides: window.videoLinkExportOptions = { maxPages: 1000 };
   const options = {
     maxPages: 1000, pauseMs: 700, timeoutMs: 30000, download: true,
@@ -10,10 +11,12 @@
     }
   }
   const start = new URL(location.href);
-  if (start.protocol !== 'https:' || start.pathname !== '/search' ||
-      !start.searchParams.get('query')?.trim()) {
-    throw new Error('Open an HTTPS search results page with a nonempty query first.');
+  const users = start.pathname === '/users';
+  if (start.protocol !== 'https:' || (!users && (start.pathname !== '/search' ||
+      !start.searchParams.get('query')?.trim()))) {
+    throw new Error('Open the HTTPS /users directory or a search results page first.');
   }
+  const kind = users ? 'user' : 'video';
   if (window.videoLinkExport?.running) throw new Error('An export is already running.');
 
   const controller = new AbortController();
@@ -21,7 +24,7 @@
     running: true, complete: false, pages: 0, urls: [],
     stop: () => controller.abort()
   };
-  const queue = [1], scheduled = new Set([1]), videos = new Set();
+  const queue = [1], scheduled = new Set([1]), links = new Set();
   const scope = value => {
     const url = new URL(value);
     url.hash = '';
@@ -50,7 +53,8 @@
       const page = queue.shift();
       const pageURL = new URL(start);
       pageURL.hash = '';
-      pageURL.searchParams.set('page', page);
+      if (users && page === 1) pageURL.searchParams.delete('page');
+      else pageURL.searchParams.set('page', page);
       const response = await fetch(pageURL, {
         credentials: 'same-origin', redirect: 'error',
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(options.timeoutMs)])
@@ -62,7 +66,8 @@
       const html = await response.text();
       if (html.length > 10000000) throw new Error(`Page ${page}: HTML is too large.`);
       const doc = new DOMParser().parseFromString(html, 'text/html');
-      if (!doc.querySelector('input[name="query"]')) {
+      if (users ? !/\bUsers\b/i.test(doc.querySelector('header')?.textContent || '')
+                : !doc.querySelector('input[name="query"]')) {
         throw new Error(`Page ${page}: unexpected page or access challenge.`);
       }
       for (const anchor of doc.querySelectorAll('a[href]')) {
@@ -70,8 +75,10 @@
         try { url = new URL(anchor.getAttribute('href'), pageURL); }
         catch { continue; }
         if (url.origin !== start.origin || url.username || url.password) continue;
-        const video = url.pathname.match(/^\/video\/([A-Za-z0-9_-]+)\/?$/);
-        if (video) videos.add(`${start.origin}/video/${video[1]}`);
+        const match = url.pathname.match(users
+          ? /^\/user\/([^/]+)\/?$/
+          : /^\/video\/([A-Za-z0-9_-]+)\/?$/);
+        if (match) links.add(`${start.origin}/${kind}/${match[1]}`);
         if (scope(url) === scope(start)) {
           const rawPage = url.searchParams.get('page') || '1';
           const next = Number(rawPage);
@@ -82,8 +89,8 @@
         }
       }
       state.pages++;
-      state.urls = [...videos];
-      console.log(`Page ${page}: ${state.urls.length} unique video links collected.`);
+      state.urls = [...links];
+      console.log(`Page ${page}: ${state.urls.length} unique ${kind} links collected.`);
       if (queue.length && state.pages < options.maxPages) await wait(options.pauseMs);
     }
     if (controller.signal.aborted) throw new Error('Stopped by operator.');
@@ -94,13 +101,13 @@
     console.warn('Partial export:', state.error);
   } finally {
     state.running = false;
-    state.urls = [...videos];
+    state.urls = [...links];
     if (options.download && state.urls.length) {
       const blob = new Blob([state.urls.join('\n') + '\n'], {type: 'text/plain'});
       const downloadURL = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = downloadURL;
-      link.download = `video-links${state.complete ? '' : '-partial'}.txt`;
+      link.download = `${kind}-links${state.complete ? '' : '-partial'}.txt`;
       document.body.append(link);
       link.click();
       link.remove();

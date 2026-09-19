@@ -18,7 +18,7 @@ resource "google_project_iam_member" "developer_project_roles" {
 resource "google_service_account" "batch_worker" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-runtime"
-  display_name = "Face processing runtime"
+  display_name = "Data processing runtime"
   description  = "Keyless runtime identity for Cloud Run face-processing jobs."
 }
 

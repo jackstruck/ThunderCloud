@@ -221,8 +221,9 @@ data-submit submit --receipt private-receipts/source.json
 
 Set `--page-url` when external attribution is available. Choose handling explicitly:
 `search_then_discard`, `enroll_only`, or `retain_and_enroll`. Choose `manual` for
-interactive selection or `all_tracks` for unattended processing; unattended enrollment
-creates one new subject per detected track for new content. Exact-content repeats
+interactive search-only selection or `all_tracks` for unattended search processing.
+Enrollment policies automatically include every detected track, then combine eligible
+subjects within each new source at the configured cosine threshold. Exact-content repeats
 reuse existing enrollment; see [duplicate handling](#exact-content-enrollment-reuse-and-alternate-urls).
 Original archive objects are preserved under every policy.
 
@@ -240,6 +241,15 @@ The browser accepts JustPaste, Luluvid, guarded public HTTPS media, and direct J
 PNG, or MP4 uploads. Enabled policies are `search_then_discard`, `retain_and_enroll`,
 and `enroll_only`. Recent runs, run recovery, cancellation, retries, face selection,
 and subject-gallery views are available through the IAP-protected console.
+New retained/enroll-only submissions automatically select all detected groups;
+search-only submissions retain interactive selection. New-source automatic grouping
+uses the reviewed cosine threshold 0.4.
+
+Luluvid page submissions also accept `luluvdo.com` and `luluvdoo.com` (including
+`www`), resolving them through the canonical `luluvid.com` page. JustPaste links
+recognize these aliases too. Static MP4 and finite MPEG-TS HLS playback are supported;
+HLS acquisition keeps DNS pinning, same-media-host redirects/segments, byte and
+duration limits, and complete decode validation.
 
 Retention and security design is in [Architecture](ARCHITECTURE.md).
 [Cutover evidence](docs/platform-cutover-review.md) and dated records under
@@ -331,6 +341,10 @@ See [operator workflow, CLI, bounds, and staged rollout](docs/source-merges.md).
 Operator application is now enabled after the reviewed source/threshold rollout
 recorded in the guide. New deployments default to proposals only; enable
 `source_merges_apply_enabled` after the small-source review and explicit threshold calibration. The CLI uses IAP and the existing merge/recovery semantics.
+New-source enrollment now automatically groups and merges at cosine 0.5, keeping every
+example. This is independently configured by `source_merges_auto_threshold` on the
+interactive job; null disables automatic matching. Existing sources and duplicate
+enrollment reuse are unchanged. See the guide for bounds and manual-review exceptions.
 
 ## Submit a Hotscope video page
 
@@ -527,3 +541,26 @@ preservation receipts now account for active examples and capture exclusion flag
 
 Apply migration 026 before deploying the console and worker images. Existing values
 default to active/not excluded. Roll out processing workers before the new UI controls.
+
+## Submit all videos from a Hotscope user in the console
+
+The link form accepts `https://hotscope.tv/user/Mary` or `/user/Mary`. Submitting a
+user queues every discoverable public video in the background, using the selected
+handling policy and automatic selection of all detected groups. The batch progress
+page can be bookmarked and reopened; it lists current run states and any acquisition
+failures. Closing the browser does not stop processing. Existing archive handoff,
+three-active-run limit, enrollment deduplication, and automatic source matching apply.
+
+Profile checkpoints are encrypted under the existing batch checkpoint directory,
+with `profiles/<batch-id>.json` filenames. `FACE_PROFILE_BATCH_PREFIX` enables the
+console integration; its prefix must match the acquisition checkpoint IAM condition.
+The console launches `face-acquisition-batch` with the checkpoint object override.
+Repeated requests use a durable idempotency key; concurrent executions are fenced by
+checkpoint generation and execution ownership. Discovery is capped at 1,000 pages;
+an incomplete profile is reported as failed rather than silently accepting a partial list.
+
+Text-file link import is local-only and is no longer offered in the console. Run
+results expose the submitted source independently of candidates. “View Source” opens
+the library source when available, otherwise the original HTTPS page; runs without
+candidates or detections still show it. An upload without source attribution has no
+external source link to show.

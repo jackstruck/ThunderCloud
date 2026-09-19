@@ -8,6 +8,63 @@ servers:
 security:
   - iap: []
 paths:
+  /api/profile-batches:
+    post:
+      operationId: createProfileBatch
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, handling_policy]
+              additionalProperties: false
+              properties:
+                url: {type: string, description: 'Hotscope /user/name path or HTTPS profile URL. All videos and detected groups are selected.'}
+                handling_policy: {type: string, enum: [search_then_discard, retain_and_enroll, enroll_only]}
+      responses:
+        '202':
+          description: Profile batch durably queued for background acquisition and processing.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batch_id: {type: string, format: uuid}
+                  status_url: {type: string}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/profile-batches/{batch_id}:
+    get:
+      operationId: getProfileBatch
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Owner-visible progress, acquisition failures and current per-run status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batch_id: {type: string, format: uuid}
+                  username: {type: string}
+                  status: {type: object}
+                  discovery_failures: {type: integer}
+                  runs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        run_id: {type: string, format: uuid}
+                        state: {type: string}
+                        status_url: {type: string}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/runs:
     post:
       operationId: createRun
@@ -996,7 +1053,7 @@ components:
         handling_policy:
           type: string
           enum: [search_then_discard, retain_and_enroll, enroll_only]
-          description: Enrollment policies are accepted only when the deployment gate is enabled.
+          description: Enrollment policies are accepted only when the deployment gate is enabled and automatically select all detected groups. Search-only submissions pause for interactive group selection.
         source:
           oneOf:
             - $ref: '#/components/schemas/UrlSource'
@@ -1051,6 +1108,13 @@ components:
       properties:
         run_id: {type: string, format: uuid}
         handling_policy: {type: string, enum: [search_then_discard, retain_and_enroll, enroll_only]}
+        outcome: {type: [string, 'null']}
+        source:
+          type: object
+          description: Submitted source attribution, independent of candidate results or detections.
+          properties:
+            source_id: {type: [string, 'null'], format: uuid}
+            page_url: {type: [string, 'null']}
         enrollment_reused:
           type: boolean
           description: Exact file content already has enrolled examples; no new subjects or examples were created.

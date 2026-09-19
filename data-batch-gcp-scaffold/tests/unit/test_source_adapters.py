@@ -90,3 +90,36 @@ def test_hotscope_rejects_profile_and_redirect_to_another_video():
         resolve_source('https://hotscope.tv/user/alice')
     with pytest.raises(ValueError, match='another video'):
         resolve_source('https://hotscope.tv/video/abc', lambda url, **kw: ('', 'https://hotscope.tv/video/def'))
+
+
+@pytest.mark.parametrize('host', ['luluvdo.com', 'www.luluvdo.com', 'luluvdoo.com', 'www.luluvdoo.com'])
+def test_luluvid_alias_resolves_canonical_page_and_matching_embed_referer(host):
+    def fetch(url):
+        assert url == 'https://luluvid.com/abc'
+        return ('<iframe src="https://evil.test/e/abc"></iframe>'
+                '<iframe src="https://luluvdo.com/e/other"></iframe>'
+                '<iframe src="https://luluvdo.com/e/abc"></iframe>'
+                '<video src="https://cdn.example/master.m3u8?token=x"></video>', url)
+    result = resolve_source(f'https://{host}/abc', fetch)
+    assert result.source_adapter == 'luluvid'
+    assert result.page_url == 'https://luluvid.com/abc'
+    assert result.media_referer == 'https://luluvdo.com/'
+    assert result.final_url == 'https://cdn.example/master.m3u8?token=x'
+
+
+def test_justpaste_deduplicates_aliases_of_same_video():
+    def fetch(url):
+        if url == 'https://justpaste.it/page':
+            return ('<a href="https://luluvdo.com/abc">one</a>'
+                    '<a href="https://luluvid.com/abc">same</a>', url)
+        assert url == 'https://luluvid.com/abc'
+        return '<video src="https://cdn.example/a.mp4"></video>', url
+    result = resolve_source('https://justpaste.it/page', fetch)
+    assert result.source_adapter == 'justpaste'
+    assert result.page_url == 'https://luluvid.com/abc'
+
+
+def test_luluvid_packed_player_playlist():
+    html = "}('0:[{1:\"2://3/4.5\"}]',6,6,'sources|file|https|cdn.example|master|m3u8'.split('|')"
+    result = resolve_source('https://luluvdo.com/abc', lambda url: (html, url))
+    assert result.final_url == 'https://cdn.example/master.m3u8'

@@ -7,7 +7,10 @@ from typing import Any
 
 from .db import pgvector
 from .run_repository import queue_selection, request_fingerprint
+from .source_merges import SourceMerges, configuration
+from .source_registry import register_run_source
 from .subject_management import (
+    SubjectManagement,
     enrollment_targets,
     recalculate_subjects,
 )
@@ -46,9 +49,11 @@ class MatchWork:
 
 
 class InteractiveRepository:
-    def __init__(self, database, lease_seconds: int = 1200):
+    def __init__(self, database, lease_seconds: int = 1200, *, source_merge_threshold=None):
         self.database = database
         self.lease_seconds = lease_seconds
+        self.source_merge_threshold = (configuration({'threshold': source_merge_threshold})
+                                       if source_merge_threshold is not None else None)
 
     def claim_detection(self, run_id: str) -> DetectionWork | None:
         owner = str(uuid.uuid4())
@@ -129,6 +134,7 @@ class InteractiveRepository:
                 )
                 self._enqueue_cleanup(cursor, work.run_id)
             elif not groups:
+                register_run_source(cursor, work.run_id)
                 cursor.execute(
                     """UPDATE media_run SET state = 'succeeded', outcome = 'no_faces',
                               completed_at = now(), updated_at = now(), row_version = row_version + 1
@@ -459,6 +465,12 @@ class InteractiveRepository:
                             "representative cleanup is already in progress"
                         )
                 recalculate_subjects(cursor, affected_subjects)
+                if not reused and self.source_merge_threshold is not None:
+                    report = SourceMerges(SubjectManagement(self.database)).auto_merge(
+                        cursor, effective_source_id, run_id, self.source_merge_threshold)
+                    cursor.execute("""UPDATE source_asset SET metadata=jsonb_set(
+                        COALESCE(metadata,'{}'::jsonb),'{automatic_matching}',%s::jsonb)
+                        WHERE source_id=%s""", (json.dumps(report), effective_source_id))
                 cursor.execute(
                     """UPDATE media_run SET retained_source_id=%s,
                               enrollment_completed_at=now(),enrollment_reused=%s
@@ -474,6 +486,7 @@ class InteractiveRepository:
             if cursor.rowcount != 1:
                 connection.rollback()
                 return False
+            register_run_source(cursor, run_id)
             self._enqueue_cleanup(cursor, run_id)
             connection.commit()
             return True

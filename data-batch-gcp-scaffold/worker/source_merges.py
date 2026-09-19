@@ -7,6 +7,7 @@ import json
 import math
 import time
 import uuid
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -20,7 +21,7 @@ MAX_COMPARISONS = MAX_SUBJECTS * (MAX_SUBJECTS - 1) // 2
 
 def scan_budget_error():
     return SubjectError(422, 'background_scan_required',
-                        'The 10-second source scan budget was exceeded. A bounded background scan is required; no partial plan was returned.')
+                        'The scan exceeded its time limit. No merge proposal was created. Please try again.')
 
 
 class PlanningCursor:
@@ -119,7 +120,7 @@ class SourceMerges:
         rows = cursor.fetchall()
         if len(rows) > MAX_SUBJECTS:
             raise SubjectError(422, 'background_scan_required',
-                               f'Source exceeds {MAX_SUBJECTS} subjects / {MAX_COMPARISONS} comparisons; a bounded background scan is required. Nothing was partially scanned.')
+                               f'Source exceeds {MAX_SUBJECTS} subjects / {MAX_COMPARISONS} comparisons; this is beyond the interactive scan limit. No merge proposal was created.')
         members, skipped = [], []
         summaries = {m['subject_id']: m for m in self.subjects._summaries(cursor, [str(r[0]) for r in rows])}
         for sid, embedding, samples, model, version, merged, sources, same, count, start, end, same_model, excluded in rows:
@@ -159,7 +160,7 @@ class SourceMerges:
     def plan(self, source_id, data):
         source_id = subject_uuid(source_id)
         threshold = configuration(data)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 20
         try:
             with self.subjects.transaction() as cursor:
                 members, skipped, dismissed = self._load(PlanningCursor(cursor, deadline), source_id)
@@ -167,6 +168,9 @@ class SourceMerges:
             if error.args and isinstance(error.args[0], dict) and error.args[0].get('C') == '57014':
                 raise scan_budget_error() from error
             raise
+        return self._build_plan(source_id, threshold, members, skipped, dismissed, deadline)
+
+    def _build_plan(self, source_id, threshold, members, skipped, dismissed, deadline):
         scores = pair_scores(members, dismissed)
         by_id = {m['subject_id']: m for m in members}
         groups = []
@@ -233,7 +237,49 @@ class SourceMerges:
                                  'message': 'Retry this unchanged group with its original operation ID to resolve the outcome.'})
         return {'source_id': source_id, 'outcomes': outcomes}
 
-    def _apply_group(self, source_id, threshold, group, actor):
+    def auto_merge(self, cursor, source_id, run_id, threshold, *, actor='automatic-source-matching', scan_budget_seconds=10):
+        """Run once inside new-source enrollment's transaction and advisory lock.
+
+        No intermediate commits: enrollment, merges and audit records retry together.
+        Planning limits leave the complete source enrolled for manual review.
+        """
+        if type(scan_budget_seconds) is not int or not 1 <= scan_budget_seconds <= 300:
+            raise ValueError('Scan budget must be 1–300 seconds')
+        threshold = configuration({'threshold': threshold})
+        source_id = subject_uuid(source_id)
+        cursor.execute('SAVEPOINT automatic_source_matching')
+        cursor.execute('SHOW statement_timeout')
+        previous_timeout = cursor.fetchone()[0]
+        try:
+            deadline = time.monotonic() + scan_budget_seconds
+            members, skipped, dismissed = self._load(PlanningCursor(cursor, deadline), source_id)
+            plan = self._build_plan(source_id, threshold, members, skipped, dismissed, deadline)
+        except Exception as error:
+            timed_out = error.args and isinstance(error.args[0], dict) and error.args[0].get('C') == '57014'
+            if not timed_out and not (isinstance(error, SubjectError) and error.code == 'background_scan_required'):
+                raise
+            cursor.execute('ROLLBACK TO SAVEPOINT automatic_source_matching')
+            cursor.execute('RELEASE SAVEPOINT automatic_source_matching')
+            return {'status': 'manual_review', 'algorithm': ALGORITHM, 'threshold': threshold,
+                    'run_id': run_id, 'reason': 'background_scan_required', 'outcomes': []}
+        cursor.execute("SELECT set_config('statement_timeout', %s, true)", (previous_timeout,))
+        outcomes = []
+        for group in plan['groups']:
+            if group['identity_conflicts'] or group['manual_handling_required']:
+                outcomes.append({'status': 'skipped', 'reason': 'identity_conflict' if group['identity_conflicts'] else 'manual_handling_required',
+                                 'subject_ids': [m['subject_id'] for m in group['members']]})
+                continue
+            group['operation_id'] = str(uuid.uuid5(uuid.UUID(run_id),
+                'automatic-source-merge:' + ALGORITHM + ':' + str(threshold) + ':' +
+                ','.join(sorted(m['subject_id'] for m in group['members']))))
+            result = self._apply_group(source_id, threshold, group, actor, enrollment_cursor=cursor)
+            outcomes.append({'operation_id': group['operation_id'], **result.get('source_merge_failure',
+                {'status': 'merged', 'survivor_id': group['survivor_id'], 'member_count': len(group['members'])})})
+        cursor.execute('RELEASE SAVEPOINT automatic_source_matching')
+        return {'status': 'completed', 'algorithm': ALGORITHM, 'threshold': threshold,
+                'run_id': run_id, 'outcomes': outcomes, 'skipped': plan['skipped']}
+
+    def _apply_group(self, source_id, threshold, group, actor, *, enrollment_cursor=None):
         members = group['members']
         if not 2 <= len(members) <= 50:
             raise SubjectError(422, 'manual_handling_required', 'Groups must have 2–50 members; larger groups require manual handling.')
@@ -267,7 +313,7 @@ class SourceMerges:
             if identity_conflicts(current) and not group['review_identity_conflicts']:
                 raise SubjectError(409, 'identity_conflict', 'Review conflicting identity details and the chosen survivor explicitly.')
 
-        with self.subjects.transaction(write=True) as cursor:
+        with (nullcontext(enrollment_cursor) if enrollment_cursor is not None else self.subjects.transaction(write=True)) as cursor:
             operation, fingerprint, replay = self.subjects._operation(
                 cursor, sid, 'combine', {**payload, 'source_merge': scope}, actor)
             if replay is not None:
