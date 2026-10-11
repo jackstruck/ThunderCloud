@@ -1,0 +1,16 @@
+# Dockerfile.acquisition builds from the repository root. Send only its inputs.
+*
+!bulk-download/
+!bulk-download/pyproject.toml
+!bulk-download/src/
+!bulk-download/src/**
+!data-batch-gcp-scaffold/
+!data-batch-gcp-scaffold/worker/
+!data-batch-gcp-scaffold/worker/**
+**/.env
+**/.env.*
+**/.secrets
+**/.secrets/**
+**/__pycache__
+**/__pycache__/**
+**/*.pyc

@@ -22,7 +22,7 @@ prefix; cleanup deletes only eligible exact generations in the managed prefixes.
 
 1. Python 3.12 and FFmpeg.
 2. Google Application Default Credentials for the developer account.
-3. Terraform 1.5+ and `gcloud` for provisioning/verification.
+3. Terraform 1.6+, `gcloud`, Docker with Buildx, and GNU Make for cloud releases.
 4. The CSEK file at `/workspaces/ThunderCloud/.secrets/gcs-csek.base64`, mode `0600`.
 5. Licensed SCRFD and AdaFace/CVLFace ONNX checkpoints. Model files are intentionally ignored by Git and are not downloaded automatically.
 
@@ -70,6 +70,113 @@ python scripts/apply_db_migrations.py \
 ```
 
 The worker uses the developer IAM database user after bootstrap; it does not use a static database password.
+
+## Deploy the current systems
+
+Use the existing Terraform state and `terraform.tfvars`; never copy the example over
+a configured deployment. Run these commands from the repository root. Choose a new
+`RELEASE` tag for each release, then authenticate Docker to the registry:
+
+```bash
+cd /workspaces/ThunderCloud
+export RELEASE=YOUR_UNIQUE_RELEASE_TAG
+export IMAGE_PREFIX="$(terraform -chdir=data-batch-gcp-scaffold/terraform output -raw artifact_registry_image_prefix)"
+export REGION="${IMAGE_PREFIX%%-docker.pkg.dev/*}"
+gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+```
+
+The root [Makefile](../Makefile) only builds and pushes images. It uses the scaffold
+context for the console and GPU images and the repository-root context for the
+acquisition image. The acquisition Dockerfile has its own allowlisted context so
+local data and credentials are not sent to the builder. Docker must be able to
+push to this Artifact Registry repository. Record the digest printed by each push;
+the commands below also read it back from the registry.
+
+### Console and CPU ingest job
+
+The same `console_image` pin deploys the `face-console` Cloud Run service and the
+`face-ingest-drain` Cloud Run job. Publish the CPU image and read its immutable
+digest:
+
+```bash
+make publish-console RELEASE="$RELEASE" IMAGE_PREFIX="$IMAGE_PREFIX"
+CONSOLE_DIGEST="$(docker buildx imagetools inspect "$IMAGE_PREFIX/console:$RELEASE" --format '{{.Digest}}')"
+printf 'console_image = "%s/console@%s"\n' "$IMAGE_PREFIX" "$CONSOLE_DIGEST"
+```
+
+Set `console_image` in `data-batch-gcp-scaffold/terraform/terraform.tfvars` to the
+printed value. For a new installation, also configure `enable_phase1_console`,
+`console_origin`, and `approved_iap_member` as described below. The image update
+affects both the service and the ingest job.
+
+### Interactive GPU job
+
+The `face-interactive-gpu` job uses `interactive_gpu_image` when set, otherwise
+`cloud_run_worker_image`. Build the CUDA image only after the licensed model files
+and `models/SHA256SUMS` are present; its Dockerfile verifies them during the build.
+
+```bash
+make publish-gpu RELEASE="$RELEASE" IMAGE_PREFIX="$IMAGE_PREFIX"
+GPU_DIGEST="$(docker buildx imagetools inspect "$IMAGE_PREFIX/worker:$RELEASE" --format '{{.Digest}}')"
+printf 'interactive_gpu_image = "%s/worker@%s"\n' "$IMAGE_PREFIX" "$GPU_DIGEST"
+```
+
+Set `interactive_gpu_image` in `terraform.tfvars` to the printed value. Keep the
+required `cloud_run_worker_image` pin valid; it is the fallback if the interactive
+pin is null. The local [bulk downloader](../bulk-download/README.md) is a separate
+CLI and has no Cloud Run service to deploy.
+
+### Optional cloud acquisition batch
+
+`face-acquisition-batch` exists only when `acquisition_batch_image` is set. Its
+image extends the console image, so use the *currently intended* console digest
+from `terraform.tfvars` as `CONSOLE_IMAGE`. If releasing both, publish the console
+first and use its new digest. Do not use the Dockerfile's historical default base.
+
+```bash
+export CONSOLE_IMAGE="$IMAGE_PREFIX/console@REPLACE_WITH_CONSOLE_DIGEST"
+make publish-acquisition RELEASE="$RELEASE" IMAGE_PREFIX="$IMAGE_PREFIX" CONSOLE_IMAGE="$CONSOLE_IMAGE"
+ACQUISITION_DIGEST="$(docker buildx imagetools inspect "$IMAGE_PREFIX/acquisition-batch:$RELEASE" --format '{{.Digest}}')"
+printf 'acquisition_batch_image = "%s/acquisition-batch@%s"\n' "$IMAGE_PREFIX" "$ACQUISITION_DIGEST"
+```
+
+Set `acquisition_batch_image` in `terraform.tfvars` to the printed value. Review
+`acquisition_batch_state_object` for the selected batch before any execution.
+Provisioning or updating the job does not start a batch; start one only with the
+selection and checkpoint procedure under [Cloud acquisition batch](#cloud-acquisition-batch).
+
+### Database and Terraform rollout
+
+If the release changes the database schema, apply the ordered migrations and
+grants from [Bootstrap Cloud SQL](#bootstrap-cloud-sql) before deploying its
+images. Then review one Terraform plan covering the intended image pins and any
+other configuration changes:
+
+```bash
+cd /workspaces/ThunderCloud/data-batch-gcp-scaffold/terraform
+terraform init
+terraform plan -out face-batch.tfplan
+terraform show face-batch.tfplan
+terraform apply face-batch.tfplan
+```
+
+Apply only after reviewing all proposed changes. Terraform also updates the
+Artifact Registry KEEP policy for the configured image digests; add any rollback
+digests to `rollback_image_versions` before an older version loses protection.
+Check the live service and jobs after the rollout, where enabled:
+
+```bash
+gcloud run services describe face-console --project teak-banner-dome --region us-central1
+gcloud run jobs describe face-ingest-drain --project teak-banner-dome --region us-central1
+gcloud run jobs describe face-interactive-gpu --project teak-banner-dome --region us-central1
+# Only if acquisition_batch_image is configured:
+gcloud run jobs describe face-acquisition-batch --project teak-banner-dome --region us-central1
+```
+
+Compare the reported image digests with `terraform.tfvars`. Check the live
+database migration ledger and run the relevant checks in [Tests](#tests) before
+submitting new work. One-off maintenance and historical backfill jobs have their
+own procedures; they are outside this release path.
 
 ## Local operator commands
 
@@ -259,13 +366,8 @@ python scripts/apply_db_migrations.py \
   --app-user FACE_GPU_WORKER_IAM_DATABASE_USER
 ```
 
-Build a CPU console/ingestion image separately from the GPU image, push both to the
-existing Artifact Registry repository, and put immutable digests in Terraform:
-
-```bash
-docker build -f Dockerfile.console -t CONSOLE_IMAGE_TAG .
-docker build -t GPU_IMAGE_TAG .
-```
+Build the CPU and GPU images separately and pin their immutable digests as shown
+under [Deploy the current systems](#deploy-the-current-systems).
 
 Set `enable_phase1_console`, `console_image`, `console_origin`, and
 `approved_iap_member` only after reviewing the plan. Pin `interactive_gpu_image` to the released GPU image. `cloud_run_worker_image` is
