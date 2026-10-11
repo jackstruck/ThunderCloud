@@ -1,6 +1,8 @@
 import itertools
 import math
 import random
+import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,3 +47,63 @@ def test_model_partitions_and_hard_dismissal():
                for sid, model in [('a', 'm'), ('b', 'm'), ('c', 'other')]]
     assert pair_scores(members, set()) == {('a', 'b'): 1.0}
     assert pair_scores(members, {('a', 'b')}) == {}
+
+
+@pytest.mark.parametrize('count,automatic,accepted', [
+    (400, False, True), (401, False, False),
+    (1000, True, True), (1001, True, False),
+])
+def test_source_loading_has_separate_automatic_limit(count, automatic, accepted):
+    from worker.source_merges import SourceMerges, AUTO_MAX_SUBJECTS
+    rows = [(str(uuid.uuid4()), '[1]', 1, 'model', 1, None,
+             1, True, 1, 0, 1000, True, True) for _ in range(count)]
+
+    class Cursor:
+        def execute(self, query, args=()):
+            self.query = query
+            if 'WITH selected' in query:
+                assert args[1] == (1001 if automatic else 401)
+
+        def fetchone(self):
+            return ('source',)
+
+        def fetchall(self):
+            return rows if 'WITH selected' in self.query else []
+
+    service = SourceMerges(SimpleNamespace(_summaries=lambda c, ids: [
+        {'subject_id': sid} for sid in ids]))
+    kwargs = {'max_subjects': AUTO_MAX_SUBJECTS} if automatic else {}
+    if accepted:
+        members, skipped, _ = service._load(Cursor(), 'source', **kwargs)
+        assert not members
+        assert len(skipped) == count
+    else:
+        with pytest.raises(SubjectError) as error:
+            service._load(Cursor(), 'source', **kwargs)
+        assert error.value.code == 'background_scan_required'
+
+
+@pytest.mark.parametrize('elapsed,expected', [(45, 'completed'), (61, 'manual_review')])
+def test_automatic_planning_uses_sixty_second_budget(monkeypatch, elapsed, expected):
+    from worker import source_merges
+    clock = [100.0]
+    monkeypatch.setattr(source_merges.time, 'monotonic', lambda: clock[0])
+
+    class Cursor:
+        def execute(self, query, args=()):
+            pass
+
+        def fetchone(self):
+            return ('0',)
+
+    service = source_merges.SourceMerges(None)
+
+    def load(cursor, source_id, *, max_subjects):
+        assert max_subjects == 1000
+        clock[0] += elapsed
+        cursor.execute('SELECT 1')
+        return [], [], set()
+
+    monkeypatch.setattr(service, '_load', load)
+    result = service.auto_merge(Cursor(), str(uuid.uuid4()), str(uuid.uuid4()), .4)
+    assert result['status'] == expected

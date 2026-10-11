@@ -2615,11 +2615,30 @@ def test_automatic_source_matching_bounds_leave_enrollment_intact(db, monkeypatc
     RunRepository(db).select(run, groups, 1, [assignment([g]) for g in groups])
     worker, _ = processor(db)
     worker.repository = InteractiveRepository(db, source_merge_threshold=.5)
-    monkeypatch.setattr(source_merges, 'MAX_SUBJECTS', 2)
+    monkeypatch.setattr(source_merges, 'AUTO_MAX_SUBJECTS', 2)
     assert worker.match(run)
     source = sql(db, 'SELECT retained_source_id FROM media_run WHERE run_id=%s', (run,))[0][0]
     assert sql(db, 'SELECT count(DISTINCT subject_id),count(*) FROM subject_example WHERE source_id=%s', (source,))[0] == [3, 3]
     assert sql(db, "SELECT metadata->'automatic_matching'->>'reason' FROM source_asset WHERE source_id=%s", (source,))[0][0] == 'background_scan_required'
+
+
+def test_automatic_matching_can_exceed_interactive_subject_limit(db, monkeypatch):
+    from worker import source_merges
+    source, ids = source_merge_fixture(db, [0, .01, 2, 2.01])
+    service = SubjectManagement(db)
+    matching = source_merges.SourceMerges(service)
+    monkeypatch.setattr(source_merges, 'MAX_SUBJECTS', 2)
+    with pytest.raises(SubjectError) as error:
+        matching.plan(source, {'threshold': .4})
+    assert error.value.code == 'background_scan_required'
+    before = sql(db, 'SELECT example_id FROM subject_example ORDER BY example_id')
+    with service.transaction(write=True) as cursor:
+        report = matching.auto_merge(cursor, source, str(uuid.uuid4()), .4)
+    assert report['status'] == 'completed'
+    assert len(report['outcomes']) == 2
+    assert all(group['status'] == 'merged' for group in report['outcomes'])
+    assert sql(db, 'SELECT count(DISTINCT subject_id) FROM subject_example WHERE source_id=%s', (source,))[0][0] == 2
+    assert sql(db, 'SELECT example_id FROM subject_example ORDER BY example_id') == before
 
 
 def test_automatic_matching_respects_identity_conflicts_and_dismissals(db):
@@ -2999,3 +3018,50 @@ def test_pooled_enrollment_commits_gallery_cleanup_receipts_independently(db, mo
         assert sql(pooled, 'SELECT count(*) FROM subject_example WHERE submission_group_id=ANY(%s::uuid[])', (groups,))[0][0] == 0
     finally:
         pooled.close()
+
+
+def test_matching_reclaims_expired_lease_once_and_fences_previous_owner(db):
+    from concurrent.futures import ThreadPoolExecutor
+    from worker.ingest_repository import IngestRepository
+    run, groups = make_run(db, 2)
+    RunRepository(db).select(run, groups, 1, [assignment([g]) for g in groups])
+    repo = InteractiveRepository(db)
+    original = repo.claim_matching(run)
+    assert original is not None
+    assert repo.claim_matching(run) is None
+    sql(db, "UPDATE run_operation SET lease_expires_at=now()-interval '1 second', updated_at=now()-interval '10 minutes' WHERE run_id=%s AND kind='match'", (run,))
+    assert IngestRepository(db).recover_processing() == [(run, 'match')]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(lambda _: repo.claim_matching(run), range(2)))
+    winners = [claim for claim in claims if claim is not None]
+    assert len(winners) == 1
+    assert winners[0].lease_owner != original.lease_owner
+    assert sql(db, "SELECT attempt_count,lease_expires_at>now() FROM run_operation WHERE run_id=%s AND kind='match'", (run,))[0] == [2, True]
+    assert not repo.complete_matching(run, original.lease_owner, original.groups, [[], []])
+    assert sql(db, 'SELECT state FROM media_run WHERE run_id=%s', (run,))[0][0] == 'matching'
+    # Expire the reclaimed lease and recover through actual enrollment.
+    sql(db, "UPDATE run_operation SET lease_expires_at=now()-interval '1 second' WHERE run_id=%s AND kind='match'", (run,))
+    worker, _ = processor(db)
+    assert worker.match(run)
+    assert sql(db, 'SELECT state FROM media_run WHERE run_id=%s', (run,))[0][0] == 'succeeded'
+    assert sql(db, "SELECT attempt_count FROM run_operation WHERE run_id=%s AND kind='match'", (run,))[0][0] == 3
+    assert sql(db, 'SELECT count(*) FROM subject_example WHERE submission_group_id=ANY(%s::uuid[])', (groups,))[0][0] == 2
+
+
+def test_matching_expired_lease_honors_cancellation_and_retry_cutoff(db):
+    from worker.ingest_repository import IngestRepository
+    run, groups = make_run(db, 1)
+    RunRepository(db).select(run, groups, 1, [assignment(groups)])
+    repo = InteractiveRepository(db)
+    assert repo.claim_matching(run) is not None
+    sql(db, "UPDATE run_operation SET lease_expires_at=now()-interval '1 second' WHERE run_id=%s AND kind='match'", (run,))
+    sql(db, 'UPDATE media_run SET cancel_requested=true WHERE run_id=%s', (run,))
+    assert repo.claim_matching(run) is None
+    sql(db, 'UPDATE media_run SET cancel_requested=false WHERE run_id=%s', (run,))
+    sql(db, "UPDATE run_operation SET attempt_count=3 WHERE run_id=%s AND kind='match'", (run,))
+    assert repo.claim_matching(run) is None
+    assert IngestRepository(db).recover_processing() == []
+    assert sql(db, 'SELECT state,error_code,retryable FROM media_run WHERE run_id=%s', (run,))[0] == ['failed', 'processing_lease_expired', True]
+    # Explicit operator retry remains available after the automatic retry cutoff.
+    assert RunRepository(db).retry(run)['state'] == 'matching'
+    assert repo.claim_matching(run) is not None

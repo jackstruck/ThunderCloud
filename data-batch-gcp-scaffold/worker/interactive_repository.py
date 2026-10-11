@@ -235,8 +235,11 @@ class InteractiveRepository:
                           attempt_count = attempt_count + 1, updated_at = now()
                    FROM media_run run
                    WHERE operation.run_id = %s AND operation.run_id = run.run_id
-                     AND operation.kind = 'match' AND operation.state = 'queued'
-                     AND run.state = 'matching'
+                     AND operation.kind = 'match'
+                     AND (operation.state = 'queued' OR
+                          (operation.state = 'leased' AND operation.lease_expires_at < now()
+                           AND operation.attempt_count < 3))
+                     AND run.state = 'matching' AND NOT run.cancel_requested
                    RETURNING operation.operation_id, run.handling_policy,
                              run.object_name, run.object_generation, run.content_type,
                              run.source_sha256, run.object_bytes""",

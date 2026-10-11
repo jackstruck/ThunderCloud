@@ -17,6 +17,7 @@ ALGORITHM = 'complete-linkage-v1'
 FORMAT_VERSION = 1
 MAX_SUBJECTS = 400
 MAX_COMPARISONS = MAX_SUBJECTS * (MAX_SUBJECTS - 1) // 2
+AUTO_MAX_SUBJECTS = 1000
 
 
 def scan_budget_error():
@@ -103,7 +104,8 @@ class SourceMerges:
         self.subjects = subjects
         self.apply_enabled = apply_enabled
 
-    def _load(self, cursor, source_id, ids=None):
+    def _load(self, cursor, source_id, ids=None, *, max_subjects=None):
+        max_subjects = MAX_SUBJECTS if max_subjects is None else max_subjects
         cursor.execute('SELECT source_id FROM source_asset WHERE source_id=%s', (source_id,))
         if cursor.fetchone() is None:
             raise SubjectError(404, 'source_not_found', 'Source not found.')
@@ -114,11 +116,11 @@ class SourceMerges:
                 JOIN (SELECT DISTINCT subject_id FROM subject_example WHERE source_id=%s) own
                   USING(subject_id) WHERE s.merged_into_subject_id IS NULL
                 ORDER BY s.subject_id LIMIT %s'''
-            parameters = (source_id, MAX_SUBJECTS + 1)
+            parameters = (source_id, max_subjects + 1)
         else:
             selected = '''SELECT subject_id FROM subject WHERE subject_id=ANY(%s::uuid[])
                 ORDER BY subject_id LIMIT %s'''
-            parameters = (ids, MAX_SUBJECTS + 1)
+            parameters = (ids, max_subjects + 1)
         cursor.execute(f'''WITH selected AS MATERIALIZED ({selected})
             SELECT s.subject_id,s.canonical_embedding::text,s.sample_count,s.model_version,
             s.row_version,s.merged_into_subject_id,
@@ -128,9 +130,9 @@ class SourceMerges:
             GROUP BY s.subject_id ORDER BY s.subject_id''',
             (*parameters, source_id))
         rows = cursor.fetchall()
-        if len(rows) > MAX_SUBJECTS:
+        if len(rows) > max_subjects:
             raise SubjectError(422, 'background_scan_required',
-                               f'Source exceeds {MAX_SUBJECTS} subjects / {MAX_COMPARISONS} comparisons; this is beyond the interactive scan limit. No merge proposal was created.')
+                               f'Source exceeds {max_subjects} subjects / {max_subjects * (max_subjects - 1) // 2} comparisons; this is beyond the scan limit. No merge proposal was created.')
         members, skipped = [], []
         summaries = {m['subject_id']: m for m in self.subjects._summaries(cursor, [str(r[0]) for r in rows])}
         for sid, embedding, samples, model, version, merged, sources, same, count, start, end, same_model, excluded in rows:
@@ -247,7 +249,7 @@ class SourceMerges:
                                  'message': 'Retry this unchanged group with its original operation ID to resolve the outcome.'})
         return {'source_id': source_id, 'outcomes': outcomes}
 
-    def auto_merge(self, cursor, source_id, run_id, threshold, *, actor='automatic-source-matching', scan_budget_seconds=10):
+    def auto_merge(self, cursor, source_id, run_id, threshold, *, actor='automatic-source-matching', scan_budget_seconds=60):
         """Run once inside new-source enrollment's transaction and advisory lock.
 
         No intermediate commits: enrollment, merges and audit records retry together.
@@ -262,7 +264,8 @@ class SourceMerges:
         previous_timeout = cursor.fetchone()[0]
         try:
             deadline = time.monotonic() + scan_budget_seconds
-            members, skipped, dismissed = self._load(PlanningCursor(cursor, deadline), source_id)
+            members, skipped, dismissed = self._load(
+                PlanningCursor(cursor, deadline), source_id, max_subjects=AUTO_MAX_SUBJECTS)
             plan = self._build_plan(source_id, threshold, members, skipped, dismissed, deadline)
         except Exception as error:
             timed_out = error.args and isinstance(error.args[0], dict) and error.args[0].get('C') == '57014'
