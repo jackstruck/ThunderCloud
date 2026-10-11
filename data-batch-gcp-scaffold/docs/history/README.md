@@ -8,6 +8,13 @@ removed on 2026-09-15 with user approval. Tracked originals remain in Git histor
 The dated release and cutover records are retained for rollback and audit context;
 their counts, digests, and paths describe the original revisions.
 
+The [within-source matching design](2026-09-15-within-source-bulk-matching-design.md)
+is an archived proposal. Its implementation and current controls are documented in
+[source merges](../source-merges.md).
+The [platform contracts](2026-09-10-platform-contracts.md) and
+[cutover review](2026-09-10-platform-cutover-review.md) describe the schema 024
+release and acceptance at that time; they are not current configuration guides.
+
 Current guidance lives in [README](../../README.md),
 [Architecture](../../ARCHITECTURE.md), [Operations](../../OPERATIONS.md), and
 [Roadmap](../../ROADMAP.md). See [cleanup results](../cleanup-candidates.md).

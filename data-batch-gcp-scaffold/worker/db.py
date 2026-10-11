@@ -70,7 +70,7 @@ class Database:
                     raise ValueError("Database pool size and timeout must be positive")
                 self._pool = QueuePool(
                     self._open, pool_size=size, max_overflow=0, timeout=timeout,
-                    recycle=1800, pre_ping=True, use_lifo=True,
+                    recycle=2700, pre_ping=True, use_lifo=True,
                     dialect=PGDialect_pg8000(dbapi=pg8000), reset_on_return=None,
                 )
                 event.listen(self._pool, "reset", self._reset)

@@ -1,6 +1,8 @@
-# Current Google Cloud references used for this scaffold
+# Google Cloud reference links reviewed 2026-09-02
 
-Checked September 2, 2026.
+These links supported the original scaffold design. Check the current provider and
+product documentation before changing infrastructure; this list is not a record
+of the deployed configuration.
 
 - Cloud Storage CMEK: https://docs.cloud.google.com/storage/docs/encryption/using-customer-managed-keys
 - Cloud Storage Terraform resource / soft delete / encryption enforcement: https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket.html

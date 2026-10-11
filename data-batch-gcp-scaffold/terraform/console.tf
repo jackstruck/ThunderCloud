@@ -454,7 +454,7 @@ resource "google_cloud_run_v2_job" "interactive_gpu" {
 
         env {
           name  = "FACE_MAX_PROBE_VIDEO_DURATION_SECONDS"
-          value = "1800"
+          value = "2700"
         }
 
         resources {

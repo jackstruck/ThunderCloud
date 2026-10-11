@@ -5,6 +5,20 @@ were excluded from cleanup; their contents and retention are unchanged.
 
 ## Removed
 
+The 2026-10-11 cleanup also removed the completed
+`docs/performance-implementation-plan.md` after retaining its rollout and capacity
+decisions in the dated performance release record and `OPERATIONS.md`. The duplicate
+root `user-links.txt` was removed; `bulk-download/input/hotscope_users.txt` remains
+the downloader input. `SESSION_HANDOFF.md` became a new-developer start guide; its
+older operational detail remains in Git history. The full-sweep example gallery
+repair plan remains available. The ignored within-source matching proposal moved
+to `docs/history/2026-09-15-within-source-bulk-matching-design.md`, clearly marked
+as historical. Current instructions remain in `docs/source-merges.md`.
+Recreatable local environments, SDK files, Terraform provider downloads, and an old
+partial media download were cleared. A later `.local/` cleanup removed only the
+recreatable `diagnose-env/` and generated `source-merges-provider-schema.json`.
+The protected CSV and other private operational records remain.
+
 | Files | Reason |
 | --- | --- |
 | `docs/history/IMPLEMENTATION_PLAN.md`, `BULK_DOWNLOAD_BACKFILL_PLAN.md`, `planning.md`, `phase1-review.md` (all under `docs/history/`) | Superseded plans and initial review. Tracked originals remain in Git history. |

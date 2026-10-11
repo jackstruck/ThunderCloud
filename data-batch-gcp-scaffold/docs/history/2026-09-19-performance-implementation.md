@@ -1,6 +1,9 @@
 # Platform and import performance implementation
 
-Implementation is complete against [the reviewed plan](../performance-implementation-plan.md).
+Implementation and pilot verification are complete. The reviewed implementation
+plan was removed from the checkout during the 2026-10-11 documentation cleanup;
+its tracked original remains in Git history. This record contains the release,
+verification, and capacity decisions.
 
 ## Platform software release
 

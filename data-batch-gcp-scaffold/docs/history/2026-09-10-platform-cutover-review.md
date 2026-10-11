@@ -1,5 +1,9 @@
 # Platform cutover review — 2026-09-09
 
+Historical schema 024 cutover record. The status, images, plans, and recovery
+instructions below describe that release; check the live system and current
+[operations guide](../../OPERATIONS.md) before taking action.
+
 **Status: complete. Deployed and reopened on 2026-09-10; user sign-in and UI review confirmed on 2026-09-11.**
 Production migration, deployment and the archive processing/cleanup acceptance run
 passed. Application logins and both schedulers are restored. Recovery export and
@@ -57,7 +61,7 @@ The separate archive-retirement unlock plan changes only that job's Terraform
 regenerate the main release plan against the resulting state and confirm the same
 reviewed changes. Never apply a stale saved plan after another plan changes state.
 
-The standalone [temporary infrastructure module](../maintenance/infrastructure/README.md)
+The standalone [temporary infrastructure module](../../maintenance/infrastructure/README.md)
 adds nine resources: a dedicated migration identity, narrowly scoped access to the
 admin-password secret and Cloud SQL connector, attachment permission, a protected
 regional CMEK artifact bucket and its access/key bindings. It owns no application

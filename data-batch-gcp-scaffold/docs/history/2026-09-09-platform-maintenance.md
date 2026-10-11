@@ -5,7 +5,7 @@ No production migration, deployment, source split, or queue mutation was perform
 
 ## Delivered code and contracts
 
-- `docs/platform-contracts.md` maps the final responsibilities and field/API changes,
+- `docs/history/2026-09-10-platform-contracts.md` maps the cutover responsibilities and field/API changes,
   including canonical versioned suggestion dismissals, one membership authority,
   durable operator handoff receipts, and saved result versions.
 - `maintenance/migrations.py` provides contiguous ordered migrations, SHA-256 file

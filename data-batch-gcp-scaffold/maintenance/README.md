@@ -5,12 +5,12 @@ containerized `validate` and `rehearse-migration`, guarded `apply-migration`, an
 build/start/status/cleanup orchestration. Durable cloud staging, execution, status,
 resume and scoped cleanup are implemented; production apply passed on 2026-09-10.
 Local validation and production acceptance remain distinct. See
-[cutover results](../docs/platform-cutover-review.md).
+[cutover results](../docs/history/2026-09-10-platform-cutover-review.md).
 
 Run from the application directory using the development Python environment:
 
 ```bash
-.test-venv/bin/python -m maintenance.local build \
+.venv/bin/python -m maintenance.local build \
   --artifacts /workspaces/ThunderCloud/.local/maintenance-build-EXECUTION
 ```
 
@@ -24,13 +24,13 @@ must be recorded separately when preparing cloud execution.
 Start a detached validation, supplying the exact ID printed by the build:
 
 ```bash
-.test-venv/bin/python -m maintenance.local start \
+.venv/bin/python -m maintenance.local start \
   --execution-id EXECUTION --image sha256:IMAGE_ID \
   --artifacts /workspaces/ThunderCloud/.local/EXECUTION \
   --retention-deadline YYYY-MM-DD
-.test-venv/bin/python -m maintenance.local status \
+.venv/bin/python -m maintenance.local status \
   --artifacts /workspaces/ThunderCloud/.local/EXECUTION
-.test-venv/bin/python -m maintenance.local cleanup \
+.venv/bin/python -m maintenance.local cleanup \
   --artifacts /workspaces/ThunderCloud/.local/EXECUTION
 ```
 
@@ -103,7 +103,7 @@ fresh installation, and exercises a committed baseline/reconnect/resume. It runs
 no destructive test fixtures against these copies.
 
 ```bash
-.test-venv/bin/python -m maintenance.local run \
+.venv/bin/python -m maintenance.local run \
   --procedure rehearse-migration --execution-id EXECUTION \
   --image sha256:IMAGE_ID --postgres-image pgvector/pgvector@sha256:PG_DIGEST \
   --backup /protected/backup.dump --backup-receipt /protected/backup-receipt.json \
@@ -128,7 +128,7 @@ then applies and checks runtime grants. It never pauses or reopens submissions i
 An explicit `--resume` retains the prior attempt and requires the same execution,
 image, migration manifest and reviewed plan. Committed migrations are verified and
 skipped. A refused precondition or failed verification stops the procedure. The cloud execution and durable reporting procedure passed production migration
-on 2026-09-10. See [cutover results](../docs/platform-cutover-review.md) and the
+on 2026-09-10. See [cutover results](../docs/history/2026-09-10-platform-cutover-review.md) and the
 [cloud launch/status/cleanup instructions](../docs/history/2026-09-09-platform-maintenance.md).
 
 For code-only image refreshes, `build --base-build /protected/PREVIOUS_BUILD`

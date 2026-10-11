@@ -88,8 +88,8 @@ exclusion. Stored single-source canonical vectors must be finite, nonzero, 512-d
 with positive matching sample counts and consistent example models. Suggested survivors
 have the most current examples, then the smallest subject ID.
 
-Each source scan has a 400-current-subject ceiling (including excluded candidates),
-at most 79,800 pair comparisons, and a 10-second elapsed budget. Remaining SQL time
+Each interactive source scan has a 400-current-subject ceiling (including excluded
+candidates), at most 79,800 pair comparisons, and a 20-second elapsed budget. Remaining SQL time
 is bounded at each query; grouping is checked before a plan is returned. An oversized
 or timed-out source returns `background_scan_required`, with no partial plan. Bounded
 background scanning is a separately reviewed future extension. Proposals over 50
@@ -158,7 +158,7 @@ there is no historical-library sweep.
 
 The same model, source boundary, version, exclusion, dismissed-pair, and identity checks
 used by operator merges apply. Conflicting identities and groups over 50 members stay
-separate for manual review. Sources beyond the 400-subject/10-second planning bound
+separate for manual review. Sources beyond the 1,000-subject/60-second planning bound
 finish enrollment without automatic merges. Each source keeps an `automatic_matching`
 report in its metadata; successful merges retain the normal audit and separation records.
 
@@ -198,4 +198,5 @@ prepopulated report containing only the chosen sources, with matching
 `scan_budget_seconds` and `retry_from_backfill_id` fields. Under the merge lock,
 only original `manual_review/background_scan_required` reports with no merge
 outcomes may be retried. Successful reports remain idempotent, and merge history
-is checked again. Uploads retain their default 10-second scan budget.
+is checked again. This historical-backfill setting does not change the separate
+60-second automatic enrollment or 20-second interactive planning budgets.

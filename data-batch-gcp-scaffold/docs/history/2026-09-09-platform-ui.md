@@ -1,7 +1,7 @@
 # Platform implementation: local UI milestone — 2026-09-09
 
 Status at this milestone: implemented and validated locally; not deployed.
-See [the completed cutover](../platform-cutover-review.md) for final deployment and acceptance.
+See [the completed cutover](2026-09-10-platform-cutover-review.md) for deployment and acceptance at that time.
 
 ## Baseline and changes
 

@@ -12,5 +12,5 @@ are removed. Recovery artifacts were exported and then removed at the user’s r
 2026-09-10, together with the remaining three storage/access resources. Terraform reports no drift. The user confirmed browser sign-in and the requested UI changes on 2026-09-11,
 completing acceptance.
 
-See [the cutover results](../platform-cutover-review.md) for current image pins,
+See [the cutover results](2026-09-10-platform-cutover-review.md) for historical image pins,
 verification details, protected evidence locations, and recovery instructions.

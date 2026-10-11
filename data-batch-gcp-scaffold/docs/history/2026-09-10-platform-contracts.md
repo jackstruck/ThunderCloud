@@ -1,6 +1,8 @@
-# Final platform contracts — deployed 2026-09-10
+# Platform contracts at the 2026-09-10 cutover
 
-These contracts describe the schema 024 release. See [production cutover and acceptance](platform-cutover-review.md).
+These contracts describe the historical schema 024 release. See
+[production cutover and acceptance](2026-09-10-platform-cutover-review.md).
+For current behavior, start with [architecture](../../ARCHITECTURE.md).
 
 ## Ownership and retained evidence
 

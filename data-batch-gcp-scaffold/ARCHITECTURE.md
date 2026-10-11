@@ -1,8 +1,10 @@
 # Platform architecture
 
-This describes the consolidated framework with schema 026. The original cutover
-used schema 024; subsequent releases added exact-content reuse and exclusions.
-See [cutover results and acceptance status](docs/platform-cutover-review.md).
+This describes the schema 027 application and its durable import queue. Verify the
+live migration ledger and deployed configuration before an operational change.
+For current procedures, see [operations](OPERATIONS.md); the
+[schema 024 cutover record](docs/history/2026-09-10-platform-cutover-review.md)
+is historical evidence.
 
 ## Inputs and processing
 
@@ -11,18 +13,23 @@ Browser uploads, supported links, and operator archive receipts enter the same
 runs with explicit handling and selection policies. Receipt request keys make a
 retried operator handoff idempotent.
 
-The IAP-protected `face-console` service handles browser requests. The
-`face-ingest-drain` CPU job acquires media; `face-interactive-gpu` performs detection,
-tracking, quality selection, embedding, and the requested search or enrollment.
-Leases, retries, cancellation, and scheduled reconciliation belong to the shared
-run framework. There is no separate archive writer or rollout/work-item queue in
-this release.
+The IAP-protected `face-console` service handles browser requests.
+`face-acquisition-batch` discovers and archives videos for profile imports. Its
+handoff enters the PostgreSQL `import_queue`, where leased dispatch waits for
+bounded processing capacity and reserves a slot for interactive work.
+`face-ingest-drain` dispatches queued imports and acquires media for ordinary
+runs. `face-interactive-gpu` performs detection, tracking, quality selection,
+embedding, and the requested search or enrollment. The ordinary `run_operation`
+ledger still owns fetch, processing, and cleanup work. Leases, retries,
+cancellation, and scheduled reconciliation cover both handoff and run processing.
 
 SCRFD detection, ByteTrack tracking, and fixed AdaFace embeddings produce face
 tracks and aggregate embeddings. These are inference operations, not model training.
 Search compares compatible subjects and records similarity-ranked snapshots.
 For new content, enrollment creates subjects from manually selected groups or, for unattended
-`all_tracks` selection, one subject per detected track. Stable assignment IDs and
+`all_tracks` selection, initially one subject per detected track. Eligible subjects
+within the same new source are then grouped at the configured cosine threshold.
+Stable assignment IDs and
 unique example origins prevent duplicate enrollment after retries. Similarity does
 not decide enrollment ownership; explicit corrections move examples or merge subjects.
 Verified exact-content repeats reuse existing enrollment across source URLs; the
@@ -145,18 +152,15 @@ connector-managed TLS, and private networking. Runtime service identities and jo
 invocation permissions remain scoped to their tasks.
 
 The ordered migration runner uses checksummed versions, an advisory lock, verified
-baseline adoption, and the same migrations for fresh setup and upgrades. Migration
-022 requires exact archive generations; absent provenance must be resolved before
-cutover. The maintenance workflow rehearses on an isolated backup copy and compares
-schema, grants, data preservation, and recovery. Migration audit copies of retired
-fields and tables are not created. Protected backups, verification receipts, and
-existing correction history retain their separate purposes.
+baseline adoption, and the same migrations for fresh setup and upgrades. The
+maintenance workflow rehearses on an isolated backup copy and compares schema,
+grants, data preservation, and recovery. Preserve backups, verification receipts,
+queue/checkpoint records, and existing correction history according to their
+separate roles.
 
-Deployment requires pausing submissions, handling outstanding work, migrating and
-deploying the final components together, and verifying access and processing before
-reopening. Recovery restores matching application images and the pre-cutover data.
-See [operations](OPERATIONS.md), [contracts](docs/platform-contracts.md), and
-[maintenance procedures](docs/history/2026-09-09-platform-maintenance.md).
+Review migration, queue, and image changes together before deployment; confirm
+active work and rollback inputs before applying a Terraform plan. See
+[operations](OPERATIONS.md) and [maintenance procedures](maintenance/README.md).
 
 The Sources navigation entry opens `/sources`, a paginated browse of retained sources with current enrolled subjects. Search accepts a source ID or page URL; the Multiple subjects filter uses current membership and updates after merges or separations. Subject cards link directly to each source and show its current subject count. This uses the existing source and example tables and console service, with no new infrastructure.
 

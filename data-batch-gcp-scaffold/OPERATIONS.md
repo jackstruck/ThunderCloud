@@ -1,15 +1,16 @@
 # Operations
 
-The consolidated framework is deployed on schema 026. See [architecture](ARCHITECTURE.md),
-[current contracts](docs/platform-contracts.md), and [cutover results](docs/platform-cutover-review.md).
-Live acceptance and browser review status are recorded in the cutover results.
+The documented application uses schema 027. Verify the live migration ledger and
+deployed configuration before changing resources or processing work. See
+[architecture](ARCHITECTURE.md) and [follow-up work](ROADMAP.md). Dated deployment
+evidence is indexed in [history](docs/history/README.md).
 
 ## Current topology
 
 - Project `teak-banner-dome`, regional services in `us-central1`.
 - Archive `gs://teak-banner-dome-bulk-videos/videos/`; original objects are immutable.
 - IAP console `face-console`; CPU acquisition/cleanup `face-ingest-drain`; CUDA processing `face-interactive-gpu`.
-- Cloud SQL PostgreSQL 17/pgvector, database `face_index`, schema 026, IAM authentication and connector TLS.
+- Cloud SQL PostgreSQL 17/pgvector, database `face_index`, schema 027, IAM authentication and connector TLS.
 - Temporary submissions `submissions-temporary/`, permanent galleries `subject-gallery/`, retained sources `training-media/`.
 
 Cloud jobs use private Cloud SQL connectivity. Developer tools use the existing
@@ -102,17 +103,13 @@ overwritten. Inputs are limited to JPEG/PNG at 25 MiB and 50 megapixels, or MP4 
 250 MiB and 15 minutes. Local gallery access uses the existing developer ADC and Cloud
 SQL IAM permissions; there is no remote probe service.
 
-The retained `track-000001` fixture was tested through both `--crop-dir` and a temporary
-MP4 using the real CPU inference stack and live read-only gallery connection. Both
-ranked its enrolled subject first (similarities `0.9776067747` and `0.9114904947`).
-
 ## Tests
 
 Run focused unit checks in the existing development environment:
 
 ```bash
-.test-venv/bin/python -m pytest tests/unit -q
-.test-venv/bin/python -m ruff check worker tests scripts maintenance
+.venv/bin/python -m pytest tests/unit -q
+.venv/bin/python -m ruff check worker tests scripts maintenance
 node --check ui/app.js
 node --check ui/subjects.js
 ```
@@ -121,8 +118,8 @@ Use the containerized `validate` command in [maintenance procedures](maintenance
 for the PostgreSQL and browser suite. Its fixtures require a disposable database.
 `scripts/test_db_integration.sh` delegates to this workflow and requires the four
 `FACE_MAINTENANCE_*` settings named in that script. Skipped integration/browser
-checks do not establish acceptance. The release's completed validation is recorded
-in the cutover review.
+checks do not establish acceptance. Dated release validation is indexed in
+[history](docs/history/README.md).
 
 ## Immutable archive uploads
 
@@ -251,9 +248,8 @@ recognize these aliases too. Static MP4 and finite MPEG-TS HLS playback are supp
 HLS acquisition keeps DNS pinning, same-media-host redirects/segments, byte and
 duration limits, and complete decode validation.
 
-Retention and security design is in [Architecture](ARCHITECTURE.md).
-[Cutover evidence](docs/platform-cutover-review.md) and dated records under
-`docs/history/` describe completed releases.
+Retention and security design is in [Architecture](ARCHITECTURE.md). Dated release
+records are indexed in [history](docs/history/README.md).
 
 Apply the additive schema and grants before enabling the service:
 
@@ -320,46 +316,38 @@ remain in Git history and must not be replayed as new work. Use
 [immutable archive uploads](#immutable-archive-uploads) and
 [archive submission](#submit-archive-objects-through-the-common-run-framework) above.
 
-## Delivery evidence
-
-- [2026-09-10 cutover result](docs/history/2026-09-10-platform-cutover.md).
-
-- [Production cutover and recovery](docs/platform-cutover-review.md).
-- [Maintenance commands and scoped cleanup](maintenance/README.md).
-- [Potential matches validation](docs/history/2026-09-09-potential-matches.md).
-- [Desktop/mobile UI validation](docs/history/2026-09-09-platform-ui.md).
-- [Retired runtime and matching gates](docs/history/2026-09-09-runtime-consolidation.md).
-
-The completed 2026-09-09 source separation preserved all 43,670 examples and 8,682
-active gallery images. Its protected recovery records remain under `.local/source-split`.
-Temporary cutover resources and retained cutover recovery storage were removed
-on 2026-09-10 at the user’s request, as described in the cutover review.
-
 ## Within-source matching
 
-See [operator workflow, CLI, bounds, and staged rollout](docs/source-merges.md).
-Operator application is now enabled after the reviewed source/threshold rollout
-recorded in the guide. New deployments default to proposals only; enable
-`source_merges_apply_enabled` after the small-source review and explicit threshold calibration. The CLI uses IAP and the existing merge/recovery semantics.
-New-source enrollment now automatically groups and merges at cosine 0.5, keeping every
+See [operator workflow, CLI, bounds, and configuration](docs/source-merges.md).
+The CLI uses IAP and the existing merge/recovery semantics. Review the live value
+of `source_merges_apply_enabled` before planning operator work. New-source
+enrollment automatically groups and merges at the documented cosine 0.4, keeping every
 example. This is independently configured by `source_merges_auto_threshold` on the
 interactive job; null disables automatic matching. Existing sources and duplicate
 enrollment reuse are unchanged. See the guide for bounds and manual-review exceptions.
+
+The schema 027 import queue persists downloaded work until bounded processing
+capacity is available. The documented configuration uses two batch GPU slots, one
+interactive reservation, and two concurrent acquisition profiles. The GPU worker
+uses two database connections so gallery cleanup receipts can commit independently
+of enrollment. Keep queue and checkpoint records when changing consumers or
+rolling back images. See the
+[performance release record](docs/history/2026-09-19-performance-implementation.md)
+for rollout evidence, throughput measurements, and capacity decisions.
 
 ## Submit a Hotscope video page
 
 The URL submission path accepts `https://hotscope.tv/video/ID` (also `www`).
 Paste an individual video page into the existing link form, or submit it as a
 normal `source: {kind: "url", url: "https://hotscope.tv/video/ID"}`. User/profile
-URLs belong to the separate bulk downloader and are rejected by this single-source
-workflow.
+URLs use the console's separate batch flow described below; they are rejected by
+the single-source API.
 
 The ingestion worker resolves the requested video's full HLS playlist from page
 data, downloads the highest advertised bandwidth rendition, and remuxes it to
 MP4 without re-encoding. It validates decoding and duration before uploading to
 the existing encrypted temporary storage. The original page attribution and the
-selected run policy follow the normal platform workflow; past bulk downloads are
-not submitted automatically by this change.
+selected run policy follow the normal platform workflow.
 
 Provider page requests and every playlist/segment redirect retain connection-time
 DNS pinning. Hotscope acquisition is restricted to the known page/CDN hosts.
@@ -376,20 +364,12 @@ refreshes playback descriptors after transient acquisition failures. FFmpeg is
 restricted to local file/pipe protocols; all network acquisition uses the secure
 Python transport.
 
-Rollout requires rebuilding and deploying the console image used by both the web
-service and `face-ingest-drain`. `Dockerfile.console` now includes FFmpeg/ffprobe.
-No database migration or extra cloud service is required. Code-level verification
-includes the URL API, resolver, transport restrictions, generated HLS media,
-ingestion advancement, and a live acquisition of the previously tested Hotscope
-video; deployment and live processing are separate rollout steps.
-
 ## Container image retention
 
-As of 2026-09-14, Artifact Registry deletes unprotected versions older than seven
-days (previously 30). KEEP rules take precedence: the newest five versions per
-image package and explicitly pinned deployed/rollback digests remain protected.
-The latest deployed console digest was added to the live keep list, and the
-previous ingestion digest remains a rollback pin in local Terraform inputs.
+The documented Artifact Registry policy deletes unprotected versions older than
+seven days. KEEP rules take precedence: the newest five versions per image package
+and explicitly pinned deployed/rollback digests remain protected. Check the live
+policy and pinned digests before relying on this retention behavior.
 
 Cleanup runs asynchronously, usually taking effect within about a day. Docker
 child manifests remain protected while referenced by a retained parent manifest;
@@ -400,64 +380,45 @@ Check repository-size metrics after cleanup before reporting realized savings.
 On every deployment, update the live keep policy as well as the Terraform image
 pin. Updating a Cloud Run image alone does not update Artifact Registry retention.
 
-### Submit a specific link from a text list
+## Download-only acquisition
 
-The New search page accepts individual HTTPS media or supported video-page URLs.
-Expand **Choose a link from a text file**, select a `.txt` export with one HTTPS
-URL per line, and choose the desired video from the list. The chosen URL fills
-the existing link form; choose the handling policy and press **Start link search**.
-Importing a list does not submit runs. Blank lines and `#` comments are ignored,
-duplicates are removed, and invalid lines are reported before any list is loaded.
-Lists are limited to 10,000 unique URLs and 2 MiB. The file is read in the browser;
-only the explicitly submitted URL is sent to the platform. Source validation and
-the existing per-user run limits still apply.
+For media that should be archived without submitting platform processing, use the
+separate [bulk downloader](../bulk-download/README.md). Preserve its manifest and
+checkpoint when resuming an existing acquisition.
 
-For download-only acquisition into encrypted GCS storage, run from `bulk-download`:
-
-```bash
-.venv/bin/bulk-download run --videos-file input/hotscope_videos.txt
-```
-
-This CLI mode resolves specific videos without usernames and does not submit
-platform processing runs. Add `--user` or `--users-file` only when filtering a
-user's listing with the supplied video selection.
-
-### Cloud acquisition batch
+## Cloud acquisition batch
 
 The `face-acquisition-batch` Cloud Run job runs explicit video acquisition and
 archive handoff without a local workspace. Its pinned image includes the bulk
-CLI and `worker.acquisition_batch`. The job has one CPU, 2 GiB RAM, one task,
-three task retries, and a seven-day timeout. It exits once all acquired sources
+CLI and `worker.acquisition_batch`. Check Terraform and the live job for current
+resources, retries, and timeout. It exits once all acquired sources
 have been handed off; the ordinary processor finishes accepted runs independently.
 Acquisition failures are retained in the checkpoint for review rather than
 silently retried forever. New transfers respect the processor's 250 MiB media cap.
 
-The checkpoint for the September 14 batch is
-`gs://teak-banner-dome-bulk-videos/batch-control/hotscope-20260914/state.json`.
-It contains the selected URLs, acquisition manifest, stable submission receipts,
+Each batch checkpoint contains selected URLs, an acquisition manifest, stable submission receipts,
 explicit handling policy, operator principal, and status counters. It is encrypted
 with the same CSEK as the archive. The key comes from Secret Manager at runtime;
 neither the key nor the selected URLs are included in the image. Generation
 preconditions protect checkpoint writes. Do not start overlapping executions or
-restart the local writers after cloud cutover. Cloud task retries load the same
+competing local writers for the same batch. Cloud task retries load the same
 checkpoint and reuse the original request keys; immutable archive objects are
 recovered if an upload finished before its checkpoint was saved.
 
 For monitoring, use the Cloud Run execution and Cloud Logging. Decrypt the exact
 checkpoint with the existing CSEK to inspect `status` or download updated manifests
-and receipts. Local `data/manifest.jsonl` and local dispatch status stop updating
-at cutover and must not be treated as the current cloud progress. On retries, use
+and receipts. A local manifest does not report later cloud progress. On retries, use
 the existing state object rather than creating a new batch or new receipts.
 
 The cloud runner keeps the original operator principal for console visibility,
-uses `all_tracks` selection, and observes the existing three-active-run quota.
+uses `all_tracks` selection, and hands off through the bounded import queue.
 It skips objects already present in the processor by bucket/object/generation.
 The runtime gains archive **create** permission and access to this batch's
 checkpoint prefix; it gains no new archive overwrite or delete permission.
 Terraform in `acquisition_batch.tf` manages the job and scoped permissions, and
 the registry cleanup policy protects the configured batch image.
 
-### Browse controls and privacy view
+## Browse controls and privacy view
 
 Subjects support ID order, most sources, most examples, and newest first, plus
 single/multiple-source and named/unnamed filters. Sources support ID order, most
@@ -474,7 +435,7 @@ The eye icon left of the theme control toggles privacy view. Gallery images turn
 solid grey, including images loaded after the toggle. The preference is local to
 the browser and is applied from a small head script before galleries render.
 
-### Exact-content enrollment reuse and alternate URLs
+## Exact-content enrollment reuse and alternate URLs
 
 Both enrollment policies now check verified SHA-256 content under the enrollment
 transaction lock. If any examples already exist for the content, a new run reuses
@@ -486,46 +447,27 @@ selection remains authoritative: submitting the same video with a different sele
 does not add tracks. Re-encoded content with different bytes is a separate source.
 Existing duplicate subjects are not automatically merged by this change.
 
-Migration 025 adds URL provenance by content hash and backfills source URLs and
-completed enrollment-run URLs. Sources and subjects expose all known links, and
+Sources and subjects expose all known links, and
 source URL/hostname searches include aliases. Duplicate run results explicitly show
 existing enrollment and follow current example membership after merges. Cloud bulk
 acquisition records every verified acquired URL even when an archived object is
-already handed off. Apply the migration and updated db_grants.sql before updating
-the console, GPU worker, ingest job, and acquisition job images.
+already handed off.
 
 After matching-group application, source manual selection is cleared and reloaded
 from the server; source-list counts also refresh. Saved group outcomes remain
 available for review and uncertain-operation retries.
 
-### Potential-match query planning
+## Subject exclusions and disabled examples
 
-Potential-match searches load the origin's version, model and vector once in the
-same repeatable-read transaction, then rank candidates by cosine distance against
-those constant values. This permits the existing subject_embedding_hnsw index;
-a subject-to-subject join with descending `1 - distance` forced a full-library scan.
-Normal suggestions use pgvector's approximate HNSW search with ef_search=40 and
-strict ordered iterative scanning past filtered, merged, or dismissed candidates.
-UUIDs break equal-distance ties. The dismissed view keeps exact filtering/ranking
-so previously dismissed subjects remain visible even outside the nearest neighbors.
-
-On subject efab0ba9-c4cc-4566-aaca-f657413f89d2, the previous ranking query exceeded
-25 seconds and the UI hit its 30-second request timeout. The updated complete request
-returned ten candidates, galleries and URLs in 6.72 seconds through a public IAM SQL
-connection during validation. No database resizing or timeout increase was required.
-
-### Subject exclusions and disabled examples
-
-Migration 026 adds reversible subject matching exclusions and per-example disabling
-(Not a subject / Unusable data). Excluded subjects are omitted from new matching,
-potential matches, source merge proposals, and default subject browsing. Use Include
-excluded in the subject library or source/manual subject picker to find them; direct
+Subject matching exclusions and per-example disabling are reversible. Excluded
+subjects are omitted from new matching, potential matches, source merge proposals,
+and default subject browsing. Use **Show excluded** in the subject library to find them; direct
 subject URLs remain accessible. Restore matching clears only the explicit subject
 flag. A subject with zero active examples remains ineligible until an example is
 restored. No model training or media deletion occurs.
 
-On subject pages, individual examples offer Not a subject / Unusable data / Restore
-example. Selected examples can be disabled/restored together (maximum 1,000). The
+On subject pages, individual examples offer **Disable example** and **Restore
+example**. Selected examples can be disabled/restored together (maximum 1,000). The
 whole example/track embedding is disabled, not merely its displayed crop. Recalculation
 uses only active examples; disabled examples retain their original embedding,
 provenance, preview, reason, actor and timestamp. Past-run scores and enrollment
@@ -539,8 +481,7 @@ restoration is needed to reactivate them. Duplicate-content enrollment does not
 reactivate disabled examples or excluded subjects. Maintenance invariants and
 preservation receipts now account for active examples and capture exclusion flags.
 
-Apply migration 026 before deploying the console and worker images. Existing values
-default to active/not excluded. Roll out processing workers before the new UI controls.
+Existing values default to active/not excluded.
 
 ## Submit all videos from a Hotscope user in the console
 
@@ -548,8 +489,8 @@ The link form accepts `https://hotscope.tv/user/Mary` or `/user/Mary`. Submittin
 user queues every discoverable public video in the background, using the selected
 handling policy and automatic selection of all detected groups. The batch progress
 page can be bookmarked and reopened; it lists current run states and any acquisition
-failures. Closing the browser does not stop processing. Existing archive handoff,
-three-active-run limit, enrollment deduplication, and automatic source matching apply.
+failures. Closing the browser does not stop processing. Durable import handoff,
+bounded queue/admission, enrollment deduplication, and automatic source matching apply.
 
 Profile checkpoints are encrypted under the existing batch checkpoint directory,
 with `profiles/<batch-id>.json` filenames. `FACE_PROFILE_BATCH_PREFIX` enables the
