@@ -9,7 +9,7 @@ function setGalleryImage(img,url){
  img.dataset.gallerySrc=url;pendingGalleryImages.add(img);galleryImageObserver.observe(img);
 }
 new MutationObserver(()=>{for(const img of pendingGalleryImages){if(!img.isConnected){galleryImageObserver.unobserve(img);pendingGalleryImages.delete(img);}}}).observe(document.body,{childList:true,subtree:true});
-const views=[...document.querySelectorAll('.view')],state={runId:null,etag:null,poll:null,session:null,results:null,handlingPolicy:null,dataGroups:[],assignments:[],runRequest:0};
+const views=[...document.querySelectorAll('.view')],state={runId:null,etag:null,poll:null,session:null,results:null,failedRun:null,handlingPolicy:null,dataGroups:[],assignments:[],runRequest:0};
 const themeToggle=document.querySelector('#theme-toggle');
 const setTheme=theme=>{document.documentElement.dataset.theme=theme;themeToggle.textContent=theme==='dark'?'Light theme':'Dark theme';themeToggle.setAttribute('aria-label',`Switch to ${theme==='dark'?'light':'dark'} theme`)};
 setTheme(localStorage.getItem('thundercloud-theme')==='light'?'light':'dark');
@@ -17,12 +17,11 @@ themeToggle.addEventListener('click',()=>{const theme=document.documentElement.d
 let recentRequest=0;
 const show=id=>{views.forEach(v=>v.classList.toggle('active',v.id===id));if(['check','subjects','subject','submit'].includes(id)){clearTimeout(state.poll);++state.runRequest;}++recentRequest;if(id==='check')loadRecentRuns();};
 const api=async(url,options={})=>{const response=await fetch(url,{credentials:'same-origin',...options,headers:{'Content-Type':'application/json',...(options.headers||{})}}),body=await response.json().catch(()=>null);if(!response.ok){const e=new Error(body?.message||`Request failed (${response.status})`);e.status=response.status;e.code=body?.code;throw e;}return{body,response}};
-const fail=(e,retryable=false)=>{clearTimeout(state.poll);document.querySelector('#error-message').textContent=e.message;document.querySelector('#retry-run').hidden=!(retryable&&state.runId);show('error')};
-const create=async source=>(await api('/api/runs',{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()+crypto.randomUUID()},body:JSON.stringify({handling_policy:document.querySelector('input[name="handling-policy"]:checked').value,source})})).body;
+const fail=(e,run=null)=>{clearTimeout(state.poll);state.failedRun=run;document.querySelector('#error-message').textContent=e.message;document.querySelector('#retry-run').hidden=!(run&&run.state==='failed');const source=document.querySelector('#error-source');source.hidden=!run;source.href=run?`/runs/${run.run_id}/source`:'';show('error')};
+const create=async(source,policy=document.querySelector('input[name="handling-policy"]:checked').value)=>(await api('/api/runs',{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()+crypto.randomUUID()},body:JSON.stringify({handling_policy:policy,source})})).body;
 const openRun=id=>{clearTimeout(state.poll);++state.runRequest;state.runId=id;state.assignments=[];history.replaceState({},'',`/runs/${id}`);poll()};
 function runSourceButton(run){
- if(!run.source_url)return null;
- const link=document.createElement('a');link.className='button-link secondary';link.href=run.source_url;link.textContent='View Source';return link;
+ const link=document.createElement('a');link.className='button-link secondary';link.href=run.source_url||`/runs/${run.run_id}/source`;link.textContent='View Source';return link;
 }
 function appendRunEntry(root,run,detail){
  const row=document.createElement('div');row.className='recent-run-row';
@@ -38,7 +37,7 @@ async function viewRunSource(id){
   const {body:run}=await api(`/api/runs/${id}`);
   if(run.source?.source_id){location.replace(`/sources/${run.source.source_id}`);return;}
   const heading=document.createElement('h1');heading.textContent='Source';
-  const message=document.createElement('p');message.textContent=run.outcome==='no_faces'?'No usable data was detected in this media.':'No subjects have been enrolled from this run.';
+  const message=document.createElement('p');message.textContent=run.state==='failed'?'This run failed before a source record was created.':run.outcome==='no_faces'?'No usable data was detected in this media.':'No subjects have been enrolled from this run.';
   const actions=document.createElement('div');actions.className='source-navigation';
   const back=document.createElement('a');back.className='button-link secondary';back.href=run.status_url;back.textContent='View Run';actions.append(back);
   const external=externalSourceLink(run.source?.page_url);if(external)actions.append(external);
@@ -59,13 +58,13 @@ async function loadRecentRuns(){
   });
  }catch(_error){if(request===recentRequest)root.innerHTML='<p class="hint">Recent runs are temporarily unavailable.</p>';}
 }
-async function poll(){const request=state.runRequest;try{const{body:r}=await api(`/api/runs/${state.runId}`);if(request!==state.runRequest)return;state.handlingPolicy=r.handling_policy;show('status');document.querySelector('#state-label').textContent=r.state==='awaiting_face_selection'?'awaiting data selection':r.state.replaceAll('_',' ');document.querySelector('#status-detail').textContent=`Run ${r.run_id} · expires ${new Date(r.expires_at).toLocaleString()}`;document.querySelector('#cancel-run').hidden=!['awaiting_media','fetching','queued','detecting','awaiting_face_selection'].includes(r.state);if(r.state==='awaiting_face_selection')return groups();if(r.state==='succeeded')return results();if(['failed','cancelled','expired'].includes(r.state))return fail(new Error(r.error?.message||`Run ${r.state}.`),r.retryable);state.poll=setTimeout(poll,2500)}catch(e){if(request===state.runRequest)fail(e)}}
+async function poll(){const request=state.runRequest;try{const{body:r}=await api(`/api/runs/${state.runId}`);if(request!==state.runRequest)return;state.handlingPolicy=r.handling_policy;show('status');document.querySelector('#state-label').textContent=r.state==='awaiting_face_selection'?'awaiting data selection':r.state.replaceAll('_',' ');document.querySelector('#status-detail').textContent=`Run ${r.run_id} · expires ${new Date(r.expires_at).toLocaleString()}`;document.querySelector('#cancel-run').hidden=!['awaiting_media','fetching','queued','detecting','awaiting_face_selection'].includes(r.state);if(r.state==='awaiting_face_selection')return groups();if(r.state==='succeeded')return results();if(['failed','cancelled','expired'].includes(r.state))return fail(new Error(r.error?.message||`Run ${r.state}.`),r);state.poll=setTimeout(poll,2500)}catch(e){if(request===state.runRequest)fail(e)}}
 const profileRequests=new Map();
 async function openBatch(id){
  clearTimeout(state.poll);const request=++state.runRequest;history.replaceState({},'',`/batches/${id}`);show('batch');
  const refresh=async()=>{try{
   const {body}=await api(`/api/profile-batches/${id}`);if(request!==state.runRequest)return;
-  document.querySelector('#batch-title').textContent=`Videos from ${body.username}`;
+  document.querySelector('#batch-title').textContent=body.username?`Videos from ${body.username}`:`Video link batch · ${body.video_count} links`;
   const status=body.status,finished=status.processing_complete??(status.handoff_complete&&body.runs.every(r=>['succeeded','failed','cancelled','expired'].includes(r.state)));
   document.querySelector('#batch-status').textContent=status.phase==='failed'?status.message:status.phase==='queued'?'Queued for processing…':status.phase==='discovering'?'Finding all videos…':`${status.selected||0} videos found · ${status.acquired||0} downloaded · ${body.runs.length} runs · ${finished?'Finished':status.handoff_complete?'Processing videos':'Submitting videos'}`;
   const failures=(status.acquisition_failures||0)+(body.discovery_failures||0);
@@ -88,6 +87,16 @@ document.querySelector('#url-form').addEventListener('submit',async e=>{
   const {body}=await api('/api/profile-batches',{method:'POST',headers:{'Idempotency-Key':profileRequests.get(data)},body:data});await openBatch(body.batch_id);
  }else openRun((await create({kind:'url',url})).run_id);
  }catch(error){fail(error);}finally{button.disabled=false;}
+});
+document.querySelector('#video-batch-form').addEventListener('submit',async e=>{
+ e.preventDefault();const button=e.currentTarget.querySelector('button'),file=document.querySelector('#video-batch-file').files[0];if(!file)return;button.disabled=true;
+ try{
+  if(!file.name.toLowerCase().endsWith('.txt')||file.size>1024*1024)throw new Error('Choose a .txt file smaller than 1 MB.');
+  const urls=(await file.text()).split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+  if(!urls.length||urls.length>1000)throw new Error('Provide 1 to 1000 video links, one per line.');
+  const payload=JSON.stringify({urls,handling_policy:document.querySelector('input[name="handling-policy"]:checked').value});
+  const {body}=await api('/api/video-batches',{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()+crypto.randomUUID()},body:payload});await openBatch(body.batch_id);
+ }catch(error){fail(error)}finally{button.disabled=false;}
 });
 document.querySelector('#upload-form').addEventListener('submit',async e=>{e.preventDefault();const file=document.querySelector('#source-file').files[0];if(!file)return;const cancel=document.querySelector('#cancel-upload');try{state.runId=(await create({kind:'upload',content_type:file.type,bytes:file.size})).run_id;state.session=(await api(`/api/runs/${state.runId}/upload-session`,{method:'POST',body:'{}'})).body.session_uri;cancel.hidden=false;const upload=await fetch(state.session,{method:'PUT',headers:{'Content-Type':file.type},body:file});if(!upload.ok)throw new Error(`Upload failed (${upload.status})`);const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()))].map(x=>x.toString(16).padStart(2,'0')).join('');await api(`/api/runs/${state.runId}/upload-complete`,{method:'POST',body:JSON.stringify({bytes:file.size,sha256:digest})});state.session=null;openRun(state.runId)}catch(x){fail(x)}finally{cancel.hidden=true}});
 document.querySelector('#cancel-upload').addEventListener('click',async()=>{if(state.session)await fetch(state.session,{method:'DELETE'}).catch(()=>{});if(state.runId)await api(`/api/runs/${state.runId}/cancel`,{method:'POST',body:'{}'}).catch(()=>{});state.session=null;show('submit')});
@@ -169,7 +178,7 @@ function renderResults(){
   });
  });show('results');
 }
-document.querySelector('#check-form').addEventListener('submit',e=>{e.preventDefault();openRun(document.querySelector('#check-id').value)});document.querySelector('#copy-id').addEventListener('click',()=>navigator.clipboard.writeText(state.runId));const cancel=async()=>{try{await api(`/api/runs/${state.runId}/cancel`,{method:'POST',body:'{}'});poll()}catch(e){fail(e)}};document.querySelector('#cancel-run').addEventListener('click',cancel);document.querySelector('#selection-cancel').addEventListener('click',cancel);document.querySelector('#retry-run').addEventListener('click',async()=>{try{await api(`/api/runs/${state.runId}/retry`,{method:'POST',body:'{}'});poll()}catch(e){fail(e)}});document.querySelector('#back-results').addEventListener('click',()=>history.back());const startOver=()=>location.assign('/');document.querySelector('#error-home').addEventListener('click',startOver);document.querySelector('#new-run').addEventListener('click',startOver);document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>b.dataset.view==='submit'?startOver():(history.pushState({},'', '/?view=check'),show('check'))));const saved=location.pathname.match(/^\/runs\/([0-9a-f-]{36})$/i);if(saved)openRun(saved[1]);else if(location.pathname==='/'&&new URLSearchParams(location.search).get('view')==='check')show('check');
+document.querySelector('#check-form').addEventListener('submit',e=>{e.preventDefault();openRun(document.querySelector('#check-id').value)});document.querySelector('#copy-id').addEventListener('click',()=>navigator.clipboard.writeText(state.runId));const cancel=async()=>{try{await api(`/api/runs/${state.runId}/cancel`,{method:'POST',body:'{}'});poll()}catch(e){fail(e)}};document.querySelector('#cancel-run').addEventListener('click',cancel);document.querySelector('#selection-cancel').addEventListener('click',cancel);document.querySelector('#retry-run').addEventListener('click',async()=>{const button=document.querySelector('#retry-run'),run=state.failedRun;button.disabled=true;try{if(run.retryable){await api(`/api/runs/${run.run_id}/retry`,{method:'POST',body:'{}'});poll()}else if(run.source?.page_url){const next=await create({kind:'url',url:run.source.page_url},run.handling_policy);openRun(next.run_id)}else{show('submit');document.querySelector('#source-file').focus();document.querySelector('#source-file').setCustomValidity('Select the original file again to retry this run.');document.querySelector('#source-file').reportValidity();document.querySelector('#source-file').setCustomValidity('')}}catch(e){fail(e,run)}finally{button.disabled=false}});document.querySelector('#back-results').addEventListener('click',()=>history.back());const startOver=()=>location.assign('/');document.querySelector('#error-home').addEventListener('click',startOver);document.querySelector('#new-run').addEventListener('click',startOver);document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>b.dataset.view==='submit'?startOver():(history.pushState({},'', '/?view=check'),show('check'))));const saved=location.pathname.match(/^\/runs\/([0-9a-f-]{36})$/i);if(saved)openRun(saved[1]);else if(location.pathname==='/'&&new URLSearchParams(location.search).get('view')==='check')show('check');
 
 const savedBatch=location.pathname.match(/^\/batches\/([0-9a-f-]{36})$/i);if(savedBatch)openBatch(savedBatch[1]);
 

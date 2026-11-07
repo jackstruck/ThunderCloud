@@ -13,6 +13,7 @@ function setup(route='/', responses={}) {
  const location=new URL(route,'https://console.example');
  const requests=[];
  const context=vm.createContext({document,window,location,URL,URLSearchParams,console,crypto:require('node:crypto').webcrypto,
+  MutationObserver:class{observe(){}},
   history:{replaceState(){},pushState(){},back(){}},localStorage:{getItem(key){return key==='thundercloud-private-gallery'&&responses.__privacy?'true':null},setItem(key,value){responses.__stored=[key,value]}},
   sessionStorage:{getItem(){return JSON.stringify(responses.__saved||{})},setItem(){}},
   setTimeout(){},clearTimeout(){},navigator:{clipboard:{writeText:async()=>{}}},
@@ -44,11 +45,21 @@ test('source overview hides UUID search, promotes origin and keeps Next on the r
  const app=setup(`/sources/${source}`);app.loadSubjects();await settle();
  assert.equal(app.document.querySelector('.source-subject-browser input[type=search]'),null);
  assert.equal(app.document.querySelector('.source-subject-browser .subject-search-button'),null);
- assert.equal(app.document.querySelector('.source-origin a').textContent,'Open');
+ assert.equal(app.document.querySelector('.source-origin a').textContent,'Open Source');
  assert.equal(app.document.querySelector('.pagination button').classList.contains('pagination-next'),true);
  assert.equal(app.document.querySelector('.pagination button').classList.contains('secondary'),true);
  assert.equal(app.document.querySelector('.source-heading h1').textContent,source);
  assert.equal(app.document.querySelector('.source-origin p'),null);
+});
+test('stored video icon appears beside source ID only when media is retained',async()=>{
+ const stored=setup(`/sources/${source}`,{'/api/sources':{sources:[{source_id:source,has_stored_video:true}],next_cursor:null}});
+ stored.loadSubjects();await settle();
+ const icon=stored.document.querySelector('.source-title-row .stored-video-link');
+ assert.equal(icon.getAttribute('href'),`/api/sources/${source}/video`);
+ assert.equal(icon.getAttribute('target'),'_blank');
+ assert.equal(icon.getAttribute('rel'),'noopener noreferrer');
+ const missing=setup(`/sources/${source}`);missing.loadSubjects();await settle();
+ assert.equal(missing.document.querySelector('.stored-video-link'),null);
 });
 test('subject corrections are compact; run navigation is a button and Select all stays outside cards',async()=>{
  const app=setup(`/subjects/${sid}`,{[`/api/subjects/${sid}/potential-matches`]:{version:1,candidates:[{...subject,subject_id:source,similarity:.8}]}});
@@ -58,6 +69,28 @@ test('subject corrections are compact; run navigation is a button and Select all
  app.document.querySelector('.find-potential-matches').click();await settle();
  assert.equal(app.document.querySelectorAll('.suggestion-selection-tools>button').length,2);
  assert.equal(app.document.querySelector('.potential-matches .subject-grid>button'),null);
+});
+
+test('subject card hides sources after four and library checkboxes share one row',async()=>{
+ const many={...subject,source_count:5};
+ const sources=Array.from({length:5},(_,n)=>({source_id:`00000000-0000-0000-0000-00000000000${n}`,subject_count:1,page_url:`https://media.example/${n}`}));
+ const app=setup(`/subjects/${sid}`,{[`/api/subjects/${sid}`]:many,[`/api/subjects/${sid}/sources`]:{subject_id:sid,version:1,sources}});
+ app.loadSubjects();await settle();
+ const card=app.document.querySelector('#subject-detail .subject-card');
+ assert.equal(card.querySelectorAll(':scope .subject-card-actions>.source-card-links>a').length,4);
+ assert.equal(card.querySelector('.subject-source-more').hasAttribute('open'),false);
+ assert.equal(card.querySelectorAll('.subject-source-extra .source-card-links>a').length,1);
+ assert.match(card.querySelector('.subject-source-more summary').textContent,/View all 5 sources/);
+ const library=setup('/subjects');library.loadSubjects();await settle();
+ assert.equal(library.document.querySelectorAll('.subject-checkbox-filters label').length,2);
+});
+
+test('failed run keeps a source link and retry action',async()=>{
+ const run={run_id:sid,state:'failed',handling_policy:'search_then_discard',retryable:false,source:{source_id:null,page_url:'https://hotscope.tv/video/abc'},error:{code:'invalid_media',message:'Run failed.'},expires_at:'2026-10-14T00:00:00Z'};
+ const app=setup(`/runs/${sid}`,{[`/api/runs/${sid}`]:run});await settle();
+ assert.equal(app.document.querySelector('#error-source').hidden,false);
+ assert.equal(app.document.querySelector('#error-source').getAttribute('href'),`/runs/${sid}/source`);
+ assert.equal(app.document.querySelector('#retry-run').hidden,false);
 });
 
 test('Shift-click label selects and clears a range with a stable anchor',async()=>{
@@ -114,7 +147,7 @@ test('source header shows every alias while keeping the original first',async()=
  const app=setup(`/sources/${source}`,{'/api/sources':{sources:[{source_id:source,page_url:'https://original.example/video',page_urls:['https://alias.example/video','https://original.example/video']}],next_cursor:null}});
  app.loadSubjects();await settle();
  const links=[...app.document.querySelectorAll('.source-origin a')];
- assert.deepEqual(links.map(a=>a.textContent),['Open','Open 2']);
+ assert.deepEqual(links.map(a=>a.textContent),['Open Source','Open Source']);
  assert.deepEqual(links.map(a=>a.getAttribute('href')),['https://original.example/video','https://alias.example/video']);
 });
 
@@ -148,7 +181,7 @@ test('excluded subjects and disabled examples offer restoration and block sugges
  });app.loadSubjects();await settle();
  assert.ok([...app.document.querySelectorAll('button')].some(b=>b.textContent==='Restore matching'));
  assert.equal(app.document.querySelector('.find-potential-matches').disabled,true);
- assert.match(app.document.querySelector('.example-disabled').textContent,/Disabled: not a subject/);
+ assert.match(app.document.querySelector('.example-disabled').textContent,/Disabled/);
  assert.equal(app.document.querySelector('.example-disabled img').getAttribute('src'),'/disabled-preview');
  assert.ok([...app.document.querySelectorAll('.example-disabled button')].some(b=>b.textContent==='Restore example'));
 });
@@ -157,8 +190,19 @@ test('library forwards Include excluded and active examples expose disabling act
  const list=setup('/subjects?include_excluded=true');list.loadSubjects();await settle();
  assert.equal(list.requests.find(u=>u.pathname==='/api/subjects').searchParams.get('include_excluded'),'true');
  const app=setup(`/subjects/${sid}`);app.loadSubjects();await settle();
- assert.deepEqual([...app.document.querySelectorAll('.example-status-actions button')].map(b=>b.textContent),['Not a subject','Unusable data']);
+ assert.deepEqual([...app.document.querySelectorAll('.example-status-actions button')].map(b=>b.textContent),['Disable example']);
  const box=app.document.querySelector('.example-row input');box.checked=true;box.dispatchEvent(new app.context.window.Event('change'));
  const disable=[...app.document.querySelectorAll('.example-status-controls button')].find(b=>b.textContent==='Disable selected');
  assert.equal(disable.disabled,false);
+});
+test('subject actions place timestamps and example controls on their requested rows',async()=>{
+ const app=setup(`/subjects/${sid}`,{[`/api/subjects/${sid}/examples`]:{examples:[{example_id:'example',source_id:source,run_id:sid,start_ms:1000,end_ms:2500,page_url:'https://media.example/video'}],next_cursor:null}});
+ app.loadSubjects();await settle();
+ const exclude=app.document.querySelector('.matching-controls button');
+ assert.match(exclude.title,/Exclusion keeps this subject/);
+ assert.equal(app.document.querySelector('.matching-controls .hint'),null);
+ assert.equal(app.document.querySelector('.find-potential-matches').classList.contains('secondary'),true);
+ assert.equal(app.document.querySelector('.potential-matches .management-actions .primary').textContent,'Merge selected matches');
+ assert.match(app.document.querySelector('.example-id-line').textContent,/1.0–2.5 seconds/);
+ assert.deepEqual([...app.document.querySelectorAll('.example-origin-actions a,.example-origin-actions button')].map(x=>x.textContent),['View Run','Open Source','Disable example']);
 });

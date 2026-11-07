@@ -164,6 +164,7 @@ def create_app(
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     configured_repository = repository is None
+    storage = None
     if repository is None:
         settings = Settings.from_env()
         database = Database(
@@ -256,7 +257,7 @@ def create_app(
     @app.before_request
     def authenticate_and_validate_origin():
         g.principal = _principal()
-        operation = "create" if request.path in {"/api/runs", "/api/profile-batches"} and request.method == 'POST' else "read"
+        operation = "create" if request.path in {"/api/runs", "/api/profile-batches", "/api/video-batches"} and request.method == 'POST' else "read"
         limit = 10 if operation == "create" else 120
         if not rate_limiter.allow((g.principal, operation), limit):
             raise RequestError(429, "rate_limited", "Request rate limit exceeded.")
@@ -326,6 +327,39 @@ def create_app(
             request.args.get("q", ""), request.args.get("cursor"), page_size(24), multiple == "true",
             sort=request.args.get("sort", "id"), origin=request.args.get("origin", ""),
             subject_scope=request.args.get("subject_scope", "all")))
+
+    @app.get("/api/sources/<uuid:source_id>/video")
+    def source_video(source_id):
+        subjects_available()
+        record = subject_service.stored_video(source_id)
+        if not record:
+            raise RequestError(404, "video_unavailable", "No stored video is available for this source.")
+        bucket, name, generation = record
+        if not storage or not bucket or not name:
+            raise RequestError(503, "video_unavailable", "Stored video is temporarily unavailable.")
+        blob = storage.client.bucket(bucket).blob(name, generation=int(generation), encryption_key=storage.csek)
+        blob.reload()
+        size = int(blob.size)
+        if size <= 0:
+            raise RequestError(404, "video_unavailable", "No stored video is available for this source.")
+        range_header = request.headers.get("Range", "")
+        match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header) if range_header else None
+        if range_header and not match:
+            return Response(status=416, headers={"Content-Range": f"bytes */{size}"})
+        start = int(match.group(1)) if match else 0
+        if start >= size:
+            return Response(status=416, headers={"Content-Range": f"bytes */{size}"})
+        requested_end = int(match.group(2)) if match and match.group(2) else size - 1
+        if requested_end < start:
+            return Response(status=416, headers={"Content-Range": f"bytes */{size}"})
+        end = min(requested_end, start + 4 * 1024 * 1024 - 1, size - 1)
+        data = blob.download_as_bytes(start=start, end=end, if_generation_match=int(generation))
+        response = Response(data, status=206 if match or end < size - 1 else 200, content_type="video/mp4")
+        response.headers["Accept-Ranges"] = "bytes"
+        response.headers["Cache-Control"] = "private, no-store"
+        if response.status_code == 206:
+            response.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        return response
 
     @app.get("/api/subjects")
     def list_subjects():
@@ -484,6 +518,24 @@ def create_app(
         if profile_batches is None:
             raise RequestError(503, 'profile_batches_unavailable', 'User-profile submission is not available.')
         return jsonify(profile_batches.get(g.principal, str(batch_id)))
+
+    @app.post('/api/video-batches')
+    def create_video_batch():
+        if profile_batches is None:
+            raise RequestError(503, 'video_batches_unavailable', 'Video batch submission is not available.')
+        key = request.headers.get('Idempotency-Key', '')
+        if not IDEMPOTENCY_RE.fullmatch(key):
+            raise RequestError(400, 'invalid_idempotency_key', 'Provide a valid Idempotency-Key.')
+        data = _json_object()
+        if (set(data) != {'urls', 'handling_policy'}
+                or data['handling_policy'] not in {'search_then_discard', 'enroll_only', 'retain_and_enroll'}):
+            raise RequestError(422, 'invalid_request', 'Provide video links and a handling policy.')
+        if data['handling_policy'] != 'search_then_discard' and not enrollment_enabled:
+            raise RequestError(422, 'feature_not_available', 'Enrollment is not available.')
+        try:
+            return jsonify(profile_batches.create_video_list(g.principal, key, data['urls'], data['handling_policy'])), 202
+        except ValueError as error:
+            raise RequestError(422, 'invalid_video_batch', str(error)) from error
 
     @app.post("/api/runs")
     def create_run():

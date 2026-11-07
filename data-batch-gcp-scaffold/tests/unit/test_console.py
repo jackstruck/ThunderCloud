@@ -404,3 +404,17 @@ def test_profile_batch_api_is_authenticated_idempotent_and_policy_scoped():
     assert client.get('/batches/'+RUN_ID, headers=AUTH).status_code == 200
     disabled = create_app(Repository(), allowed_origin=ORIGIN, enrollment_enabled=False, profile_batches=batches).test_client()
     assert disabled.post('/api/profile-batches', json=payload, headers={**AUTH,'Idempotency-Key':'profile-request-key'}).status_code == 422
+
+
+def test_video_batch_api_validates_policy_and_passes_links():
+    from unittest.mock import Mock
+    batches = Mock()
+    batches.create_video_list.return_value = {'batch_id': RUN_ID, 'status_url': '/batches/'+RUN_ID}
+    app = create_app(Repository(), allowed_origin=ORIGIN, enrollment_enabled=True, profile_batches=batches)
+    client = app.test_client()
+    payload = {'urls': ['https://hotscope.tv/video/one'], 'handling_policy': 'search_then_discard'}
+    assert client.post('/api/video-batches', json=payload).status_code == 401
+    response = client.post('/api/video-batches', json=payload, headers={**AUTH, 'Idempotency-Key': 'video-batch-request-key'})
+    assert response.status_code == 202
+    batches.create_video_list.assert_called_once_with('member@example.test', 'video-batch-request-key', payload['urls'], 'search_then_discard')
+    assert client.post('/api/video-batches', json={**payload, 'handling_policy': 'invalid'}, headers={**AUTH, 'Idempotency-Key': 'another-video-request-key'}).status_code == 422

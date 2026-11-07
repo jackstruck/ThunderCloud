@@ -138,12 +138,12 @@ class ImportQueue:
             try:
                 source = payload['source']
                 with self.transaction() as cursor:
-                    cursor.execute('''SELECT run_id FROM media_run WHERE source_kind='archive'
+                    cursor.execute('''SELECT run_id,state FROM media_run WHERE source_kind='archive'
                         AND archive_bucket=%s AND archive_object_name=%s AND archive_object_generation=%s
                         AND handling_policy=%s ORDER BY created_at DESC,run_id DESC LIMIT 1''',
                         (source['bucket'],source['object_name'],source['generation'],payload['handling_policy']))
                     existing = cursor.fetchone()
-                if existing:
+                if existing and existing[1] not in {'failed', 'cancelled', 'expired'}:
                     run_id = str(existing[0])
                 else:
                     run_id = repository.create(principal, key, payload, workload='batch').record['run_id']

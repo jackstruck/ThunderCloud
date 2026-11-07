@@ -97,6 +97,24 @@ def test_archive_reuse_across_profiles(db):
     assert sql(db,'SELECT count(*) FROM media_run')[0][0]==1
 
 
+@pytest.mark.parametrize('terminal_state', ['failed', 'cancelled', 'expired'])
+def test_failed_archive_handoff_creates_new_run(db, terminal_state):
+    q = ImportQueue(db)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    enqueue(q, first)
+    assert q.dispatch(lambda _: None) == 1
+    original = q.status(first, 'operator')[0]['run_id']
+    sql(db, "UPDATE media_run SET state=%s WHERE run_id=%s", (terminal_state, original))
+    key = str(uuid.uuid4())
+    fresh = payload()
+    receipt = q.enqueue(second, 'operator', key, fresh)
+    assert q.enqueue(second, 'operator', key, fresh) == receipt
+    assert q.dispatch(lambda _: None) == 1
+    replacement = q.status(second, 'operator')[0]['run_id']
+    assert replacement != original
+    assert sql(db, 'SELECT count(*) FROM media_run')[0][0] == 2
+
+
 def test_dispatch_lease_serializes_drains_and_recovers_expired_owner(db):
     q=ImportQueue(db)
     owner=q.acquire_dispatch()

@@ -23,13 +23,15 @@ def browser():
         browser.close()
 
 
-def setup(browser, fixtures, *, page_number=1, options=None, users=False):
+def setup(browser, fixtures, *, page_number=1, options=None, users=False, recent=False):
+    assert not (users and recent)
     page = browser.new_page(accept_downloads=True)
     calls = []
 
     def handle(route):
         url = urlsplit(route.request.url)
-        if url.hostname != 'media.example.test' or url.path != ('/users' if users else '/search'):
+        path = '/users' if users else '/recent' if recent else '/search'
+        if url.hostname != 'media.example.test' or url.path != path:
             raise AssertionError('Unexpected request: ' + route.request.url)
         number = int(parse_qs(url.query).get('page', ['1'])[0])
         calls.append(number)
@@ -40,7 +42,10 @@ def setup(browser, fixtures, *, page_number=1, options=None, users=False):
             route.fulfill(status=200, content_type='text/html', body=response)
 
     page.route('**/*', handle)
-    page.goto(f'{ORIGIN}/users?page={page_number}' if users else f'{ORIGIN}/search?query=sample&page={page_number}')
+    initial = (f'{ORIGIN}/users?page={page_number}' if users else
+               f'{ORIGIN}/recent?page={page_number}' if recent else
+               f'{ORIGIN}/search?query=sample&page={page_number}')
+    page.goto(initial)
     calls.clear()
     page.evaluate('(options) => window.videoLinkExportOptions = options',
                   {'pauseMs': 0, 'download': False, **(options or {})})
@@ -172,4 +177,44 @@ def test_users_challenge_preserves_partial_export(browser):
     assert not result['complete'] and result['pages'] == 1
     assert result['urls'] == [f'{ORIGIN}/user/Mary']
     assert downloaded.value.suggested_filename == 'user-links-partial.txt'
+    page.close()
+
+
+def recent_document(*links):
+    return '<html><h1>Recent Porn Videos</h1><main>' + ''.join(
+        f'<a href="{link}">link</a>' for link in links
+    ) + '</main></html>'
+
+
+def test_recent_pagination_exports_videos(browser, tmp_path):
+    page, calls = setup(browser, {
+        1: recent_document('/video/a', '/video/a?tracking=1', '/recent?page=2',
+                           '/recent?page=2&sort=other', '/search?query=sample&page=9'),
+        2: recent_document('/video/b', '/video/a/', '/recent?page=3'),
+        3: recent_document('/video/c', '/recent?page=2'),
+    }, page_number=3, recent=True, options={'download': True})
+    requests = []
+    page.on('request', lambda request: requests.append(request.url))
+    with page.expect_download() as downloaded:
+        result = page.evaluate(SCRIPT)
+    assert calls == [1, 2, 3]
+    assert requests == [f'{ORIGIN}/recent', f'{ORIGIN}/recent?page=2', f'{ORIGIN}/recent?page=3']
+    assert result['complete'] and result['pages'] == 3
+    assert result['urls'] == [f'{ORIGIN}/video/{name}' for name in ['a', 'b', 'c']]
+    assert downloaded.value.suggested_filename == 'video-links.txt'
+    output = tmp_path / 'recent.txt'
+    downloaded.value.save_as(output)
+    assert output.read_text() == '\n'.join(result['urls']) + '\n'
+    page.close()
+
+
+def test_recent_challenge_preserves_partial_export(browser):
+    page, calls = setup(browser, {
+        1: recent_document('/video/a', '/recent?page=2'),
+        2: '<html>Challenge</html>',
+    }, recent=True)
+    result = page.evaluate(SCRIPT)
+    assert not result['complete'] and result['pages'] == 1
+    assert result['urls'] == [f'{ORIGIN}/video/a']
+    assert calls == [1, 2]
     page.close()

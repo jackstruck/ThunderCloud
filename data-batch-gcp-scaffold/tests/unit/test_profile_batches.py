@@ -45,6 +45,27 @@ def test_profile_checkpoint_idempotency_policy_and_ownership():
     with pytest.raises(RunNotFoundError): service.get('other', result['batch_id'])
 
 
+def test_video_link_batch_checkpoint_deduplicates_and_rejects_bad_links():
+    objects = {}
+    class Blob:
+        def __init__(self, name): self.name = name
+        def upload_from_string(self, value, **kwargs):
+            if self.name in objects: raise PreconditionFailed('exists')
+            objects[self.name] = value
+        def download_as_bytes(self): return objects[self.name].encode()
+    storage = SimpleNamespace(bucket=SimpleNamespace(blob=lambda name, **_: Blob(name)), csek=b'key')
+    repo, invoke = Mock(), Mock(); repo.batch_statuses.return_value = []
+    service = ProfileBatches(storage, repo, invoke, 'batch-control/test')
+    links = ['https://hotscope.tv/video/abc', 'https://www.hotscope.tv/video/abc', 'https://hotscope.tv/video/def']
+    result = service.create_video_list('tester', 'video-request-key', links, 'search_then_discard')
+    assert service.get('tester', result['batch_id'])['video_count'] == 2
+    assert json.loads(next(iter(objects.values())))['videos'] == ['abc', 'def']
+    assert service.create_video_list('tester', 'video-request-key', links, 'search_then_discard') == result
+    with pytest.raises(RunConflictError): service.create_video_list('tester', 'video-request-key', links[:1], 'search_then_discard')
+    with pytest.raises(ValueError, match='Line 2'):
+        service.create_video_list('tester', 'different-request-key', [links[0], 'https://hotscope.tv/user/name'], 'search_then_discard')
+
+
 @pytest.mark.parametrize('queue_state,legacy_state,complete', [
     ('pending', 'succeeded', False),
     ('submitted', 'detecting', False),

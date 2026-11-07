@@ -1,5 +1,5 @@
 (async () => {
-  // Run on /users to export profiles, or /search?query=... to export videos.
+  // Run on /users to export profiles, or /search?query=... or /recent to export videos.
   // Optional overrides: window.videoLinkExportOptions = { maxPages: 1000 };
   const options = {
     maxPages: 1000, pauseMs: 700, timeoutMs: 30000, download: true,
@@ -12,9 +12,10 @@
   }
   const start = new URL(location.href);
   const users = start.pathname === '/users';
-  if (start.protocol !== 'https:' || (!users && (start.pathname !== '/search' ||
-      !start.searchParams.get('query')?.trim()))) {
-    throw new Error('Open the HTTPS /users directory or a search results page first.');
+  const recent = start.pathname === '/recent';
+  const search = start.pathname === '/search' && !!start.searchParams.get('query')?.trim();
+  if (start.protocol !== 'https:' || (!users && !recent && !search)) {
+    throw new Error('Open the HTTPS /users directory, /recent, or a search results page first.');
   }
   const kind = users ? 'user' : 'video';
   if (window.videoLinkExport?.running) throw new Error('An export is already running.');
@@ -53,7 +54,7 @@
       const page = queue.shift();
       const pageURL = new URL(start);
       pageURL.hash = '';
-      if (users && page === 1) pageURL.searchParams.delete('page');
+      if ((users || recent) && page === 1) pageURL.searchParams.delete('page');
       else pageURL.searchParams.set('page', page);
       const response = await fetch(pageURL, {
         credentials: 'same-origin', redirect: 'error',
@@ -67,7 +68,8 @@
       if (html.length > 10000000) throw new Error(`Page ${page}: HTML is too large.`);
       const doc = new DOMParser().parseFromString(html, 'text/html');
       if (users ? !/\bUsers\b/i.test(doc.querySelector('header')?.textContent || '')
-                : !doc.querySelector('input[name="query"]')) {
+                : recent ? !/\bRecent Porn Videos\b/i.test(doc.querySelector('h1')?.textContent || '')
+                         : !doc.querySelector('input[name="query"]')) {
         throw new Error(`Page ${page}: unexpected page or access challenge.`);
       }
       for (const anchor of doc.querySelectorAll('a[href]')) {

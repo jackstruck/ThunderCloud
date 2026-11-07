@@ -103,15 +103,17 @@ FFmpeg rejects reserved H.264 color tags, validation uses a temporary stream-cop
 with unspecified color tags; the archived file is unchanged. Verification failures
 include a stage and diagnostic message in the manifest.
 
-### Export user directory links in the browser
+### Export user directory or video links in the browser
 
 Open `https://hotscope.tv/users`, then paste
 [`scripts/export-search-links.js`](scripts/export-search-links.js) into the browser
 console. It starts at `/users`, follows directory pagination such as
 `/users?page=2`, and downloads deduplicated profile URLs (one per line) as
-`user-links.txt`. The same script still exports video URLs on a search results page.
+`user-links.txt`. The same script exports video URLs from a search results page or
+`https://hotscope.tv/recent`, following `/recent?page=2` and later pages. Video
+exports download as `video-links.txt`.
 
-The existing controls apply to both modes:
+The existing controls apply to all three pages:
 `window.videoLinkExportOptions = { maxPages: 1000, pauseMs: 700 }` before running;
 `window.videoLinkExport.stop()` to stop; `window.videoLinkExport.urls` to inspect
 collected links. Failed, stopped, or page-limited exports are marked partial and

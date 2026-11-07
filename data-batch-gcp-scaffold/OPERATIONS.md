@@ -432,7 +432,9 @@ The schema 027 import queue persists downloaded work until bounded processing
 capacity is available. The documented configuration uses two batch GPU slots, one
 interactive reservation, and two concurrent acquisition profiles. The GPU worker
 uses two database connections so gallery cleanup receipts can commit independently
-of enrollment. Keep queue and checkpoint records when changing consumers or
+of enrollment. A new archive handoff reuses an active or successful run for the
+same archive object; it creates a new run when the latest matching run failed,
+was cancelled, or expired. Keep queue and checkpoint records when changing consumers or
 rolling back images. See the
 [performance release record](docs/history/2026-09-19-performance-implementation.md)
 for rollout evidence, throughput measurements, and capacity decisions.

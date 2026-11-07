@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from google.api_core.exceptions import NotFound, PreconditionFailed
 
 from .run_repository import RunConflictError, RunNotFoundError
-from .source_adapters import HOTSCOPE_PAGE_HOSTS
+from .source_adapters import HOTSCOPE_PAGE_HOSTS, hotscope_video_id
 
 
 def profile_name(url):
@@ -38,17 +38,35 @@ class ProfileBatches:
 
     def create(self, principal, key, url, policy):
         username = profile_name(url)
+        return self._create(principal, key, [username], [], policy)
+
+    def create_video_list(self, principal, key, urls, policy):
+        if not isinstance(urls, list) or not 1 <= len(urls) <= 1000:
+            raise ValueError('Provide 1 to 1000 video links.')
+        videos = []
+        for index, url in enumerate(urls, 1):
+            try:
+                if not isinstance(url, str) or not url.startswith('https://') or urlsplit(url).query or urlsplit(url).fragment:
+                    raise ValueError('Invalid video link')
+                videos.append(hotscope_video_id(url))
+            except ValueError as error:
+                raise ValueError(f'Line {index}: provide a direct Hotscope video link.') from error
+        videos = list(dict.fromkeys(videos))
+        return self._create(principal, key, [], videos, policy)
+
+    def _create(self, principal, key, users, videos, policy):
         batch_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f'profile-batch:{principal}:{key}'))
         blob = self._blob(batch_id)
         state = {'format': 1, 'batch_id': batch_id, 'principal': principal,
-                 'handling_policy': policy, 'users': [username], 'videos': [],
+                 'handling_policy': policy, 'users': users, 'videos': videos,
                  'manifest': '', 'receipts': {}, 'status': {'phase': 'queued'}}
         try:
             blob.upload_from_string(json.dumps(state), content_type='application/json', if_generation_match=0)
         except PreconditionFailed:
             state = json.loads(blob.download_as_bytes())
-            if state['users'] != [username] or state['handling_policy'] != policy or state['principal'] != principal:
-                raise RunConflictError('Idempotency key already used for another profile submission.') from None
+            if (state['users'] != users or state['videos'] != videos or state['handling_policy'] != policy
+                    or state['principal'] != principal):
+                raise RunConflictError('Idempotency key already used for another batch submission.') from None
         if not state.get('execution'):
             self.invoke(blob.name)
         return {'batch_id': batch_id, 'status_url': f'/batches/{batch_id}'}
@@ -78,6 +96,7 @@ class ProfileBatches:
         if state.get('queue_version') == 1:
             status['processing_complete'] = status['processing_complete'] and len(runs) == len(ids) and all(
                 run['state'] in {'succeeded', 'failed', 'cancelled', 'expired'} for run in runs)
-        return {'batch_id': batch_id, 'username': state['users'][0],
+        return {'batch_id': batch_id, 'username': state['users'][0] if state['users'] else None,
+                'video_count': len(state['videos']) if not state['users'] else None,
                 'status': status, 'runs': runs,
                 'discovery_failures': len(state.get('discovery_failures', []))}

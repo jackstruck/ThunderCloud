@@ -574,7 +574,8 @@ class SubjectManagement:
                 # count-sorted modes below deliberately aggregate before pagination.
                 page_metric = "0::bigint" if sort == "id" else "(extract(epoch FROM sa.created_at)*1000000)::bigint"
                 query = f"""WITH candidates AS (
-                    SELECT sa.source_id,sa.source_page_url,{page_metric} AS metric
+                    SELECT sa.source_id,sa.source_page_url,{page_metric} AS metric,
+                           (sa.storage_kind IN ('managed','archive') AND sa.content_type='video/mp4' AND sa.object_name IS NOT NULL) AS has_stored_video
                     FROM source_asset sa WHERE {where}
                 ), page AS MATERIALIZED (
                     SELECT * FROM candidates WHERE (%s::uuid IS NULL OR metric<%s
@@ -582,6 +583,7 @@ class SubjectManagement:
                     ORDER BY metric DESC,source_id LIMIT %s
                 ) SELECT page.source_id,page.source_page_url,c.subjects,c.examples,page.metric,
                     ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=page.source_id ORDER BY p.page_url)
+                    ,page.has_stored_video
                   FROM page CROSS JOIN LATERAL (
                     SELECT count(DISTINCT s.subject_id) AS subjects,count(s.subject_id) AS examples
                     FROM subject_example e LEFT JOIN subject s ON s.subject_id=e.subject_id
@@ -591,19 +593,30 @@ class SubjectManagement:
                 query = f"""WITH grouped AS (
                     SELECT sa.source_id,sa.source_page_url,count(DISTINCT s.subject_id) AS subjects,
                         count(s.subject_id) AS examples,(extract(epoch FROM sa.created_at)*1000000)::bigint AS created
+                        ,(sa.storage_kind IN ('managed','archive') AND sa.content_type='video/mp4' AND sa.object_name IS NOT NULL) AS has_stored_video
                     FROM source_asset sa LEFT JOIN subject_example e ON e.source_id=sa.source_id
                     LEFT JOIN subject s ON s.subject_id=e.subject_id AND s.merged_into_subject_id IS NULL
-                    WHERE {where} GROUP BY sa.source_id,sa.source_page_url,sa.created_at
+                    WHERE {where} GROUP BY sa.source_id,sa.source_page_url,sa.created_at,sa.storage_kind,sa.content_type,sa.object_name
                     HAVING {count_filter}
                 ), listed AS (SELECT *,{metric} AS metric FROM grouped)
                 SELECT source_id,source_page_url,subjects,examples,metric,
                     ARRAY(SELECT p.page_url FROM source_page_link p WHERE p.source_id=listed.source_id ORDER BY p.page_url)
+                    ,has_stored_video
                 FROM listed WHERE (%s::uuid IS NULL OR metric<%s OR (metric=%s AND source_id>%s::uuid))
                 ORDER BY metric DESC,source_id LIMIT %s"""
             cursor.execute(query, (*args, after_id, after_metric or 0, after_metric or 0, after_id, limit+1))
             rows=cursor.fetchall()
-            return {"sources":[{"source_id":str(r[0]),"page_url":r[1],"page_urls":list(r[5]),"subject_count":r[2],"example_count":r[3]} for r in rows[:limit]],
+            return {"sources":[{"source_id":str(r[0]),"page_url":r[1],"page_urls":list(r[5]),"subject_count":r[2],"example_count":r[3],"has_stored_video":r[6]} for r in rows[:limit]],
                     "next_cursor":next_browse_cursor(sort,rows[limit-1][4],rows[limit-1][0]) if len(rows)>limit else None}
+
+    def stored_video(self, source_id):
+        with self.transaction() as cursor:
+            cursor.execute("""SELECT object_bucket,object_name,object_generation
+                              FROM source_asset WHERE source_id=%s AND deleted_at IS NULL
+                              AND storage_kind IN ('managed','archive') AND content_type='video/mp4'
+                              AND object_bucket IS NOT NULL AND object_name IS NOT NULL
+                              AND object_generation IS NOT NULL""", (source_id,))
+            return cursor.fetchone()
 
     def sources(self, subject_id):
         with self.transaction() as cursor:
